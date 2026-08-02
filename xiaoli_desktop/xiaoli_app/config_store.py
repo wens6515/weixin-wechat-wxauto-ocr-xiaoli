@@ -98,6 +98,59 @@ def sync_workdir_to_tasks(cfg):
         return False
 
 
+def tianshu_global_config_path():
+    """天枢 CLI 全局配置：RIVET_HOME 优先，否则 %LOCALAPPDATA%\\.rivet\\config.json。"""
+    home = os.environ.get("RIVET_HOME", "").strip()
+    if home:
+        return os.path.join(home, "config.json")
+    return os.path.join(os.environ.get("LOCALAPPDATA", ""), ".rivet", "config.json")
+
+
+def grant_tasks_dir_to_tianshu(tasks_dir):
+    """把 tasks_dir 预授权给天枢 CLI（agent.permissions 目录授权）。
+
+    天枢 CLI 启动时 applyConfiguredPathGrants 应用 additionalReadDirs /
+    additionalWriteDirs（源码实测 bootstrapInteractiveSession）——即使 CLI
+    常驻固定工作目录（cwd 不变），也能读取任意位置的 tasks_dir，无人值守
+    全自动化不受目录位置限制。授权目录必须存在（CLI fail-closed 跳过
+    不存在的项），调用前确保 tasks_dir 已创建。
+
+    返回 (ok, changed)：ok=写入成功（或无需写）；changed=配置发生变更
+    （提示用户重启已打开的 CLI 使授权生效）。
+    """
+    tasks_dir = (tasks_dir or "").strip()
+    if not tasks_dir or not os.path.isdir(tasks_dir):
+        return False, False
+    cfg_path = tianshu_global_config_path()
+    if not os.path.isfile(cfg_path):
+        return False, False  # 未装/未初始化天枢 CLI——不擅自创建配置
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            cfg = {}
+        perms = cfg.setdefault("agent", {}).setdefault("permissions", {})
+        read_dirs = [str(x).strip() for x in (perms.get("additionalReadDirs") or [])
+                     if str(x).strip()]
+        write_dirs = [str(x).strip() for x in (perms.get("additionalWriteDirs") or [])
+                      if str(x).strip()]
+        changed = False
+        for lst in (read_dirs, write_dirs):
+            if tasks_dir not in lst:
+                lst.append(tasks_dir)
+                changed = True
+        perms["additionalReadDirs"] = read_dirs
+        perms["additionalWriteDirs"] = write_dirs
+        if changed:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+            logger.info(f"[配置] 天枢 CLI 已授权任务目录: {tasks_dir}")
+        return True, changed
+    except (OSError, ValueError) as e:
+        logger.warning(f"[配置] 天枢 CLI 授权目录写入失败: {e}")
+        return False, False
+
+
 def default_memory_file():
     """对话记忆默认存储位置。"""
     return os.path.join(default_data_dir(), "memory.json")
