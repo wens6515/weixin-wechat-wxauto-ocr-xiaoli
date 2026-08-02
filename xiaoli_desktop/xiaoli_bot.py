@@ -624,13 +624,22 @@ class AgentBot(WeChatBot):
         if task_info.get("msg_id"):
             self.dispatched_msg_ids.add(task_info["msg_id"])
         self._send_text("收到任务啦，正在处理中，稍等一下哦～", chat_name)
-        if self.tianshu_window_title:
-            ok = send_trigger_to_window(self.tianshu_window_title, self.tianshu_trigger_command)
+        # 唤起天枢：统一走 resolve_cli_window——tianshu_window_title 可能被
+        # 旧版本污染为桌面端「天枢 · Tianshu」，直接 send 会激活桌面端窗口。
+        # resolve 三级定位（手动配置→CLI 特征→启动后新增窗口），含桌面端排除。
+        try:
+            from xiaoli_app import setup as _setup
+            title, detail = _setup.resolve_cli_window(
+                {"tianshu_window_title": self.tianshu_window_title})
+            if not title:
+                logger.warning(f"[天枢] 未定位到 CLI 窗口（{detail}），任务已投递但未唤起")
+                return True
+            ok = send_trigger_to_window(title, self.tianshu_trigger_command)
             if not ok:
-                logger.error(f"[天枢] 唤起窗口失败: {self.tianshu_window_title}，任务 {task_id} 保留在 {os.path.join(self.tasks_dir, task_id)}")
+                logger.error(f"[天枢] 唤起窗口失败: {title}，任务 {task_id} 保留在 {os.path.join(self.tasks_dir, task_id)}")
                 self._send_text("天枢窗口没找到，不过任务已经记下了，处理完我会把结果发给你～", chat_name)
-        else:
-            logger.warning("[天枢] 未配置窗口标题，任务已投递但未唤起天枢")
+        except Exception as e:
+            logger.error(f"[天枢] 唤起异常: {e}，任务已投递")
         return True
 
     def _activate_wechat_window(self):
