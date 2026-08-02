@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -208,6 +209,53 @@ class TestApplyRole(unittest.TestCase):
                          "vision_model 必须剥离厂商前缀，否则 API 400")
         self.assertEqual(bot.file_model, "deepseek-reasoner",
                          "classify_model 必须剥离厂商前缀，否则 API 400")
+
+
+class TestTaskDispatchWindow(unittest.TestCase):
+    """任务投递后唤起天枢：tianshu_window_title 被污染为桌面端标题时，
+    必须走 resolve_cli_window 定位 CLI（npm 窗口），不得激活桌面端。"""
+
+    def _make_bot(self):
+        from xiaoli_bot import AgentBot
+        bot = AgentBot.__new__(AgentBot)
+        bot.tianshu_window_title = "天枢 · Tianshu"   # 旧版本污染的桌面端标题
+        bot.tianshu_trigger_command = "开始处理"
+        bot.tasks_dir = tempfile.mkdtemp(prefix="dispatch_")
+        bot.dispatched_msg_ids = set()
+        bot._sending_lock = False
+        bot._model_lock = threading.RLock()
+        return bot
+
+    def tearDown(self):
+        shutil.rmtree(getattr(self, "_tmp", ""), ignore_errors=True)
+
+    def test_dispatch_uses_cli_window_not_desktop(self):
+        import xiaoli_bot as xb
+        bot = self._make_bot()
+        self._tmp = bot.tasks_dir
+        sent = {"title": None}
+        wins = ["天枢 · Tianshu", "微信"]  # 桌面端在运行
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg):
+            wins.append("npm")  # CLI 启动后新增窗口
+            return True, "ok"
+
+        def fake_trigger(title, command, hold=0.5, enter_times=1):
+            sent["title"] = title
+            return True
+
+        from xiaoli_app import setup as _setup
+        with mock.patch.object(_setup, "_list_windows", side_effect=fake_list), \
+             mock.patch.object(_setup, "launch_tianshu", side_effect=fake_launch), \
+             mock.patch.object(xb, "send_trigger_to_window", side_effect=fake_trigger), \
+             mock.patch.object(bot, "_send_text", return_value=None), \
+             mock.patch.object(xb, "dispatch_task", return_value="T1"):
+            bot._dispatch_and_notify("测试群", "老王", "做一个贪吃蛇")
+        self.assertEqual(sent["title"], "npm",
+                         "任务唤起必须发给 CLI 窗口（npm），不得激活桌面端「天枢 · Tianshu」")
 
 
 if __name__ == "__main__":
