@@ -4,6 +4,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -235,7 +236,7 @@ class TestLaunchTianshu(unittest.TestCase):
         def fake_popen(cmd, **kw):
             started["cmd"] = cmd
             started["cwd"] = kw.get("cwd")
-            started["shell"] = kw.get("shell")
+            started["flags"] = kw.get("creationflags")
             return mock.Mock()
 
         cfg = {"tianshu_workdir": self.tmp,
@@ -246,9 +247,11 @@ class TestLaunchTianshu(unittest.TestCase):
             ok, detail = setup.launch_tianshu(cfg)
         self.assertTrue(ok, detail)
         self.assertEqual(started["cwd"], self.tmp, "应在 tianshu_workdir 下启动")
-        self.assertTrue(started["shell"], "必须 shell=True（Popen(list) 引号二次转义会启动失败）")
-        joined = str(started["cmd"]).lower()
-        self.assertIn('start "tianshu"', joined, f"窗口标题应为 Tianshu: {started['cmd']}")
+        flags = started.get("flags") or 0
+        self.assertTrue(flags & getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                        "应使用 CREATE_NEW_CONSOLE 开新控制台窗口")
+        joined = " ".join(str(x) for x in started["cmd"]).lower()
+        self.assertIn("title tianshu", joined, f"应设置窗口标题 Tianshu: {started['cmd']}")
         self.assertIn("rivet", joined, f"应启动 rivet CLI: {started['cmd']}")
         m.assert_called_once()
 
