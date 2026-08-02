@@ -197,6 +197,17 @@ class TestUiFixes(unittest.TestCase):
                       "表格选中行应有变色反馈")
         self.assertIn("QTableWidget::item:hover", APP_QSS)
 
+    def test_models_page_has_text_and_vision_sections(self):
+        """模型页应有独立的文字模型/图片模型配置区（小白单独设置）"""
+        from xiaoli_app.ui.pages import ModelsPage
+        ctx = AppContext()
+        ctx.cfg = {"providers": []}
+        mp = ModelsPage(ctx)
+        self.assertTrue(hasattr(mp, "cmb_text_provider"), "应有文字模型 provider 下拉")
+        self.assertTrue(hasattr(mp, "cmb_text_model"), "应有文字模型下拉")
+        self.assertTrue(hasattr(mp, "cmb_vision_provider"), "应有图片模型 provider 下拉")
+        self.assertTrue(hasattr(mp, "cmb_vision_model"), "应有图片模型下拉")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

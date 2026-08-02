@@ -248,6 +248,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "tianshu_download_url": "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main",
         "first_prompt_path": "",  # 空 = 用内置模板（build_first_prompt）；非空且文件存在时优先读文件
         "image_click_offset": [3, -5],  # 图片点击偏移（实测校准值，小白开箱即用；位置偏了再到设置页调）
+        "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
     }.items():
         if k not in cfg:
             cfg[k] = v

@@ -82,19 +82,30 @@ def check_environment(cfg):
             detail += f"；进程检测失败: {e}"
     out["wechat"] = {"ok": wechat_ok, "detail": detail}
 
-    # ---- 天枢：配置目录 → 自动探测 → 窗口 ----
+    # ---- 天枢：CLI(rivet) 或桌面端任一存在即就绪；配置目录 → 自动探测 → 窗口 ----
+    import shutil
+    rivet_ok = bool(shutil.which("rivet") or shutil.which("rivet.cmd"))
     tianshu_dir = (cfg.get("tianshu_install_dir") or "").strip()
     if tianshu_dir:
         # 显式指定安装目录：只认该目录（避免用户已配置却误判自动探测）
         exe = os.path.join(tianshu_dir, TIANSHU_EXE)
-        tianshu_ok = os.path.isfile(exe)
-        detail = f"已安装：{exe}" if tianshu_ok else f"未找到 {TIANSHU_EXE}：{tianshu_dir}"
+        desktop_ok = os.path.isfile(exe)
+        detail_desktop = f"桌面端：{exe}" if desktop_ok else f"桌面端未找到：{tianshu_dir}"
     else:
         found = detect_tianshu_dir()
         if found:
-            tianshu_ok, detail = True, f"已安装：{os.path.join(found, TIANSHU_EXE)}"
+            desktop_ok, detail_desktop = True, f"桌面端：{os.path.join(found, TIANSHU_EXE)}"
         else:
-            tianshu_ok, detail = False, f"未找到天枢（{TIANSHU_EXE}）"
+            desktop_ok, detail_desktop = False, f"桌面端未找到（{TIANSHU_EXE}）"
+    tianshu_ok = rivet_ok or desktop_ok
+    parts = []
+    if rivet_ok:
+        parts.append("CLI(rivet) ✓")
+    if desktop_ok:
+        parts.append(detail_desktop)
+    if not parts:
+        parts.append("未安装（CLI: npm install -g tianshu-tui；或桌面端一键安装）")
+    detail = "；".join(parts)
     tianshu_win = ""
     try:
         for name in _list_windows():
@@ -166,28 +177,29 @@ def detect_tianshu_dir():
 
 
 def launch_tianshu(cfg):
-    """启动天枢桌面端（未运行时）。返回 (ok, detail)。
+    """启动天枢 CLI（rivet）：在 tianshu_workdir 下开新 cmd 窗口（标题 Tianshu）运行 rivet。
 
-    定位：tianshu_install_dir 显式配置优先，否则自动探测常见目录。
-    启动：subprocess.Popen 拉起 exe（不等待退出）。
+    返回 (ok, detail)。rivet 命令经 shutil.which 定位（npm 全局安装 tianshu-tui）。
+    窗口标题固定 "Tianshu"——与 _list_windows 的"天枢/Tianshu"匹配逻辑兼容。
     """
+    import shutil
     import subprocess
-    install_dir = (cfg.get("tianshu_install_dir") or "").strip()
-    if install_dir:
-        # 显式配置只认该目录（与 check_environment 语义一致，避免误判自动探测）
-        exe = os.path.join(install_dir, TIANSHU_EXE)
-        if not os.path.isfile(exe):
-            return False, f"未找到天枢：{exe}"
-    else:
-        found = detect_tianshu_dir()
-        if not found:
-            return False, f"未找到天枢（{TIANSHU_EXE}），请先一键安装"
-        exe = os.path.join(found, TIANSHU_EXE)
+    rivet = shutil.which("rivet") or shutil.which("rivet.cmd")
+    if not rivet:
+        return False, "未找到 rivet 命令，请先执行：npm install -g tianshu-tui"
+    workdir = (cfg.get("tianshu_workdir") or "").strip() or os.path.expanduser("~")
     try:
-        subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
-        return True, f"已启动：{exe}"
+        os.makedirs(workdir, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        # start "Tianshu"：新窗口标题固定 Tianshu（窗口匹配用）；cmd /k 保持窗口不退出
+        subprocess.Popen(
+            ["cmd", "/c", "start", '"Tianshu"', "cmd", "/k", "rivet"],
+            cwd=workdir)
+        return True, f"天枢 CLI 已启动（{workdir}）"
     except OSError as e:
-        return False, f"启动天枢失败：{e}"
+        return False, f"启动天枢 CLI 失败：{e}"
 
 
 def find_tianshu_dir(root):

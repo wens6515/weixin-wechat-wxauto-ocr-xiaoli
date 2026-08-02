@@ -179,6 +179,10 @@ class HomePage(QWidget):
         self.lbl_state.setText(labels.get(state, state))
         if state == "error" and getattr(eng, "error", None):
             self.lbl_state.setText(f"初始化失败：{eng.error}")
+        # 初始化完成即自动触发首轮提示词流程（不依赖环境检测报告；幂等由 _prompt_done 守卫）
+        if (state == "initialized" and not self._prompt_done
+                and not self._prompt_running):
+            self._run_prompt_flow()
 
     # ---------- 环境检查 ----------
 
@@ -308,15 +312,15 @@ class HomePage(QWidget):
             except Exception:
                 pass
         if not title:
-            # 天枢未运行 → 自动拉起并等待窗口出现（最多 15 秒）
+            # 天枢 CLI 未运行 → 自动拉起，等待初始化完成（8 秒）再找窗口
             ok_launch, detail = setup.launch_tianshu(cfg)
             if not ok_launch:
                 self._prompt_state = f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
                 self._prompt_running = False
                 return
+            time.sleep(8)  # CLI 启动 + 加载工作目录
             deadline = time.time() + 15
             while time.time() < deadline:
-                time.sleep(1)
                 try:
                     for name in setup._list_windows():
                         if "天枢" in name or "Tianshu" in name:
@@ -326,8 +330,9 @@ class HomePage(QWidget):
                     pass
                 if title:
                     break
+                time.sleep(1)
             if not title:
-                self._prompt_state = "天枢已启动但窗口未出现，请稍后点「重试发送」"
+                self._prompt_state = "天枢 CLI 已启动但窗口未出现，请稍后点「重试发送」"
                 self._prompt_running = False
                 return
         ok = setup.send_prompt_to_tianshu(text, title)
@@ -721,6 +726,35 @@ class ModelsPage(QWidget):
             preset_row.addWidget(b)
         preset_row.addStretch(1)
         lay.addLayout(preset_row)
+        # ---- 模型配置区：文字/图片模型独立选择（小白友好）----
+        g_model = QGroupBox("模型配置（文字 / 图片分开选）")
+        mform = QFormLayout(g_model)
+        self.cmb_text_provider = QComboBox()
+        self.cmb_text_model = QComboBox()
+        self.cmb_text_model.setEditable(True)
+        self.cmb_vision_provider = QComboBox()
+        self.cmb_vision_model = QComboBox()
+        self.cmb_vision_model.setEditable(True)
+        row_t = QHBoxLayout()
+        row_t.addWidget(self.cmb_text_provider, 1)
+        row_t.addWidget(self.cmb_text_model, 2)
+        row_v = QHBoxLayout()
+        row_v.addWidget(self.cmb_vision_provider, 1)
+        row_v.addWidget(self.cmb_vision_model, 2)
+        mform.addRow("文字模型（聊天）", row_t)
+        mform.addRow("图片模型（识图）", row_v)
+        tip_model = QLabel("提示：DeepSeek 不支持图片识别，图片模型请选智谱/通义等支持视觉的模型。")
+        tip_model.setWordWrap(True)
+        tip_model.setStyleSheet("color:#9CA3AF; font-size:12px;")
+        mform.addRow(tip_model)
+        self.btn_model_save = QPushButton("保存模型配置")
+        self.btn_model_save.clicked.connect(self._save_model_config)
+        mform.addRow(self.btn_model_save)
+        lay.addWidget(g_model)
+        self.cmb_text_provider.currentIndexChanged.connect(
+            lambda *_: self._fill_model_options(self.cmb_text_provider, self.cmb_text_model))
+        self.cmb_vision_provider.currentIndexChanged.connect(
+            lambda *_: self._fill_model_options(self.cmb_vision_provider, self.cmb_vision_model))
         lay.addWidget(self.cb_show_key)
         lay.addWidget(self.table)
         lay.addLayout(btn_row)
@@ -737,6 +771,74 @@ class ModelsPage(QWidget):
             self.table.setItem(r, 3, QTableWidgetItem(", ".join(p.get("models", []))))
             self.table.setItem(r, 4, QTableWidgetItem(p.get("id", "")))
         self._refresh_keys(self.cb_show_key.isChecked())
+        self._reload_model_config()
+
+    def _reload_model_config(self):
+        """模型配置区：provider 下拉 + 活跃卡当前选择回填。"""
+        provs = self.ctx.providers()
+        ids = [p.get("id", "") for p in provs]
+        for cb in (self.cmb_text_provider, self.cmb_vision_provider):
+            cur = cb.currentData()
+            cb.blockSignals(True)
+            cb.clear()
+            for pid in ids:
+                cb.addItem(pid, pid)
+            if cur in ids:
+                cb.setCurrentIndex(ids.index(cur))
+            cb.blockSignals(False)
+        card = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id()) or {}
+        self._set_prov(self.cmb_text_provider, ids, card.get("chat_provider", ""))
+        self._fill_model_options(self.cmb_text_provider, self.cmb_text_model)
+        self.cmb_text_model.setCurrentText(card.get("chat_model", ""))
+        self._set_prov(self.cmb_vision_provider, ids, card.get("vision_provider", ""))
+        self._fill_model_options(self.cmb_vision_provider, self.cmb_vision_model)
+        self.cmb_vision_model.setCurrentText(card.get("vision_model", ""))
+
+    @staticmethod
+    def _set_prov(cb, ids, val):
+        idx = ids.index(val) if val in ids else 0
+        cb.setCurrentIndex(idx)
+
+    def _fill_model_options(self, cb_prov, cb_model):
+        """模型下拉选项 = 所选 provider 的 models；未匹配时展示全部预设模型。"""
+        pid = cb_prov.currentData() or ""
+        models = []
+        for p in self.ctx.providers():
+            if p.get("id") == pid:
+                models = p.get("models") or []
+                break
+        if not models:
+            models = sorted({m for pp in config_store.PRESET_PROVIDERS
+                             for m in pp.get("models", [])})
+        cur = cb_model.currentText()
+        cb_model.blockSignals(True)
+        cb_model.clear()
+        cb_model.addItems(models)
+        if cur:
+            cb_model.setCurrentText(cur)
+        cb_model.blockSignals(False)
+
+    def _save_model_config(self):
+        cid = self.ctx.active_card_id()
+        card = card_store.get_card(self.ctx.cards_dir, cid)
+        if card is None:
+            QMessageBox.warning(self, "提示", "未找到活跃角色卡")
+            return
+        card["chat_provider"] = self.cmb_text_provider.currentData() or ""
+        card["chat_model"] = self.cmb_text_model.currentText().strip()
+        card["vision_provider"] = self.cmb_vision_provider.currentData() or ""
+        card["vision_model"] = self.cmb_vision_model.currentText().strip()
+        try:
+            card_store.save_card(self.ctx.cards_dir, card)
+        except ValueError as e:
+            QMessageBox.warning(self, "校验失败", str(e))
+            return
+        # 重新投影 + 引擎热应用
+        self.ctx.cfg = config_store.load_config_store(self.ctx.cfg_path, self.ctx.cards_dir)
+        if self.ctx.engine is not None:
+            self.ctx.engine.apply_role(card, self.ctx.providers())
+        self.refresh()
+        QMessageBox.information(self, "已保存", "模型配置已保存并应用")
 
     def _refresh_keys(self, show):
         mode = QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
