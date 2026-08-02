@@ -7,6 +7,9 @@ AppContext：引擎/总线/配置的轻量容器，页面与入口共享。
 # 全局视觉 tokens（QSS）：主色蓝、成功绿、警告橙、错误红；圆角 10px；8px 间距栅格
 APP_QSS = """
 * { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
+/* 深色系统主题下 palette.WindowText 为白色——必须显式给文字控件设色，否则白字隐形 */
+QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
+QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar { color: #374151; }
 QMainWindow, QWidget { background: #F5F7FA; }
 QTabWidget::pane { border: none; background: #F5F7FA; }
 QTabBar::tab { background: transparent; padding: 8px 18px; margin-right: 4px;
