@@ -382,9 +382,16 @@ class CardsPage(QWidget):
         self.cb_chat_provider = QComboBox()
         self.cb_vision_provider = QComboBox()
         self.cb_classify_provider = QComboBox()
-        self.ed_chat_model = QLineEdit()
-        self.ed_vision_model = QLineEdit()
-        self.ed_classify_model = QLineEdit()
+        # 模型输入：可编辑下拉（选项来自所选 provider 的 models；未选时展示全部预设模型）
+        self.ed_chat_model = QComboBox()
+        self.ed_chat_model.setEditable(True)
+        self.ed_vision_model = QComboBox()
+        self.ed_vision_model.setEditable(True)
+        self.ed_classify_model = QComboBox()
+        self.ed_classify_model.setEditable(True)
+        self.cb_chat_provider.currentIndexChanged.connect(self._refresh_model_options)
+        self.cb_vision_provider.currentIndexChanged.connect(self._refresh_model_options)
+        self.cb_classify_provider.currentIndexChanged.connect(self._refresh_model_options)
         self.sp_temp = QDoubleSpinBox()
         self.sp_temp.setRange(0, 2)
         self.sp_temp.setSingleStep(0.1)
@@ -471,9 +478,10 @@ class CardsPage(QWidget):
         self._set_cb(self.cb_chat_provider, card.get("chat_provider", ""))
         self._set_cb(self.cb_vision_provider, card.get("vision_provider", ""))
         self._set_cb(self.cb_classify_provider, card.get("classify_provider", ""))
-        self.ed_chat_model.setText(card.get("chat_model", ""))
-        self.ed_vision_model.setText(card.get("vision_model", ""))
-        self.ed_classify_model.setText(card.get("classify_model", ""))
+        self._refresh_model_options()
+        self.ed_chat_model.setCurrentText(card.get("chat_model", ""))
+        self.ed_vision_model.setCurrentText(card.get("vision_model", ""))
+        self.ed_classify_model.setCurrentText(card.get("classify_model", ""))
         self.sp_temp.setValue(float(card.get("temperature", 0.7)))
         self.sp_topp.setValue(float(card.get("top_p", 0.9)))
         self.sp_vtemp.setValue(float(card.get("vision_temp", 0.7)))
@@ -485,6 +493,29 @@ class CardsPage(QWidget):
         idx = cb.findData(val)
         cb.setCurrentIndex(idx if idx >= 0 else 0)
 
+    def _refresh_model_options(self, *_):
+        """模型下拉选项 = 对应 provider 的 models；未选 provider 时展示全部预设模型。"""
+        pairs = ((self.ed_chat_model, self.cb_chat_provider),
+                 (self.ed_vision_model, self.cb_vision_provider),
+                 (self.ed_classify_model, self.cb_classify_provider))
+        for cb, cb_prov in pairs:
+            pid = cb_prov.currentData() or ""
+            models = []
+            for p in self.ctx.providers():
+                if p.get("id") == pid:
+                    models = p.get("models") or []
+                    break
+            if not models:
+                models = sorted({m for pp in config_store.PRESET_PROVIDERS
+                                 for m in pp.get("models", [])})
+            cur_text = cb.currentText()
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItems(models)
+            if cur_text:
+                cb.setCurrentText(cur_text)
+            cb.blockSignals(False)
+
     def _collect(self):
         card = {
             "id": self._editing_id or "",
@@ -493,11 +524,11 @@ class CardsPage(QWidget):
             "nickname": self.ed_nick.text().strip(),
             "system_prompt": self.ed_prompt.toPlainText().strip(),
             "chat_provider": self.cb_chat_provider.currentData() or "",
-            "chat_model": self.ed_chat_model.text().strip(),
+            "chat_model": self.ed_chat_model.currentText().strip(),
             "vision_provider": self.cb_vision_provider.currentData() or "",
-            "vision_model": self.ed_vision_model.text().strip(),
+            "vision_model": self.ed_vision_model.currentText().strip(),
             "classify_provider": self.cb_classify_provider.currentData() or "",
-            "classify_model": self.ed_classify_model.text().strip(),
+            "classify_model": self.ed_classify_model.currentText().strip(),
             "temperature": self.sp_temp.value(),
             "top_p": self.sp_topp.value(),
             "vision_temp": self.sp_vtemp.value(),
@@ -513,9 +544,10 @@ class CardsPage(QWidget):
         self.ed_emoji.clear()
         self.ed_nick.setText("小漓")
         self.ed_prompt.clear()
-        self.ed_chat_model.clear()
-        self.ed_vision_model.clear()
-        self.ed_classify_model.clear()
+        self.ed_chat_model.clearEditText()
+        self.ed_vision_model.clearEditText()
+        self.ed_classify_model.clearEditText()
+        self._refresh_model_options()
         self.sp_temp.setValue(0.7)
         self.sp_topp.setValue(0.9)
         self.sp_vtemp.setValue(0.7)
@@ -650,6 +682,16 @@ class ModelsPage(QWidget):
         self.btn_test.clicked.connect(self._test)
         for b in (self.btn_add, self.btn_del, self.btn_save, self.btn_test):
             btn_row.addWidget(b)
+        # 快捷添加主流 Provider（一键填入 base_url + 常用模型，只填 key 即可）
+        preset_row = QHBoxLayout()
+        preset_row.addWidget(QLabel("快捷添加："))
+        for p in config_store.PRESET_PROVIDERS:
+            b = QPushButton(p["name"])
+            b.setToolTip(f"{p['base_url']}\n常用模型：{', '.join(p['models'])}")
+            b.clicked.connect(lambda checked=False, pp=p: self._add_preset(pp))
+            preset_row.addWidget(b)
+        preset_row.addStretch(1)
+        lay.addLayout(preset_row)
         lay.addWidget(self.cb_show_key)
         lay.addWidget(self.table)
         lay.addLayout(btn_row)
@@ -697,6 +739,20 @@ class ModelsPage(QWidget):
         r = self.table.rowCount()
         self.table.insertRow(r)
         self.table.setItem(r, 4, QTableWidgetItem(f"p{r + 1}"))
+
+    def _add_preset(self, preset):
+        """一键添加预设主流 Provider（按 id 去重，api_key 留空待填）。"""
+        provs = self._collect_providers()
+        if any(p.get("id") == preset["id"] for p in provs):
+            QMessageBox.information(self, "已存在", f"{preset['name']} 已在列表中，直接填 API Key 即可")
+            return
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        self.table.setItem(r, 0, QTableWidgetItem(preset["name"]))
+        self.table.setItem(r, 1, QTableWidgetItem(preset["base_url"]))
+        self.table.setItem(r, 2, QTableWidgetItem(""))
+        self.table.setItem(r, 3, QTableWidgetItem(", ".join(preset["models"])))
+        self.table.setItem(r, 4, QTableWidgetItem(preset["id"]))
 
     def _del_row(self):
         r = self.table.currentRow()

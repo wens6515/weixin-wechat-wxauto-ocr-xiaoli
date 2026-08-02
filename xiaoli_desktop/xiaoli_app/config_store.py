@@ -23,6 +23,47 @@ logger = logging.getLogger("xiaoli")
 
 DEFAULT_CARD_ID = "xiaoli"
 
+# 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。
+# 模型 id 沿用"厂商:模型"前缀格式（与用户既有 config 一致，引擎直接透传）。
+PRESET_PROVIDERS = [
+    {"id": "deepseek", "name": "DeepSeek 深度求索",
+     "base_url": "https://api.deepseek.com/v1/chat/completions",
+     "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-reasoner"]},
+    {"id": "zhipu", "name": "智谱 GLM",
+     "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+     "models": ["zhipu:glm-4.6", "zhipu:glm-4.6v"]},
+    {"id": "qwen", "name": "通义千问",
+     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+     "models": ["qwen:qwen-plus", "qwen:qwen-vl-plus"]},
+    {"id": "kimi", "name": "月之暗面 Kimi",
+     "base_url": "https://api.moonshot.cn/v1/chat/completions",
+     "models": ["kimi:kimi-k2"]},
+    {"id": "doubao", "name": "豆包（火山引擎）",
+     "base_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+     "models": ["doubao:doubao-seed-1.6"]},
+]
+
+
+def default_data_dir():
+    """默认数据目录：%USERPROFILE%\\小漓（无 D:\\ 依赖，小白新机器可用）。
+
+    取不到 USERPROFILE 时退回当前目录。
+    """
+    home = os.environ.get("USERPROFILE", "").strip()
+    if home:
+        return os.path.join(home, "小漓")
+    return os.path.abspath(".")
+
+
+def default_tasks_dir():
+    """任务桥默认目录（小漓 ↔ 天枢交换任务文件）。"""
+    return os.path.join(default_data_dir(), "wxauto")
+
+
+def default_memory_file():
+    """对话记忆默认存储位置。"""
+    return os.path.join(default_data_dir(), "memory.json")
+
 # 旧字段投影所需的完整键集合（引擎 WeChatBot.__init__ 消费方）
 _PROJECT_KEYS = (
     "ai_api_url", "ai_api_key", "chat_model",
@@ -36,7 +77,13 @@ CARD_TEMPLATE = {
     "id": DEFAULT_CARD_ID,
     "name": "小漓",
     "emoji": "🐟",
-    "system_prompt": "",
+    # 通用小漓人设（发布安全：不含任何真实姓名/学校/群组信息）
+    "system_prompt": (
+        "你叫小漓，是一个很会聊天、很可爱的人。你是用户创建的微信 AI 助手，陪用户聊天、帮忙处理任务。\n"
+        "每次说话的风格要有变化，不要固定。注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西。\n"
+        "说话的时候不要用 emoji，用颜文字表情。\n"
+        "回复要简短，不要虚构不知道的事情；如果发消息的人你不认识，那就是你的新朋友，友好地回应对方。"
+    ),
     "nickname": "小漓",
     "chat_provider": "default",
     "chat_model": "",
@@ -106,9 +153,8 @@ def migrate_config(cfg, cards_dir):
     }]
     out["providers"] = providers
 
-    # 从旧字段建默认卡
+    # 从旧字段建默认卡（人设用模板通用版，不抄旧 system_prompt——防个人化信息随迁移进发布卡）
     card = dict(CARD_TEMPLATE)
-    card["system_prompt"] = str(out.get("system_prompt", ""))
     card["nickname"] = str(out.get("bot_nickname", "小漓"))
     card["chat_model"] = str(out.get("chat_model", ""))
     card["vision_model"] = str(out.get("vision_model", ""))
