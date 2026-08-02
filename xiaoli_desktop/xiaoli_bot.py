@@ -389,17 +389,38 @@ def poll_outbox(tasks_dir, deliver, sent_dir=None):
     return handled
 
 
-def has_active_tasks(tasks_dir):
+def has_active_tasks(tasks_dir, stale_after=7200):
     """任务目录顶层是否存在尚未归档的任务（天枢处理中 / 已完成待回传 / 回传失败重试中）。
     只有含 task.json 的子目录才算任务（排除 sent\\ 与 attachments 等非任务目录）。
-    全部任务归档进 sent\\ 后返回 False —— 这是恢复消息监听的判据"""
+    全部任务归档进 sent\\ 后返回 False —— 这是恢复消息监听的判据。
+
+    stale_after：卡死任务兜底——task.json 创建超过该秒数（默认 2 小时）仍无
+    result.json，视为天枢未处理/失联的死任务，不再阻塞消息轮询（否则一次
+    投递失败会让 bot 从此永不监听微信消息）。
+    """
     if not os.path.isdir(tasks_dir):
         return False
+    now = time.time()
     for name in os.listdir(tasks_dir):
         task_dir = os.path.join(tasks_dir, name)
         if os.path.isdir(task_dir) and name != "sent":
-            if os.path.isfile(os.path.join(task_dir, "task.json")):
-                return True
+            tj = os.path.join(task_dir, "task.json")
+            if not os.path.isfile(tj):
+                continue
+            if os.path.isfile(os.path.join(task_dir, "result.json")):
+                continue  # 已完成待回传：仍算活跃（成果未发回微信前不恢复监听）
+            try:
+                with open(tj, "r", encoding="utf-8") as f:
+                    info = json.load(f)
+                created = float(info.get("created_at") or 0)
+            except (OSError, ValueError, TypeError):
+                created = 0
+            if created and (now - created) > stale_after:
+                logger.warning(
+                    f"[任务桥] 任务 {name} 卡死超过 {stale_after}s 未完成，"
+                    "不再阻塞消息轮询（可在任务页查看/清理）")
+                continue
+            return True
     return False
 
 

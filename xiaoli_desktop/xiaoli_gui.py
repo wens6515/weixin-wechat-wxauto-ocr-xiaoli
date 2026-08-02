@@ -25,6 +25,29 @@ from xiaoli_app.ui.main_window import MainWindow
 from xiaoli_app.ui.tray import TrayIcon
 
 
+def default_wechat_files_dir():
+    """微信文件接收目录默认值：Documents\\WeChat Files 下含 FileStorage\\File 的目录。
+
+    微信 4.x 路径形如 %USERPROFILE%\\Documents\\xwechat_files\\<wxid>_<hash>\\msg\\file；
+    找不到时退回 Documents\\WeChat Files（用户可手动浏览修正）。
+    """
+    docs = os.path.join(os.path.expanduser("~"), "Documents")
+    candidates = []
+    for base in (os.path.join(docs, "xwechat_files"), os.path.join(docs, "WeChat Files")):
+        if os.path.isdir(base):
+            try:
+                for sub in os.listdir(base):
+                    p = os.path.join(base, sub)
+                    if os.path.isdir(p):
+                        candidates.append(p)
+            except OSError:
+                pass
+            candidates.append(base)
+    if candidates:
+        return candidates[0]
+    return os.path.join(docs, "WeChat Files")
+
+
 class FirstRunDialog(QDialog):
     """首次启动引导：选择任务工作目录与记忆存储位置（默认 %USERPROFILE%\\小漓）。"""
 
@@ -34,27 +57,36 @@ class FirstRunDialog(QDialog):
         self.setMinimumWidth(560)
         form = QFormLayout(self)
         tip = QLabel(
-            "小漓需要两个文件夹存放工作文件：\n"
+            "小漓需要三个文件夹存放工作文件：\n"
             "任务工作目录：小漓与天枢交换任务/成果文件的地方\n"
+            "微信文件目录：微信收到的文件（图片/文档）下载位置，用于识别任务附件\n"
             "记忆存储位置：对话记忆文件（memory.json）\n"
             "建议保持默认位置，直接点击「开始使用」即可。")
         tip.setWordWrap(True)
         form.addRow(tip)
         self.ed_tasks = QLineEdit(config_store.default_tasks_dir())
+        self.ed_files = QLineEdit(default_wechat_files_dir())
         self.ed_memory = QLineEdit(config_store.default_memory_file())
         self.ed_tasks.setReadOnly(True)
+        self.ed_files.setReadOnly(True)
         self.ed_memory.setReadOnly(True)
         btn_tasks = QPushButton("浏览…")
         btn_tasks.clicked.connect(lambda: self._pick(self.ed_tasks, True))
+        btn_files = QPushButton("浏览…")
+        btn_files.clicked.connect(lambda: self._pick(self.ed_files, True))
         btn_mem = QPushButton("浏览…")
         btn_mem.clicked.connect(lambda: self._pick(self.ed_memory, False))
         row_t = QHBoxLayout()
         row_t.addWidget(self.ed_tasks, 1)
         row_t.addWidget(btn_tasks)
+        row_f = QHBoxLayout()
+        row_f.addWidget(self.ed_files, 1)
+        row_f.addWidget(btn_files)
         row_m = QHBoxLayout()
         row_m.addWidget(self.ed_memory, 1)
         row_m.addWidget(btn_mem)
         form.addRow("任务工作目录", row_t)
+        form.addRow("微信文件目录", row_f)
         form.addRow("记忆存储位置", row_m)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("开始使用")
@@ -77,6 +109,7 @@ class FirstRunDialog(QDialog):
     def result_cfg(self):
         return {
             "tasks_dir": self.ed_tasks.text().strip() or config_store.default_tasks_dir(),
+            "file_storage_path": self.ed_files.text().strip() or default_wechat_files_dir(),
             "memory_file": self.ed_memory.text().strip() or config_store.default_memory_file(),
         }
 
