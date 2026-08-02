@@ -3,6 +3,8 @@
 
 AppContext：引擎/总线/配置的轻量容器，页面与入口共享。
 """
+import os
+import sys
 
 # 全局视觉 tokens（QSS）：渐变主色蓝紫、圆角 10px、选中/悬停反馈、8px 间距栅格
 APP_QSS = """
@@ -69,12 +71,25 @@ QStatusBar { background: #EEF2F9; color: #6B7280; }
 """
 
 
+def app_base_dir():
+    """配置/卡片存储的稳定基目录。
+
+    PyInstaller 打包（frozen）→ exe 所在目录（dist\\小漓，与现有 config.json 同处）；
+    源码运行 → 项目根（xiaoli_desktop）。不随 cwd 漂移——cwd 依赖会让
+    「保存的模型配置下次打开丢失」（双击 exe / 固定图标 / 快捷方式启动 cwd 各异）。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 class AppContext:
     """页面与引擎共享的应用上下文。"""
 
     def __init__(self):
-        self.cfg_path = "config.json"
-        self.cards_dir = "cards"
+        base = app_base_dir()
+        self.cfg_path = os.path.join(base, "config.json")
+        self.cards_dir = os.path.join(base, "cards")
         self.cfg = None          # 最新 config（含投影字段）
         self.engine = None       # EngineThread
         self.bus = None          # EngineBus
