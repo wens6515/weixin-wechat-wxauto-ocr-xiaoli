@@ -193,10 +193,12 @@ def launch_tianshu(cfg):
     except OSError:
         pass
     try:
-        # start "Tianshu"：新窗口标题固定 Tianshu（窗口匹配用）；cmd /k 保持窗口不退出
+        # start "Tianshu"：新窗口标题固定 Tianshu（窗口匹配用）；cmd /k 保持窗口不退出。
+        # 必须 shell=True + 字符串：Popen(list) 会对引号二次转义导致 cmd 解析错乱
+        # （实测报错"系统找不到文件 \Tianshu\"，窗口未打开）。
         subprocess.Popen(
-            ["cmd", "/c", "start", '"Tianshu"', "cmd", "/k", "rivet"],
-            cwd=workdir)
+            'cmd /c start "Tianshu" cmd /k rivet',
+            cwd=workdir, shell=True)
         return True, f"天枢 CLI 已启动（{workdir}）"
     except OSError as e:
         return False, f"启动天枢 CLI 失败：{e}"
