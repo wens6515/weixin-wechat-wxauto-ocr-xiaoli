@@ -6,6 +6,7 @@
 2. 构造 EngineThread（不启动线程，等首页「初始化」按钮触发 initialize）
 3. 托盘 + 主窗口；QTimer 拉取总线事件刷新界面
 """
+import json
 import os
 import sys
 
@@ -48,11 +49,39 @@ def default_wechat_files_dir():
     return os.path.join(docs, "WeChat Files")
 
 
-class FirstRunDialog(QDialog):
-    """首次启动引导：选择任务工作目录与记忆存储位置（默认 %USERPROFILE%\\小漓）。"""
+def needs_first_run(cfg_path, cfg):
+    """首次启动判定：config 文件不存在，或任务工作目录/微信文件目录未配置。
 
-    def __init__(self, parent=None):
+    旧版本生成的 config.json 可能已存在但没有 tasks_dir/file_storage_path
+    （或为空字符串）——此时任务桥目录与附件识别目录都是空的，必须引导用户
+    选择，否则升级后任务功能静默不可用。
+    cfg 未提供或字段缺失时回读 config 文件本身判断（文件是事实来源）。
+    """
+    if not os.path.isfile(cfg_path):
+        return True
+    if cfg is None or not str(cfg.get("tasks_dir") or "").strip() \
+            or not str(cfg.get("file_storage_path") or "").strip():
+        # cfg 缺失/字段为空 → 回读文件（可能调用方只传了路径）
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                disk = json.load(f)
+            if isinstance(disk, dict):
+                return not str(disk.get("tasks_dir") or "").strip() or \
+                    not str(disk.get("file_storage_path") or "").strip()
+        except (OSError, ValueError):
+            pass
+    return False
+
+
+class FirstRunDialog(QDialog):
+    """首次启动引导：选择任务工作目录、微信文件目录与记忆存储位置。
+
+    已有配置（如 memory_file）预填保留，只让用户补缺失/确认目录。
+    """
+
+    def __init__(self, parent=None, cfg=None):
         super().__init__(parent)
+        cfg = cfg or {}
         self.setWindowTitle("欢迎使用小漓")
         self.setMinimumWidth(560)
         form = QFormLayout(self)
@@ -64,9 +93,12 @@ class FirstRunDialog(QDialog):
             "建议保持默认位置，直接点击「开始使用」即可。")
         tip.setWordWrap(True)
         form.addRow(tip)
-        self.ed_tasks = QLineEdit(config_store.default_tasks_dir())
-        self.ed_files = QLineEdit(default_wechat_files_dir())
-        self.ed_memory = QLineEdit(config_store.default_memory_file())
+        self.ed_tasks = QLineEdit(str(cfg.get("tasks_dir") or "").strip()
+                                  or config_store.default_tasks_dir())
+        self.ed_files = QLineEdit(str(cfg.get("file_storage_path") or "").strip()
+                                  or default_wechat_files_dir())
+        self.ed_memory = QLineEdit(str(cfg.get("memory_file") or "").strip()
+                                   or config_store.default_memory_file())
         self.ed_tasks.setReadOnly(True)
         self.ed_files.setReadOnly(True)
         self.ed_memory.setReadOnly(True)
@@ -140,9 +172,10 @@ def main():
 
     # 1. 配置：加载/迁移/投影（不连微信、不启动引擎）
     ctx.cfg = config_store.load_config_store(ctx.cfg_path, ctx.cards_dir)
-    # 首次启动（config 文件不存在）→ 引导选择工作目录与记忆位置，避免默认 D:\ 盘缺失崩溃
-    if not os.path.isfile(ctx.cfg_path):
-        dlg = FirstRunDialog()
+    # 首次启动（config 文件不存在）或任务目录/微信文件目录未配置 → 引导选择，
+    # 避免默认 D:\ 盘缺失崩溃、以及旧 config 升级后任务桥目录为空静默失效
+    if needs_first_run(ctx.cfg_path, ctx.cfg):
+        dlg = FirstRunDialog(cfg=ctx.cfg)
         dlg.exec()
         ctx.cfg.update(dlg.result_cfg())
         try:
