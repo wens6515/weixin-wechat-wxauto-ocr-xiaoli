@@ -27,3 +27,6 @@ dist/
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# uiautomation 运行时日志
+@AutomationLog.txt
