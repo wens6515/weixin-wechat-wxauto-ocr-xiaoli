@@ -14,10 +14,10 @@ import pyautogui
 from wechat_bot import WeChatBot, Controller, load_config, logger
 from wxauto4.msgs.mtype import ImageMessage, FileMessage, TimeMessage, SystemMessage
 
-if sys.stdout.encoding != "utf-8":
+if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except:
+    except Exception:
         pass
 
 # =====================================================================
