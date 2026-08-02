@@ -178,10 +178,12 @@ def detect_tianshu_dir():
 
 
 def launch_tianshu(cfg):
-    """启动天枢 CLI（rivet）：在 tianshu_workdir 下开新 cmd 窗口（标题 Tianshu）运行 rivet。
+    """启动天枢 CLI（rivet）：在 tianshu_workdir 下开新 cmd 窗口运行 rivet。
 
     返回 (ok, detail)。rivet 命令经 shutil.which 定位（npm 全局安装 tianshu-tui）。
-    窗口标题固定 "Tianshu"——与 _list_windows 的"天枢/Tianshu"匹配逻辑兼容。
+    窗口标题保持 CLI 自然值（实测为 npm prefix，含 npm）——不得用 title 设为
+    "Tianshu"：那会与 _is_desktop 的 tianshu 关键词冲突，把 CLI 误判为桌面端，
+    首轮提示词发不出去或误发到桌面端窗口。
     """
     import shutil
     import subprocess
@@ -194,12 +196,13 @@ def launch_tianshu(cfg):
     except OSError:
         pass
     try:
-        # CREATE_NEW_CONSOLE：Windows 原生新开控制台窗口（可靠）；
-        # title Tianshu 设置窗口标题（窗口匹配用）；& 顺序执行 rivet；cmd /k 保持窗口。
+        # CREATE_NEW_CONSOLE：Windows 原生新开控制台窗口（可靠）；cmd /k 保持窗口。
+        # 窗口标题保持 CLI 自然值（实测为 npm prefix，含 npm）——不设 title Tianshu，
+        # 避免与 _is_desktop 的 tianshu 关键词冲突（CLI 被误判桌面端、提示词误发）。
         # 实测：Popen(list) 引号二次转义 → "系统找不到文件 \Tianshu\"；
         #       shell=True 字符串在 python 进程下也不弹窗（仅 Git Bash 手工调用有效）。
         subprocess.Popen(
-            ["cmd", "/k", "title Tianshu & rivet"],
+            ["cmd", "/k", "rivet"],
             cwd=workdir,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         return True, f"天枢 CLI 已启动（{workdir}）"
@@ -283,9 +286,12 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
 
     title 非空 = 找到可发送的 CLI 窗口；空 = detail 含失败原因（launch 失败/窗口未出现）。
     三级定位，逐级降级：
-    1. 配置的 tianshu_window_title（排除桌面端污染值——标题含中文「天枢」的窗口是桌面端）；
-    2. CLI 特征窗口（标题含 npm/rivet/Tianshu 且非桌面端）；
-    3. 启动 CLI（rivet）后按新增窗口匹配（CLI 窗口标题可能是 npm prefix 等不可预测值）。
+    1. 配置的 tianshu_window_title（排除桌面端污染值——标题含 tianshu/天枢 的窗口是桌面端）；
+       命中时返回匹配到的实际窗口标题（而非配置子串，避免 find_window_by_title 子串误选）；
+    2. CLI 特征窗口（标题含 npm/rivet 且非桌面端——CLI 窗口标题实测为 npm prefix；
+       Tianshu/天枢 是桌面端特征，不在此列）；
+    3. 启动 CLI（rivet）后按新增窗口匹配（过滤桌面端；新窗口标题与既有窗口重复时
+       按窗口数增加兜底选 CLI 特征窗口，宁缺毋滥——不得把提示词发给桌面端）。
     """
     list_windows_fn = list_windows_fn or _list_windows
     launch_fn = launch_fn or launch_tianshu
@@ -298,13 +304,15 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
         纯英文标题（Tianshu）漏判会被第 2 级 CLI 特征误选，首轮提示词发错目标。"""
         return "天枢" in name or "tianshu" in name.lower()
 
-    # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）
+    # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）。
+    #    返回匹配到的实际窗口标题 name（而非配置子串 t）——find_window_by_title
+    #    按子串匹配，返回宽泛子串（如 "npm"）会选中第一个含该词的无关窗口。
     t = (cfg.get("tianshu_window_title") or "").strip()
     if t and not _is_desktop(t):
         try:
             for name in list_windows_fn():
                 if t.lower() in name.lower() and not _is_desktop(name):
-                    return t, ""
+                    return name, ""
         except Exception:
             pass
 
@@ -332,15 +340,18 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
     for _ in range(15):
         try:
             wins = set(list_windows_fn())
-            # 新增窗口 = 刚启动的 CLI（桌面端启动前已存在，在 before_wins 内；
-            # 不再用 _is_desktop 排除——CLI 窗口标题实测可能是 npm prefix 或 Tianshu）
-            new_wins = sorted(wins - before_wins)
-            if new_wins:
-                for n in new_wins:
-                    low = n.lower()
-                    if "npm" in low or "rivet" in low:
-                        return n, ""
-                return new_wins[0], ""
+            # 新增窗口里过滤桌面端——慢启动的桌面端（天枢/Tianshu）绝不可选，
+            # 否则首轮提示词又发到桌面端窗口（commit c67b995/d0b4ca6 的场景）。
+            new_wins = [n for n in sorted(wins - before_wins) if not _is_desktop(n)]
+            if not new_wins and len(wins) > len(before_wins):
+                # 新 CLI 窗口标题与既有窗口重复（CLI 标题固定为 npm prefix）→ 差集为空；
+                # 但窗口数增加了，从全集中选 CLI 特征窗口（两个都是 CLI，发哪个均可）。
+                new_wins = [n for n in wins if not _is_desktop(n)]
+            for n in new_wins:
+                low = n.lower()
+                if "npm" in low or "rivet" in low:
+                    return n, ""
+            # 新增窗口全为桌面端/无关窗口 → 不返回，继续轮询（宁缺毋滥，不得误发）
         except Exception:
             pass
         sleep_fn(1)

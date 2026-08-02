@@ -260,7 +260,8 @@ class TestLaunchTianshu(unittest.TestCase):
         self.assertTrue(flags & getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                         "应使用 CREATE_NEW_CONSOLE 开新控制台窗口")
         joined = " ".join(str(x) for x in started["cmd"]).lower()
-        self.assertIn("title tianshu", joined, f"应设置窗口标题 Tianshu: {started['cmd']}")
+        self.assertNotIn("tianshu", joined,
+                         f"不得把 CLI 窗口标题设为 Tianshu（与 _is_desktop 冲突→CLI 被误判桌面端）: {started['cmd']}")
         self.assertIn("rivet", joined, f"应启动 rivet CLI: {started['cmd']}")
         m.assert_called_once()
 
@@ -371,6 +372,26 @@ class TestResolveCliWindow(unittest.TestCase):
             launch_fn=fake_launch, sleep_fn=lambda s: None)
         self.assertTrue(called["launch"], "纯英文桌面端标题不应阻止 CLI 启动")
         self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非纯英文桌面端")
+
+    def test_never_sends_to_new_desktop_window(self):
+        # RED 复现：CLI 启动后新增的全是桌面端窗口（桌面端慢启动、CLI 未出现）——
+        # 绝不得把提示词发给桌面端；第 3 级必须过滤桌面端并继续轮询，
+        # 最终报「窗口未出现」而非把首轮提示词发到桌面端窗口。
+        cfg = {}
+        wins = ["微信"]
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            wins.append("天枢 · Tianshu")  # 桌面端慢启动，CLI 未出现
+            return True, "ok"
+
+        title, detail = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertEqual(title, "", "新增窗口全是桌面端时不得把提示词发给桌面端")
+        self.assertIn("未出现", detail)
 
 
 class TestSendPrompt(unittest.TestCase):

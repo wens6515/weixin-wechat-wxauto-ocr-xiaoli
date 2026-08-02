@@ -574,13 +574,14 @@ class AgentBot(WeChatBot):
         端点投影：聊天/视觉按各自 provider 解析 base_url + key（config_store.project_config）。
         """
         from xiaoli_app.config_store import project_config
+        from wechat_bot import strip_model_prefix
         proj = project_config({"providers": providers or []}, card)
         with self._model_lock:
             self.system_prompt = card.get("system_prompt", self.system_prompt)
             self.nickname = card.get("nickname") or self.nickname
-            self.chat_model = card.get("chat_model") or self.chat_model
-            self.vision_model = card.get("vision_model") or self.vision_model
-            self.file_model = card.get("classify_model") or self.file_model
+            self.chat_model = strip_model_prefix(card.get("chat_model") or self.chat_model)
+            self.vision_model = strip_model_prefix(card.get("vision_model") or self.vision_model)
+            self.file_model = strip_model_prefix(card.get("classify_model") or self.file_model)
             self.chat_temperature = float(card.get("temperature", self.chat_temperature))
             self.chat_top_p = float(card.get("top_p", self.chat_top_p))
             self.vision_temp = float(card.get("vision_temp", self.vision_temp))

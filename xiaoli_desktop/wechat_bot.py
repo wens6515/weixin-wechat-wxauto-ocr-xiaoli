@@ -13,6 +13,17 @@ import tempfile
 from wxauto4 import WeChat
 from wxauto4.msgs.mtype import ImageMessage, FileMessage
 
+
+def strip_model_prefix(model):
+    """剥离模型名的厂商前缀：'deepseek:deepseek-v4-flash' → 'deepseek-v4-flash'。
+
+    配置/卡片里模型 id 沿用「厂商:模型」前缀格式（UI 分组展示用），
+    但 API 只认纯模型名——透传带前缀的 model 会得到 400。
+    """
+    if not model or ":" not in model:
+        return model
+    return model.split(":", 1)[-1]
+
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
 
 # 清空旧日志，确保每次运行都是新的
@@ -81,10 +92,10 @@ class WeChatBot:
         # 视觉模型可指向独立端点（角色卡跨 provider 时由 config_store 投影生成）
         self.vision_api_url = cfg.get("vision_api_url") or self.api_url
         self.vision_api_key = cfg.get("vision_api_key") or self.api_key
-        self.chat_model = cfg["chat_model"]
+        self.chat_model = strip_model_prefix(cfg["chat_model"])
         self.chat_temperature = cfg.get("chat_temperature", 0.7)
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
-        self.vision_model = cfg["vision_model"]
+        self.vision_model = strip_model_prefix(cfg["vision_model"])
         self.vision_temp = cfg.get("vision_temp", 0.7)
         self.vision_max_tokens = cfg.get("vision_max_tokens", 10000)
         self.vision_prompt = cfg["vision_prompt"]
@@ -96,7 +107,7 @@ class WeChatBot:
         self.paused = cfg.get("start_paused", True)
         self.memory_file = cfg.get("memory_file", "memory.json")
         # 文件处理配置
-        self.file_model = cfg.get("file_model", self.chat_model)
+        self.file_model = strip_model_prefix(cfg.get("file_model", self.chat_model))
         self.file_temp = cfg.get("file_temp", 1.0)
         self.file_max_tokens = cfg.get("file_max_tokens", 10000)
         self.file_prompt = cfg.get("file_prompt", self.system_prompt)
