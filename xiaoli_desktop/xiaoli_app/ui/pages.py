@@ -285,23 +285,20 @@ class HomePage(QWidget):
 
     def _prompt_worker(self):
         from xiaoli_app import setup
-        fp = (self.ctx.cfg.get("first_prompt_path") or "").strip()
-        if not fp or not os.path.isfile(fp):
-            self._prompt_state = f"首轮提示词文件不存在：{fp}"
+        cfg = self.ctx.cfg or {}
+        fp = (cfg.get("first_prompt_path") or "").strip()
+        text = setup.build_first_prompt(cfg)
+        if not text:
+            self._prompt_state = "首轮提示词为空，无法发送"
             self._prompt_running = False
             return
-        try:
-            with open(fp, "r", encoding="utf-8") as f:
-                text = f.read().strip()
-        except Exception as e:
-            self._prompt_state = f"读取首轮提示词失败：{e}"
-            self._prompt_running = False
-            return
-        try:
-            setup.open_first_prompt(fp)
-        except Exception:
-            pass
-        title = (self.ctx.cfg.get("tianshu_window_title") or "").strip()
+        # 自定义文件来源时顺带打开文件（内置模板无外部文件可开）
+        if fp and os.path.isfile(fp):
+            try:
+                setup.open_first_prompt(fp)
+            except Exception:
+                pass
+        title = (cfg.get("tianshu_window_title") or "").strip()
         if not title:
             try:
                 for name in setup._list_windows():

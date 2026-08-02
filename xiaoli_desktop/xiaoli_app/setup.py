@@ -14,6 +14,46 @@ DEFAULT_TIANSHU_URL = "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/ref
 TIANSHU_EXE = "tianshu-desktop.exe"
 WECHAT_KEYWORDS = ("微信", "WeChat")
 
+# 内置首轮提示词模板（内化：小白新机器不依赖外部文件）。
+# 占位符：{tasks_dir} 任务桥目录（cfg.tasks_dir）、{trigger} 唤起天枢的指令（cfg.tianshu_trigger_command）。
+FIRST_PROMPT_DEFAULT = """你是天枢，正在为微信 AI 助手「小漓」服务。用户通过微信向小漓发消息、传文件、派任务，小漓会把任务投递给你，由你完成并回传成果。
+
+当微信机器人发来指令「{trigger}」时，执行以下流程：
+
+1. 读取 {tasks_dir}\\README.md，了解任务包与成果包的格式约定；
+2. 扫描 {tasks_dir}\\ 下各任务目录，找有 task.json 且没有 result.json 的目录（已有 result.json 的跳过）；
+3. 按 task.json 里的 task 描述、attachments\\ 附件、file_text 内容执行任务；
+4. 完成后在同一任务目录写 result.json（{{"status":"success","reply_text":"...","files":["成果文件..."]}}），成果文件也放该目录；
+5. 不要写 result.json 以外的状态文件——小漓检测到 result.json 就会把成果发回微信并把目录归档。
+
+注意：reply_text 是发给微信用户的回复，请用通俗友好的中文，用户可能不了解技术细节。"""
+
+# 任务桥协议文档（初始化时写入 tasks_dir\\README.md，首次生成、已存在不覆盖）。
+BRIDGE_README = """# 微信任务桥协议（小漓 ↔ 天枢）
+
+小漓把微信用户的任务投递到本目录，天枢处理后回传成果。
+
+## 任务包
+
+每个任务一个子目录 <task_id>\\：
+
+- task.json：任务描述（task 字段）、发送者（sender）、聊天（chat_name）、附件列表（attachments）、文件文本（file_text）、任务 ID（task_id）、创建时间（created_at）
+- attachments\\：附件文件（如有）
+
+## 成果包
+
+天枢完成任务后，在同一个任务目录写 result.json：
+
+{"status": "success", "reply_text": "给用户的回复", "files": ["成果文件名..."]}
+
+- reply_text 用通俗友好的中文（用户可能不懂技术细节）
+- 成果文件放在该任务目录下，文件名写入 files 数组
+
+## 归档
+
+小漓检测到 result.json 后，会把任务目录移入 sent\\ 归档，并把成果发回微信。
+"""
+
 
 def _list_windows():
     """窗口名枚举（延迟 import，避免触发 xiaoli_bot 顶层副作用）。"""
@@ -65,14 +105,51 @@ def check_environment(cfg):
         pass
     out["tianshu"] = {"ok": tianshu_ok, "detail": detail, "window": tianshu_win}
 
-    # ---- 首轮提示词 ----
+    # ---- 首轮提示词：内置模板兜底，自定义文件优先 ----
     fp = (cfg.get("first_prompt_path") or "").strip()
-    out["first_prompt"] = {
-        "ok": bool(fp) and os.path.isfile(fp),
-        "detail": fp if os.path.isfile(fp) else f"文件不存在：{fp}",
-        "path": fp,
-    }
+    if fp and os.path.isfile(fp):
+        out["first_prompt"] = {"ok": True, "detail": fp, "path": fp}
+    else:
+        out["first_prompt"] = {
+            "ok": True,
+            "detail": "内置模板（可自定义 first_prompt_path）",
+            "path": fp,
+        }
     return out
+
+
+def build_first_prompt(cfg):
+    """返回要发送给天枢的首轮提示词文本。
+
+    first_prompt_path 非空且文件存在 → 读文件（兼容自定义）；
+    否则 → 内置模板，用 cfg 的 tasks_dir / tianshu_trigger_command 填充。
+    """
+    fp = (cfg.get("first_prompt_path") or "").strip()
+    if fp and os.path.isfile(fp):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    tasks_dir = (cfg.get("tasks_dir") or "").strip() or "tasks"
+    trigger = (cfg.get("tianshu_trigger_command") or "").strip() or "开始处理"
+    return FIRST_PROMPT_DEFAULT.format(tasks_dir=tasks_dir, trigger=trigger)
+
+
+def ensure_bridge_readme(tasks_dir):
+    """tasks_dir 下无 README.md 时写入任务桥协议文档（不覆盖已有内容）。"""
+    if not tasks_dir:
+        return False
+    p = os.path.join(tasks_dir, "README.md")
+    if os.path.isfile(p):
+        return False
+    try:
+        os.makedirs(tasks_dir, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(BRIDGE_README)
+        return True
+    except OSError:
+        return False
 
 
 def detect_tianshu_dir():

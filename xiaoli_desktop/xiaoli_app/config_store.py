@@ -193,7 +193,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
     for k, v in {
         "tianshu_install_dir": "",
         "tianshu_download_url": "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main",
-        "first_prompt_path": r"D:\工作间\首轮提示词.txt",
+        "first_prompt_path": "",  # 空 = 用内置模板（build_first_prompt）；非空且文件存在时优先读文件
     }.items():
         if k not in cfg:
             cfg[k] = v
