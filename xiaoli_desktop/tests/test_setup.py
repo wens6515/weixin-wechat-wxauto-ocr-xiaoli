@@ -235,6 +235,7 @@ class TestLaunchTianshu(unittest.TestCase):
         def fake_popen(cmd, **kw):
             started["cmd"] = cmd
             started["cwd"] = kw.get("cwd")
+            started["shell"] = kw.get("shell")
             return mock.Mock()
 
         cfg = {"tianshu_workdir": self.tmp,
@@ -245,9 +246,10 @@ class TestLaunchTianshu(unittest.TestCase):
             ok, detail = setup.launch_tianshu(cfg)
         self.assertTrue(ok, detail)
         self.assertEqual(started["cwd"], self.tmp, "应在 tianshu_workdir 下启动")
-        joined = " ".join(started["cmd"]).lower()
+        self.assertTrue(started["shell"], "必须 shell=True（Popen(list) 引号二次转义会启动失败）")
+        joined = str(started["cmd"]).lower()
+        self.assertIn('start "tianshu"', joined, f"窗口标题应为 Tianshu: {started['cmd']}")
         self.assertIn("rivet", joined, f"应启动 rivet CLI: {started['cmd']}")
-        self.assertIn('"tianshu"', joined, "窗口标题应为 Tianshu 便于窗口匹配")
         m.assert_called_once()
 
     def test_launch_rivet_missing(self):
