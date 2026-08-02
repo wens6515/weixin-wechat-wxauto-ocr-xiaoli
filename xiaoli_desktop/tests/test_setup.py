@@ -60,8 +60,17 @@ class TestCheckEnvironment(unittest.TestCase):
         self.assertTrue(r["tianshu"]["ok"])
 
     def test_tianshu_dir_missing(self):
-        r = self._report(make_cfg(tianshu_install_dir=self.tmp))
+        # 桌面端缺失且 CLI(rivet) 也不存在 → 未安装
+        with mock.patch("shutil.which", return_value=None):
+            r = self._report(make_cfg(tianshu_install_dir=self.tmp))
         self.assertFalse(r["tianshu"]["ok"])
+
+    def test_tianshu_cli_detected(self):
+        # CLI(rivet) 存在即算已安装（即使桌面端缺失）
+        with mock.patch("shutil.which", return_value=r"C:\npm\rivet.cmd"):
+            r = self._report(make_cfg(tianshu_install_dir=self.tmp))
+        self.assertTrue(r["tianshu"]["ok"])
+        self.assertIn("rivet", r["tianshu"]["detail"])
 
     def test_first_prompt_detected(self):
         p = os.path.join(self.tmp, "首轮提示词.txt")
@@ -212,7 +221,7 @@ class TestInstallTianshu(unittest.TestCase):
 
 
 class TestLaunchTianshu(unittest.TestCase):
-    """launch_tianshu：按配置目录/自动探测启动天枢 exe"""
+    """launch_tianshu：启动天枢 CLI（rivet），在 tianshu_workdir 下开新窗口"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="launch_")
@@ -220,28 +229,35 @@ class TestLaunchTianshu(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_launch_finds_exe_in_install_dir(self):
-        exe = os.path.join(self.tmp, "tianshu-desktop.exe")
-        open(exe, "w").close()
+    def test_launch_cli_in_workdir(self):
         started = {}
 
         def fake_popen(cmd, **kw):
             started["cmd"] = cmd
+            started["cwd"] = kw.get("cwd")
             return mock.Mock()
 
-        cfg = {"tianshu_install_dir": self.tmp, "tianshu_download_url": setup.DEFAULT_TIANSHU_URL}
-        with mock.patch("subprocess.Popen", side_effect=fake_popen) as m:
+        cfg = {"tianshu_workdir": self.tmp,
+               "tianshu_download_url": setup.DEFAULT_TIANSHU_URL}
+        # rivet 命令存在（mock 探测）
+        with mock.patch("shutil.which", return_value=r"C:\npm\rivet.cmd"), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen) as m:
             ok, detail = setup.launch_tianshu(cfg)
         self.assertTrue(ok, detail)
-        self.assertEqual(started["cmd"], [exe])
+        self.assertEqual(started["cwd"], self.tmp, "应在 tianshu_workdir 下启动")
+        joined = " ".join(started["cmd"]).lower()
+        self.assertIn("rivet", joined, f"应启动 rivet CLI: {started['cmd']}")
+        self.assertIn('"tianshu"', joined, "窗口标题应为 Tianshu 便于窗口匹配")
         m.assert_called_once()
 
-    def test_launch_missing_exe(self):
-        cfg = {"tianshu_install_dir": os.path.join(self.tmp, "nope"),
+    def test_launch_rivet_missing(self):
+        cfg = {"tianshu_workdir": self.tmp,
                "tianshu_download_url": setup.DEFAULT_TIANSHU_URL}
-        ok, detail = setup.launch_tianshu(cfg)
+        with mock.patch("shutil.which", return_value=None):
+            ok, detail = setup.launch_tianshu(cfg)
         self.assertFalse(ok)
-        self.assertIn("未找到", detail)
+        self.assertIn("rivet", detail)
+        self.assertIn("npm", detail, "提示应包含 npm install 指引")
 
 
 class TestSendPrompt(unittest.TestCase):

@@ -338,6 +338,8 @@ class TestMigrateDefaultProvider(unittest.TestCase):
                             "投影后 ai_api_url 不应为空（否则 Invalid URL）")
             self.assertTrue(cfg.get("vision_api_url", "").startswith("https://"),
                             "投影后 vision_api_url 不应为空（图片识别依赖）")
+            self.assertEqual(cfg.get("tianshu_workdir"), r"D:\工作间",
+                             "天枢 CLI 工作目录默认应为 D:\\工作间")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
