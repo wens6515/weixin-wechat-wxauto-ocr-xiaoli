@@ -189,6 +189,14 @@ def load_config_store(path="config.json", cards_dir="cards"):
             logger.error(f"[配置] 读取 config.json 失败: {e}，按空配置处理")
 
     cfg = migrate_config(cfg, cards_dir)
+    # 二期新增默认：天枢安装/下载/首轮提示词（小白引导用）
+    for k, v in {
+        "tianshu_install_dir": "",
+        "tianshu_download_url": "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main",
+        "first_prompt_path": r"D:\工作间\首轮提示词.txt",
+    }.items():
+        if k not in cfg:
+            cfg[k] = v
     card = _read_card(cards_dir, cfg.get("active_card_id", DEFAULT_CARD_ID))
     if card is None:
         logger.warning(f"[配置] 活跃角色卡不存在: {cfg.get('active_card_id')}，使用空卡投影")
