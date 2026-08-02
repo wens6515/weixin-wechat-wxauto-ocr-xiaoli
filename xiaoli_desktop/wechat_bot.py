@@ -24,6 +24,61 @@ def strip_model_prefix(model):
         return model
     return model.split(":", 1)[-1]
 
+
+def estimate_tokens(text):
+    """粗略估算 token 数：统一按 1 字符 ≈ 1 token 保守估算。
+
+    混合内容取保守上界（宁可多估不超限）——请求超限会得到
+    API 400 "maximum context length"，低估反而更危险。
+    """
+    return len(text) if text else 0
+
+
+def fit_messages_in_budget(messages, budget=100000, reserve=2000):
+    """把 messages 裁剪到 token 预算内（从最旧历史开始丢弃）。
+
+    根因：文件识别把超大文件全文拼进 prompt（实测请求 272 万 token，
+    模型上限 104 万 → API 400 "maximum context length"）。
+    规则：
+    - system 消息永不丢弃（裁剪其内容到预算 20%）
+    - 历史消息从最旧开始丢，直到总 token ≤ budget - reserve
+    - 最后一条 user 消息若仍超预算，截断其内容到预算 60%
+    返回裁剪后的 messages（原列表不修改）。
+    """
+    budget = max(1000, budget)
+    cap = max(500, budget - reserve)
+    out = []
+    total = 0
+    # system 优先保留（裁剪到预算 20%）
+    for m in messages:
+        if m.get("role") == "system":
+            content = str(m.get("content") or "")
+            if total + estimate_tokens(content) > max(500, budget // 5):
+                # 保留开头（system prompt 语义在前）
+                keep = max(500, budget // 5)
+                content = content[:keep]
+            out.append({"role": "system", "content": content})
+            total += estimate_tokens(content)
+    # 历史 + user：从最旧开始，超预算的旧消息丢弃、继续往后；
+    # 最后一条 user 若仍超限则截断（可能含文件全文）
+    tail = [m for m in messages if m.get("role") != "system"]
+    for i, m in enumerate(tail):
+        content = str(m.get("content") or "")
+        tokens = estimate_tokens(content)
+        is_last = i == len(tail) - 1
+        if total + tokens > cap:
+            if is_last and content:
+                # 最后一条 user（可能含文件全文）截断到预算 60%，带省略号标记
+                keep = max(500, int(budget * 0.6))
+                content = content[:keep] + "[内容过长已截断]…"
+                tokens = estimate_tokens(content)
+                out.append({"role": m.get("role", "user"), "content": content})
+                total += tokens
+            continue  # 旧消息超预算 → 丢弃该条，继续尝试更近的消息
+        out.append({"role": m.get("role", "user"), "content": content})
+        total += tokens
+    return out
+
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
 
 # 清空旧日志，确保每次运行都是新的
@@ -780,6 +835,12 @@ class WeChatBot:
             model = self.chat_model
             temp = self.chat_temperature
             top_p = self.chat_top_p
+
+        # 上下文预算裁剪：文件全文/超长历史会撑爆模型上下文上限
+        # （实测请求 272 万 token → API 400 "maximum context length"）。
+        # 从最旧历史开始丢弃，保证单次请求不超模型上下文。
+        messages = fit_messages_in_budget(
+            messages, budget=getattr(self, "max_context_tokens", 100000))
 
         payload = {
             "model": model,
