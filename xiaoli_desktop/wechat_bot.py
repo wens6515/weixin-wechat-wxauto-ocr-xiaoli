@@ -360,7 +360,7 @@ class WeChatBot:
                 return self._reply_with_vision(chat_name, sender, vision_reply)
             else:
                 logger.warning("[处理] 视觉模型返回空")
-                self._send_text("图片识别失败了，可能是什么地方出了问题～")
+                self._send_text("图片识别失败了，可能是什么地方出了问题～", chat_name)
                 return False
 
         except Exception as e:

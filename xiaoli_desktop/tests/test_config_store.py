@@ -314,5 +314,33 @@ class TestImageClickOffsetDefault(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestMigrateDefaultProvider(unittest.TestCase):
+    """空 config 迁移：默认 provider 为 id=default 的 DeepSeek（空 key）。
+
+    根因：provider id 与默认卡引用 "default" 不对齐 → 投影 url/key 全空 →
+    视觉调用 Invalid URL（真机日志 17:34:09 故障链）。
+    """
+
+    def test_empty_config_gets_deepseek_default(self):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="prov_")
+        try:
+            cfg = config_store.load_config_store(
+                os.path.join(tmp, "config.json"), os.path.join(tmp, "cards"))
+            provs = cfg.get("providers") or []
+            self.assertTrue(provs, "空 config 迁移后应有默认 provider")
+            p = provs[0]
+            self.assertEqual(p["id"], "default", "默认 provider id 须与默认卡引用对齐")
+            self.assertTrue(p["base_url"].startswith("https://"), p["base_url"])
+            self.assertFalse(p.get("api_key"), "key 必须为空")
+            self.assertTrue(cfg.get("ai_api_url", "").startswith("https://"),
+                            "投影后 ai_api_url 不应为空（否则 Invalid URL）")
+            self.assertTrue(cfg.get("vision_api_url", "").startswith("https://"),
+                            "投影后 vision_api_url 不应为空（图片识别依赖）")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

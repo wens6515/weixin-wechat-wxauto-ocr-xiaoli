@@ -165,6 +165,31 @@ def detect_tianshu_dir():
     return None
 
 
+def launch_tianshu(cfg):
+    """启动天枢桌面端（未运行时）。返回 (ok, detail)。
+
+    定位：tianshu_install_dir 显式配置优先，否则自动探测常见目录。
+    启动：subprocess.Popen 拉起 exe（不等待退出）。
+    """
+    import subprocess
+    install_dir = (cfg.get("tianshu_install_dir") or "").strip()
+    if install_dir:
+        # 显式配置只认该目录（与 check_environment 语义一致，避免误判自动探测）
+        exe = os.path.join(install_dir, TIANSHU_EXE)
+        if not os.path.isfile(exe):
+            return False, f"未找到天枢：{exe}"
+    else:
+        found = detect_tianshu_dir()
+        if not found:
+            return False, f"未找到天枢（{TIANSHU_EXE}），请先一键安装"
+        exe = os.path.join(found, TIANSHU_EXE)
+    try:
+        subprocess.Popen([exe], cwd=os.path.dirname(exe) or None)
+        return True, f"已启动：{exe}"
+    except OSError as e:
+        return False, f"启动天枢失败：{e}"
+
+
 def find_tianshu_dir(root):
     """在 root 下递归（深度≤3）找 tianshu-desktop.exe 所在目录。"""
     for dirpath, dirnames, filenames in os.walk(root):

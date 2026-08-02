@@ -308,9 +308,28 @@ class HomePage(QWidget):
             except Exception:
                 pass
         if not title:
-            self._prompt_state = "已打开提示词文件；未找到天枢窗口，请先启动天枢后点「重试发送」"
-            self._prompt_running = False
-            return
+            # 天枢未运行 → 自动拉起并等待窗口出现（最多 15 秒）
+            ok_launch, detail = setup.launch_tianshu(cfg)
+            if not ok_launch:
+                self._prompt_state = f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
+                self._prompt_running = False
+                return
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                time.sleep(1)
+                try:
+                    for name in setup._list_windows():
+                        if "天枢" in name or "Tianshu" in name:
+                            title = name
+                            break
+                except Exception:
+                    pass
+                if title:
+                    break
+            if not title:
+                self._prompt_state = "天枢已启动但窗口未出现，请稍后点「重试发送」"
+                self._prompt_running = False
+                return
         ok = setup.send_prompt_to_tianshu(text, title)
         self._prompt_state = "首轮提示词已发送给天枢 ✓" if ok else "发送失败，请确认天枢窗口已打开后重试"
         if ok:
