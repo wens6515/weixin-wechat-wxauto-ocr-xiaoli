@@ -3,6 +3,7 @@
 
 面向小白用户：软件内检测依赖 → 缺失时一键下载安装（进度可视化）。
 """
+import json
 import os
 import subprocess
 import tempfile
@@ -212,6 +213,52 @@ def detect_tianshu_dir():
         if os.path.isfile(os.path.join(c, TIANSHU_EXE)):
             return c
     return None
+
+
+def configure_tianshu_auto_approval(cfg, config_path=None):
+    """已有天枢 CLI 时配置为完全自动（YOLO）：任务处理全程无需手动确认。
+
+    天枢 CLI 默认 approval=suggest/Auto——高风险工具（rm/mv/git 写等）仍需
+    用户在终端手动回车确认。小漓是无人值守的后台机器人，投递任务后不会有人
+    去按回车，任务会卡在确认等待，导致全自动回复链路断裂。
+    把 approval 设为 dangerously-skip-permissions（启动即 YOLO）后：
+    所有工具自动执行、无刹车无打扰（回滚兜底 /rollback + git 检查点）。
+    幂等：config.json 已是该值则跳过；无 rivet 命令返回 (False, 原因)。
+
+    实现走 `rivet config set-approval` 子命令（实测非 TTY 可用，小漓无终端）；
+    config.json 位置与 README 一致：Windows 为 %LOCALAPPDATA%\\.rivet。
+    返回 (ok, detail)。
+    """
+    import shutil
+    rivet = shutil.which("rivet") or shutil.which("rivet.cmd")
+    if not rivet:
+        return False, "未找到 rivet 命令（无需配置，或先 npm install -g tianshu-tui）"
+    target = "dangerously-skip-permissions"
+    # 幂等：读 config.json，已配置则跳过（不重复写盘/执行）
+    if config_path is None:
+        data_root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        config_path = os.path.join(data_root, ".rivet", "config.json")
+    try:
+        if os.path.isfile(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # approval 字段在 agent 子对象下（.agent.approval），不在顶层
+            agent = data.get("agent") if isinstance(data, dict) else None
+            current = agent.get("approval") if isinstance(agent, dict) else None
+            if current == target:
+                return True, "天枢 CLI 已是完全自动（YOLO），无需重复配置"
+    except Exception:
+        pass  # 读取失败 → 按未配置处理，执行命令
+    try:
+        r = subprocess.run(
+            [rivet, "config", "set-approval", target],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30)
+        if r.returncode == 0:
+            return True, "天枢 CLI 已配置为完全自动（YOLO），任务处理不再需要手动确认"
+        return False, f"配置天枢 CLI 自动模式失败（{r.returncode}）"
+    except Exception as e:
+        return False, f"配置天枢 CLI 自动模式失败: {e}"
 
 
 def launch_tianshu(cfg):

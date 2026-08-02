@@ -508,6 +508,18 @@ class AgentBot(WeChatBot):
             _setup.ensure_bridge_readme(self.tasks_dir)
         except Exception as e:
             logger.warning(f"[AgentBot] 生成任务桥 README 失败: {e}")
+        # 已有天枢 CLI → 配置完全自动（YOLO）：任务处理无需手动回车确认，
+        # 否则无人值守时任务卡在权限确认，全自动回复链路断裂。
+        # 幂等：config.json 已配置则跳过；无 rivet 命令返回 False 不报错。
+        try:
+            from xiaoli_app import setup as _setup
+            _ok, _detail = _setup.configure_tianshu_auto_approval(cfg)
+            if _ok:
+                logger.info(f"[天枢] {_detail}")
+            else:
+                logger.info(f"[天枢] 自动模式配置跳过：{_detail}")
+        except Exception as e:
+            logger.warning(f"[AgentBot] 配置天枢自动模式异常: {e}")
         # 是否暂停消息监听由 has_active_tasks 每次实时判断，不保存粘滞状态
         self.dispatched_msg_ids = set()
         self._load_dispatched_ids()
