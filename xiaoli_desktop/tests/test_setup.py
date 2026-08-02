@@ -527,6 +527,99 @@ class TestSendPrompt(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestConfigureTianshuAuto(unittest.TestCase):
+    """已有天枢 CLI 时配置完全自动（YOLO）：任务处理无需手动确认回车。
+
+    背景：天枢 CLI 默认 approval=suggest/Auto——高风险工具仍需用户手动确认，
+    小漓无人值守投递任务后任务会卡在确认等待，无法全自动回复。
+    配置 dangerously-skip-permissions 后启动即 YOLO，全程无刹车。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="auto_approval_")
+        self.rivet_dir = os.path.join(self.tmp, ".rivet")
+        os.makedirs(self.rivet_dir, exist_ok=True)
+        self.config_path = os.path.join(self.rivet_dir, "config.json")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _call(self):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}):
+            return setup.configure_tianshu_auto_approval({})
+
+    def test_no_rivet_skips(self):
+        # 无 rivet 命令 → 跳过（返回 False，不报错）
+        with mock.patch("shutil.which", return_value=None):
+            ok, detail = self._call()
+        self.assertFalse(ok)
+        self.assertIn("rivet", detail)
+
+    def test_already_configured_skips(self):
+        # config.json 已是 dangerously-skip-permissions（agent 子对象）→ 不重复执行命令
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"agent": {"approval": "dangerously-skip-permissions"}}, f)
+        ran = []
+        with mock.patch("shutil.which", return_value="rivet"), \
+             mock.patch.object(subprocess, "run", side_effect=lambda *a, **k: ran.append(a)):
+            ok, detail = self._call()
+        self.assertTrue(ok)
+        self.assertEqual(ran, [], "已配置时不应重复执行 set-approval")
+
+    def test_not_configured_runs_command(self):
+        # config 缺失或未配置 → 执行 rivet config set-approval dangerously-skip-permissions
+        ran = []
+
+        class FakeCompleted:
+            returncode = 0
+
+        def fake_run(args, **kw):
+            ran.append(args)
+            return FakeCompleted()
+
+        with mock.patch("shutil.which", return_value="rivet"), \
+             mock.patch.object(subprocess, "run", side_effect=fake_run):
+            ok, detail = self._call()
+        self.assertTrue(ok)
+        self.assertEqual(ran, [["rivet", "config", "set-approval",
+                                "dangerously-skip-permissions"]],
+                         "未配置时应执行 set-approval 命令")
+        self.assertIn("YOLO", detail)
+
+    def test_top_level_approval_not_enough(self):
+        # 幂等判定必须读 agent.approval（真实结构）；顶层 approval 是旧/错误结构，
+        # 视为未配置 → 执行 set-approval，避免结构变化导致静默跳过
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"approval": "dangerously-skip-permissions"}, f)
+        ran = []
+
+        class FakeCompleted:
+            returncode = 0
+
+        def fake_run(args, **kw):
+            ran.append(args)
+            return FakeCompleted()
+
+        with mock.patch("shutil.which", return_value="rivet"), \
+             mock.patch.object(subprocess, "run", side_effect=fake_run):
+            ok, detail = self._call()
+        self.assertTrue(ok)
+        self.assertEqual(ran, [["rivet", "config", "set-approval",
+                                "dangerously-skip-permissions"]],
+                         "顶层 approval 不算已配置，应执行 set-approval")
+
+    def test_command_failure_reports(self):
+        # set-approval 失败 → 返回失败与原因（不崩溃）
+        class FakeCompleted:
+            returncode = 1
+
+        with mock.patch("shutil.which", return_value="rivet"), \
+             mock.patch.object(subprocess, "run", return_value=FakeCompleted()):
+            ok, detail = self._call()
+        self.assertFalse(ok)
+        self.assertIn("失败", detail)
+
+
 class TestConfigDefaults(unittest.TestCase):
     def test_new_defaults_present(self):
         from xiaoli_app import config_store
