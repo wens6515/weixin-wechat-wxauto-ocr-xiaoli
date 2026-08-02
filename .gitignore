@@ -1,0 +1,20 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时数据（经常变化，不需要进版本库）
+memory.json
+processed_ids.json
+bot.log
+*.log
+
+# 配置（可能包含密钥，请勿提交；需要模板可另存 config.example.json）
+config.json
+
+# 工具/工作目录
+.rivet/
+
+# 系统文件
+Thumbs.db
+.DS_Store
