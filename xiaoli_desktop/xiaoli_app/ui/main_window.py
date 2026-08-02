@@ -22,6 +22,16 @@ class MainWindow(QMainWindow):
             page = cls(ctx)
             self.pages[name] = page
             self.tabs.addTab(page, name)
+        # 首次填充：各页 refresh() 从 ctx.cfg 回填数据（模型表/设置项等）。
+        # 不调的话 ModelsPage 表格永远空、SettingsPage 编辑框永远空——
+        # 用户添加的模型保存到了 config.json 但重启后界面不显示。
+        for page in self.pages.values():
+            refresh = getattr(page, "refresh", None)
+            if refresh is not None:
+                try:
+                    refresh()
+                except Exception:
+                    pass
         self.setCentralWidget(self.tabs)
 
         # 状态栏
