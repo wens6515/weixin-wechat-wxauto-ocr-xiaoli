@@ -1216,11 +1216,18 @@ class SettingsPage(QWidget):
             _setup.ensure_bridge_readme(self.ctx.cfg.get("tasks_dir", ""))
         except Exception:
             pass
+        # 预授权给天枢 CLI（agent.permissions）——常驻 CLI 也能读任意位置任务目录
+        grant_ok, grant_changed = config_store.grant_tasks_dir_to_tianshu(new_tasks)
         msg = "任务工作目录已保存"
         new_workdir = str((self.ctx.cfg or {}).get("tianshu_workdir") or "").strip()
         if workdir_changed and old_workdir and old_workdir != new_workdir:
-            msg += (f"\n天枢 CLI 工作目录已同步为：{new_workdir}\n"
-                    "若天枢 CLI 窗口已打开，请重启它以在新目录下工作")
+            msg += f"\n天枢 CLI 工作目录已同步为：{new_workdir}"
+        if grant_changed:
+            msg += "\n天枢 CLI 已授权读取新任务目录"
+        if (workdir_changed or grant_changed) and not grant_ok:
+            msg += "\n（未能自动授权天枢 CLI，任务可能需手动确认路径）"
+        if workdir_changed or grant_changed:
+            msg += "\n若天枢 CLI 窗口已打开，请重启它以生效"
         QMessageBox.information(self, "已保存", msg)
 
     def _refresh_stems(self):

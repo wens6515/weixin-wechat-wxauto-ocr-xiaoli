@@ -390,5 +390,93 @@ class TestMigrateDefaultProvider(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestGrantTasksDirToTianshu(unittest.TestCase):
+    """tasks_dir 预授权给天枢 CLI（agent.permissions 目录授权）。
+
+    天枢 CLI 启动时 applyConfiguredPathGrants 应用 additionalReadDirs/
+    additionalWriteDirs——即使 CLI 常驻固定工作目录（cwd 不变），也能读取
+    任意位置的 tasks_dir。授权目录必须存在（CLI fail-closed 跳过不存在项）。
+    """
+
+    def _setup_env(self):
+        tmp = tempfile.mkdtemp(prefix="grant_")
+        local = os.path.join(tmp, "LocalAppData")
+        os.makedirs(local, exist_ok=True)
+        cfg_path = os.path.join(local, ".rivet", "config.json")
+        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"provider": {"providers": {"deepseek": {"name": "deepseek"}}}}, f)
+        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": local})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        return cfg_path
+
+    def test_grant_writes_read_and_write_dirs(self):
+        cfg_path = self._setup_env()
+        tasks = os.path.join(tempfile.mkdtemp(prefix="tasks_"), "wxauto")
+        os.makedirs(tasks, exist_ok=True)
+        ok, changed = config_store.grant_tasks_dir_to_tianshu(tasks)
+        self.assertTrue(ok)
+        self.assertTrue(changed)
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        perms = cfg["agent"]["permissions"]
+        self.assertIn(tasks, perms["additionalReadDirs"],
+                      "tasks_dir 必须加入天枢 CLI 读授权")
+        self.assertIn(tasks, perms["additionalWriteDirs"],
+                      "tasks_dir 必须加入天枢 CLI 写授权（成果回传需要）")
+        # 原有配置必须保留（不覆盖 provider 等）
+        self.assertEqual(cfg["provider"]["providers"]["deepseek"]["name"], "deepseek")
+
+    def test_grant_idempotent(self):
+        cfg_path = self._setup_env()
+        tasks = os.path.join(tempfile.mkdtemp(prefix="tasks_"), "wxauto")
+        os.makedirs(tasks, exist_ok=True)
+        config_store.grant_tasks_dir_to_tianshu(tasks)
+        _ok, changed = config_store.grant_tasks_dir_to_tianshu(tasks)
+        self.assertFalse(changed, "重复授权不应变更配置")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        perms = cfg["agent"]["permissions"]
+        self.assertEqual(perms["additionalReadDirs"].count(tasks), 1)
+        self.assertEqual(perms["additionalWriteDirs"].count(tasks), 1)
+
+    def test_grant_merges_existing_permissions(self):
+        cfg_path = self._setup_env()
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        cfg["agent"] = {"permissions": {"additionalReadDirs": [r"D:\已有授权"]}}
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        tasks = os.path.join(tempfile.mkdtemp(prefix="tasks_"), "wxauto")
+        os.makedirs(tasks, exist_ok=True)
+        config_store.grant_tasks_dir_to_tianshu(tasks)
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        perms = cfg["agent"]["permissions"]
+        self.assertIn(r"D:\已有授权", perms["additionalReadDirs"], "既有授权必须保留")
+        self.assertIn(tasks, perms["additionalReadDirs"])
+
+    def test_grant_skips_missing_tasks_dir(self):
+        self._setup_env()
+        ok, changed = config_store.grant_tasks_dir_to_tianshu(r"D:\不存在\wxauto")
+        self.assertFalse(ok, "授权目录不存在时不应写入（CLI fail-closed）")
+
+    def test_grant_skips_without_cli_config(self):
+        # 无天枢 CLI 配置（.rivet/config.json 不存在）→ 不创建、不失败
+        tmp = tempfile.mkdtemp(prefix="nogrant_")
+        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": os.path.join(tmp, "Local")})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        tasks = os.path.join(tmp, "wxauto")
+        os.makedirs(tasks, exist_ok=True)
+        ok, _changed = config_store.grant_tasks_dir_to_tianshu(tasks)
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(os.path.join(tmp, "Local", ".rivet")),
+                         "无 CLI 时不得擅自创建配置目录")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -195,6 +195,12 @@ def main():
             _setup.ensure_bridge_readme(str(ctx.cfg.get("tasks_dir") or "").strip())
         except Exception as e:
             logger.warning(f"[首次引导] 生成任务桥 README 失败: {e}")
+        # 预授权天枢 CLI 读取任务目录（README 已确保目录存在）——
+        # 常驻 CLI 场景（cwd 固定）也能读任意位置的任务目录
+        try:
+            config_store.grant_tasks_dir_to_tianshu(str(ctx.cfg.get("tasks_dir") or "").strip())
+        except Exception as e:
+            logger.warning(f"[首次引导] 天枢 CLI 授权失败: {e}")
     if not ctx.cfg.get("providers"):
         QMessageBox.warning(
             None, "小漓",

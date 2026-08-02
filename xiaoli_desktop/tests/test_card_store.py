@@ -227,8 +227,17 @@ class TestTaskDispatchWindow(unittest.TestCase):
         bot._model_lock = threading.RLock()
         return bot
 
+    def setUp(self):
+        # 隔离天枢 CLI 授权写入：投递任务前 grant_tasks_dir_to_tianshu 会写
+        # %LOCALAPPDATA%\.rivet\config.json——测试不得污染真实 CLI 配置
+        self._grant_tmp = tempfile.mkdtemp(prefix="grant_iso_")
+        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": self._grant_tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def tearDown(self):
         shutil.rmtree(getattr(self, "_tmp", ""), ignore_errors=True)
+        shutil.rmtree(getattr(self, "_grant_tmp", ""), ignore_errors=True)
 
     def test_stale_task_does_not_block_polling(self):
         """RED 复现：任务卡死（无 result.json 且超过阈值）不应永久阻塞消息轮询。

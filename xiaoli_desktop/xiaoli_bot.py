@@ -655,6 +655,13 @@ class AgentBot(WeChatBot):
             if k not in task_info:
                 task_info[k] = v
         task_id = dispatch_task(self.tasks_dir, task_info, attachment_paths)
+        # 投递后幂等预授权天枢 CLI 读取任务目录（配置化授权 agent.permissions，
+        # 常驻 CLI 重启后生效；dispatch 已确保 tasks_dir 存在，fail-closed 不跳过）
+        try:
+            from xiaoli_app import config_store as _cs
+            _cs.grant_tasks_dir_to_tianshu(str(self.tasks_dir or "").strip())
+        except Exception:
+            pass
         if task_info.get("msg_id"):
             self.dispatched_msg_ids.add(task_info["msg_id"])
         self._send_text("收到任务啦，正在处理中，稍等一下哦～", chat_name)
