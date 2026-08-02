@@ -193,12 +193,14 @@ def launch_tianshu(cfg):
     except OSError:
         pass
     try:
-        # start "Tianshu"：新窗口标题固定 Tianshu（窗口匹配用）；cmd /k 保持窗口不退出。
-        # 必须 shell=True + 字符串：Popen(list) 会对引号二次转义导致 cmd 解析错乱
-        # （实测报错"系统找不到文件 \Tianshu\"，窗口未打开）。
+        # CREATE_NEW_CONSOLE：Windows 原生新开控制台窗口（可靠）；
+        # title Tianshu 设置窗口标题（窗口匹配用）；& 顺序执行 rivet；cmd /k 保持窗口。
+        # 实测：Popen(list) 引号二次转义 → "系统找不到文件 \Tianshu\"；
+        #       shell=True 字符串在 python 进程下也不弹窗（仅 Git Bash 手工调用有效）。
         subprocess.Popen(
-            'cmd /c start "Tianshu" cmd /k rivet',
-            cwd=workdir, shell=True)
+            ["cmd", "/k", "title Tianshu & rivet"],
+            cwd=workdir,
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         return True, f"天枢 CLI 已启动（{workdir}）"
     except OSError as e:
         return False, f"启动天枢 CLI 失败：{e}"
