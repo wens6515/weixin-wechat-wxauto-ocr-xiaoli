@@ -468,6 +468,12 @@ class AgentBot(WeChatBot):
         self._task_was_active = False  # 是否曾因任务暂停监听（用于任务完成后的缓冲期）
         self._task_end_time = None     # 最后一次任务完成（归档）的时刻
         os.makedirs(self.tasks_dir, exist_ok=True)
+        # 首轮提示词引导天枢读 tasks_dir\README.md：首次生成协议文档（已存在不覆盖）
+        try:
+            from xiaoli_app import setup as _setup
+            _setup.ensure_bridge_readme(self.tasks_dir)
+        except Exception as e:
+            logger.warning(f"[AgentBot] 生成任务桥 README 失败: {e}")
         # 是否暂停消息监听由 has_active_tasks 每次实时判断，不保存粘滞状态
         self.dispatched_msg_ids = set()
         self._load_dispatched_ids()

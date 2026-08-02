@@ -68,10 +68,85 @@ class TestCheckEnvironment(unittest.TestCase):
         open(p, "w", encoding="utf-8").write("你好")
         r = self._report(make_cfg(first_prompt_path=p))
         self.assertTrue(r["first_prompt"]["ok"])
+        self.assertEqual(r["first_prompt"]["detail"], p)
 
-    def test_first_prompt_missing(self):
+    def test_first_prompt_builtin_fallback(self):
+        # 自定义文件缺失 → 回退内置模板，检测仍就绪（内化后不再依赖外部文件）
         r = self._report(make_cfg(first_prompt_path=os.path.join(self.tmp, "nope.txt")))
-        self.assertFalse(r["first_prompt"]["ok"])
+        self.assertTrue(r["first_prompt"]["ok"])
+        self.assertIn("内置", r["first_prompt"]["detail"])
+
+
+class TestBuildFirstPrompt(unittest.TestCase):
+    """build_first_prompt：自定义文件优先，否则内置模板（tasks_dir/trigger 填充）"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="prompt_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, **over):
+        cfg = {
+            "first_prompt_path": "",
+            "tasks_dir": os.path.join(self.tmp, "tasks"),
+            "tianshu_trigger_command": "开始处理",
+        }
+        cfg.update(over)
+        return cfg
+
+    def test_file_priority(self):
+        p = os.path.join(self.tmp, "自定义.txt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("自定义内容")
+        self.assertEqual(setup.build_first_prompt(self._cfg(first_prompt_path=p)), "自定义内容")
+
+    def test_builtin_when_path_empty(self):
+        text = setup.build_first_prompt(self._cfg())
+        self.assertIn("开始处理", text)
+        self.assertIn(os.path.join(self.tmp, "tasks"), text)
+        self.assertNotIn("{tasks_dir}", text)
+        self.assertNotIn("{trigger}", text)
+
+    def test_builtin_when_file_missing(self):
+        text = setup.build_first_prompt(self._cfg(first_prompt_path=os.path.join(self.tmp, "nope.txt")))
+        self.assertIn("开始处理", text)
+        self.assertNotIn("{trigger}", text)
+
+    def test_builtin_custom_trigger(self):
+        text = setup.build_first_prompt(self._cfg(tianshu_trigger_command="开工"))
+        self.assertIn("开工", text)
+        self.assertNotIn("{trigger}", text)
+
+
+class TestBridgeReadme(unittest.TestCase):
+    """ensure_bridge_readme：首次生成协议文档，已存在不覆盖"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="readme_test_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_creates_readme(self):
+        tasks_dir = os.path.join(self.tmp, "tasks")
+        setup.ensure_bridge_readme(tasks_dir)
+        p = os.path.join(tasks_dir, "README.md")
+        self.assertTrue(os.path.isfile(p))
+        with open(p, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("task.json", content)
+        self.assertIn("result.json", content)
+
+    def test_does_not_overwrite_existing(self):
+        tasks_dir = os.path.join(self.tmp, "tasks")
+        os.makedirs(tasks_dir, exist_ok=True)
+        p = os.path.join(tasks_dir, "README.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("用户自定义")
+        setup.ensure_bridge_readme(tasks_dir)
+        with open(p, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "用户自定义")
 
 
 class TestInstallTianshu(unittest.TestCase):
