@@ -213,6 +213,15 @@ class TestInstallTianshu(unittest.TestCase):
         self.assertFalse(os.path.isfile(os.path.join(os.path.dirname(self.tmp), "evil.txt")),
                          "zip-slip 成员不得写出")
 
+    def test_double_dot_filename_allowed(self):
+        # 合法双点文件名（..foo.txt）不应被 zip-slip 守卫误拒——守卫只挡
+        # normpath 后首段为 ".." 的目录穿越，不挡以 ".." 开头的普通文件名
+        data = self._zip_bytes([("..foo.txt", "hi")])
+        with mock.patch("requests.get", return_value=self._fake_response(data)):
+            dest = setup.install_tianshu(self.tmp)
+        self.assertTrue(os.path.isfile(os.path.join(dest, "..foo.txt")),
+                        f"合法双点文件名应正常解压: {os.listdir(dest)}")
+
     def test_http_error_raises(self):
         resp = mock.Mock()
         resp.raise_for_status = mock.Mock(side_effect=RuntimeError("404"))
@@ -342,14 +351,36 @@ class TestResolveCliWindow(unittest.TestCase):
         self.assertTrue(called["launch"], "桌面端辅助窗口不应被当作 CLI")
         self.assertEqual(title, "npm", "应跳过 app.tianshu.* 辅助窗口，只认 CLI 新增窗口")
 
+    def test_skips_english_only_desktop_title(self):
+        # 纯英文桌面端窗口标题「Tianshu」（无中文「天枢」）也不得被第 2 级
+        # CLI 特征匹配误判为 CLI 窗口——首轮提示词发错目标是 commit c67b995 的场景
+        cfg = {}
+        called = {"launch": False}
+        wins = ["Tianshu", "微信"]  # 启动前：纯英文标题的桌面端在运行
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            called["launch"] = True
+            wins.append("npm")  # 启动后新增 CLI 窗口
+            return True, "ok"
+
+        title, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertTrue(called["launch"], "纯英文桌面端标题不应阻止 CLI 启动")
+        self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非纯英文桌面端")
+
 
 class TestSendPrompt(unittest.TestCase):
     def test_send_prompt_returns_ok(self):
         sent = {}
 
-        def fake_trigger(title, command, hold=0.5):
+        def fake_trigger(title, command, hold=0.5, enter_times=1):
             sent["title"] = title
             sent["command"] = command
+            sent["enter_times"] = enter_times
             return True
 
         with mock.patch.object(setup, "_send_trigger_to_window", side_effect=fake_trigger):
@@ -357,6 +388,19 @@ class TestSendPrompt(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(sent["title"], "天枢窗口")
         self.assertEqual(sent["command"], "你好天枢")
+
+    def test_send_prompt_presses_enter_twice(self):
+        """首轮提示词：粘贴后连续按两次回车（CLI 实测一次回车不提交）"""
+        sent = {}
+
+        def fake_trigger(title, command, hold=0.5, enter_times=1):
+            sent["enter_times"] = enter_times
+            return True
+
+        with mock.patch.object(setup, "_send_trigger_to_window", side_effect=fake_trigger):
+            ok = setup.send_prompt_to_tianshu("首轮提示词", "npm")
+        self.assertTrue(ok)
+        self.assertEqual(sent["enter_times"], 2, "首轮提示词必须按两次回车")
 
     def test_send_prompt_window_missing(self):
         with mock.patch.object(setup, "_send_trigger_to_window", return_value=False):

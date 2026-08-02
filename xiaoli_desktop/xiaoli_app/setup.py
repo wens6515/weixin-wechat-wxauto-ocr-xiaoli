@@ -246,7 +246,9 @@ def install_tianshu(dest_dir, progress_cb=None, url=DEFAULT_TIANSHU_URL, timeout
         with zipfile.ZipFile(tmp_zip.name) as zf:
             for m in zf.infolist():
                 norm = os.path.normpath(m.filename)
-                if norm.startswith("..") or os.path.isabs(norm):
+                # 目录穿越 = normpath 后首段为 ".."（..\evil.txt / ../evil.txt / 裸 ..）；
+                # 不能用 startswith("..")——会误拒 ..foo.txt 类合法双点文件名
+                if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
                     raise ValueError(f"拒绝非法压缩成员: {m.filename}")
             zf.extractall(dest_dir)
     finally:
@@ -257,17 +259,23 @@ def install_tianshu(dest_dir, progress_cb=None, url=DEFAULT_TIANSHU_URL, timeout
     return find_tianshu_dir(dest_dir) or dest_dir
 
 
-def _send_trigger_to_window(title, command, hold=0.5):
-    """激活窗口 → 剪贴板粘贴 → 回车（延迟 import，测试可 mock）。"""
+def _send_trigger_to_window(title, command, hold=0.5, enter_times=1):
+    """激活窗口 → 剪贴板粘贴 → 回车（延迟 import，测试可 mock）。
+
+    enter_times：连续回车次数——天枢 CLI 实测首轮提示词需按两次回车才提交。
+    """
     from xiaoli_bot import send_trigger_to_window
-    return send_trigger_to_window(title, command, hold)
+    return send_trigger_to_window(title, command, hold, enter_times)
 
 
 def send_prompt_to_tianshu(text, window_title):
-    """把文字发送给天枢窗口（激活→剪贴板粘贴→回车）。返回 bool。"""
+    """把首轮提示词发送给天枢窗口（激活→剪贴板粘贴→两次回车）。返回 bool。
+
+    天枢 CLI 实测：粘贴后单次回车不提交，需连续两次回车（首轮提示词均如此）。
+    """
     if not window_title or not text:
         return False
-    return _send_trigger_to_window(window_title, text)
+    return _send_trigger_to_window(window_title, text, enter_times=2)
 
 
 def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None):
@@ -285,9 +293,10 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
     cfg = cfg or {}
 
     def _is_desktop(name):
-        """桌面端窗口特征：中文「天枢」或 app.tianshu.* Electron 辅助窗口。"""
-        low = name.lower()
-        return "天枢" in name or low.startswith("app.tianshu") or "tianshu-desktop" in low
+        """桌面端窗口特征：中文「天枢」、纯英文 Tianshu、app.tianshu.* Electron
+        辅助窗口、tianshu-desktop 进程窗口——统一按 tianshu 关键词识别。
+        纯英文标题（Tianshu）漏判会被第 2 级 CLI 特征误选，首轮提示词发错目标。"""
+        return "天枢" in name or "tianshu" in name.lower()
 
     # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）
     t = (cfg.get("tianshu_window_title") or "").strip()
@@ -299,13 +308,13 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
         except Exception:
             pass
 
-    # 2) CLI 特征窗口（npm/rivet/Tianshu，排除桌面端「天枢」）
+    # 2) CLI 特征窗口（npm/rivet——CLI 窗口标题实测为 npm prefix；Tianshu 是桌面端特征）
     try:
         for name in list_windows_fn():
             if _is_desktop(name):
                 continue
             low = name.lower()
-            if "npm" in low or "rivet" in low or "tianshu" in low:
+            if "npm" in low or "rivet" in low:
                 return name, ""
     except Exception:
         pass
@@ -323,9 +332,15 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
     for _ in range(15):
         try:
             wins = set(list_windows_fn())
-            new_wins = [n for n in wins - before_wins if not _is_desktop(n)]
+            # 新增窗口 = 刚启动的 CLI（桌面端启动前已存在，在 before_wins 内；
+            # 不再用 _is_desktop 排除——CLI 窗口标题实测可能是 npm prefix 或 Tianshu）
+            new_wins = sorted(wins - before_wins)
             if new_wins:
-                return sorted(new_wins)[0], ""
+                for n in new_wins:
+                    low = n.lower()
+                    if "npm" in low or "rivet" in low:
+                        return n, ""
+                return new_wins[0], ""
         except Exception:
             pass
         sleep_fn(1)

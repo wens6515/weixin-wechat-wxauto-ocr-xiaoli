@@ -301,8 +301,12 @@ def activate_window_by_title(title):
         return False
 
 
-def send_trigger_to_window(title, command, hold=0.5):
-    """激活窗口 → 剪贴板粘贴指令 → 回车。返回 bool"""
+def send_trigger_to_window(title, command, hold=0.5, enter_times=1):
+    """激活窗口 → 剪贴板粘贴指令 → 回车（enter_times 次）。返回 bool
+
+    enter_times=2：天枢 CLI 首轮提示词实测需连续两次回车才提交；
+    日常唤起指令保持 1 次（默认），避免重复触发。
+    """
     if not activate_window_by_title(title):
         return False
     time.sleep(hold)
@@ -311,8 +315,10 @@ def send_trigger_to_window(title, command, hold=0.5):
     time.sleep(0.1)
     pyautogui.hotkey("ctrl", "v")
     time.sleep(0.2)
-    pyautogui.press("enter")
-    logger.info(f"[天枢] 已向窗口「{title}」发送指令: {command}")
+    for _ in range(enter_times):
+        pyautogui.press("enter")
+        time.sleep(0.15)
+    logger.info(f"[天枢] 已向窗口「{title}」发送指令: {command}（回车 {enter_times} 次）")
     return True
 
 
