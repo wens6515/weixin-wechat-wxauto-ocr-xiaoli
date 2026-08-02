@@ -798,6 +798,12 @@ class ModelsPage(QWidget):
         card["chat_model"] = self.cmb_text_model.currentText().strip()
         card["vision_provider"] = self.cmb_vision_provider.currentData() or ""
         card["vision_model"] = self.cmb_vision_model.currentText().strip()
+        # providers 表同步落盘：用户在表格添加的 Provider/模型必须在 config.json
+        # 持久化，否则重启后 load_config_store 读回旧 providers，添加的模型丢失
+        # （用户实测：保存模型配置 → 关掉程序再打开模型没了）
+        provs = self._collect_providers()
+        self.ctx.cfg["providers"] = provs
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         try:
             card_store.save_card(self.ctx.cards_dir, card)
         except ValueError as e:
@@ -806,7 +812,7 @@ class ModelsPage(QWidget):
         # 重新投影 + 引擎热应用
         self.ctx.cfg = config_store.load_config_store(self.ctx.cfg_path, self.ctx.cards_dir)
         if self.ctx.engine is not None:
-            self.ctx.engine.apply_role(card, self.ctx.providers())
+            self.ctx.engine.apply_role(card, provs)
         self.refresh()
         QMessageBox.information(self, "已保存", "模型配置已保存并应用")
 
@@ -1078,6 +1084,20 @@ class SettingsPage(QWidget):
         ffl.addWidget(self.btn_files_save)
         lay.addWidget(g_files)
 
+        # 任务工作目录（小漓 ↔ 天枢交换任务/成果文件；首次启动引导选择的目录）
+        g_tasks = QGroupBox("任务工作目录（小漓与天枢交换任务/成果文件）")
+        tfl = QHBoxLayout(g_tasks)
+        self.ed_tasks = QLineEdit()
+        self.ed_tasks.setReadOnly(True)
+        btn_tasks = QPushButton("浏览…")
+        btn_tasks.clicked.connect(self._pick_tasks_dir)
+        self.btn_tasks_save = QPushButton("保存")
+        self.btn_tasks_save.clicked.connect(self._save_tasks_dir)
+        tfl.addWidget(self.ed_tasks, 1)
+        tfl.addWidget(btn_tasks)
+        tfl.addWidget(self.btn_tasks_save)
+        lay.addWidget(g_tasks)
+
         # 成果排除登记
         g_stem = QGroupBox("成果排除登记（防止 bot 发出去的成果被误当用户文件）")
         stl = QVBoxLayout(g_stem)
@@ -1111,6 +1131,7 @@ class SettingsPage(QWidget):
         idx = self.cb_send.findData(cfg.get("file_send_method", "clipboard"))
         self.cb_send.setCurrentIndex(max(0, idx))
         self.ed_files.setText(cfg.get("file_storage_path", ""))
+        self.ed_tasks.setText(cfg.get("tasks_dir", ""))
         self._refresh_stems()
 
     def _view_memory(self):
@@ -1164,6 +1185,23 @@ class SettingsPage(QWidget):
         self.ctx.cfg["file_storage_path"] = self.ed_files.text().strip()
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         QMessageBox.information(self, "已保存", "微信文件目录已保存")
+
+    def _pick_tasks_dir(self):
+        p = QFileDialog.getExistingDirectory(
+            self, "选择任务工作目录", self.ed_tasks.text() or "")
+        if p:
+            self.ed_tasks.setText(p)
+
+    def _save_tasks_dir(self):
+        self.ctx.cfg["tasks_dir"] = self.ed_tasks.text().strip()
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        # 新任务目录自动初始化任务桥协议文档（幂等，已存在不覆盖）
+        try:
+            from xiaoli_app import setup as _setup
+            _setup.ensure_bridge_readme(self.ctx.cfg.get("tasks_dir", ""))
+        except Exception:
+            pass
+        QMessageBox.information(self, "已保存", "任务工作目录已保存")
 
     def _refresh_stems(self):
         cfg = self.ctx.cfg or {}
