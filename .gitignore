@@ -12,6 +12,15 @@ bot.log
 # 配置（可能包含密钥，请勿提交；需要模板可另存 config.example.json）
 config.json
 
+# 角色卡（运行时生成，含用户人格设定，请勿提交；可导出 .json 备份分享）
+cards/
+
+# Python 虚拟环境与打包产物
+.venv/
+build/
+dist/
+*.spec
+
 # 工具/工作目录
 .rivet/
 
