@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QTableWidgetItem
 
 # offscreen 平台下模态对话框没有事件循环驱动 exec() → 永久阻塞。
 # 冒烟测试只验证构造/刷新/保存逻辑，patch 模态为 no-op。
@@ -153,6 +153,68 @@ class TestUiSmoke(unittest.TestCase):
         self.assertGreaterEqual(rows, 1)
         provs = page._collect_providers()
         self.assertEqual(provs[0]["id"], "deepseek")
+        win.close()
+
+    def test_save_model_config_persists_providers(self):
+        """RED 复现：点「保存模型配置」后 providers 表必须落盘 config.json。
+
+        用户实测：模型页添加模型 → 点保存模型配置 → 关掉程序再打开模型没了。
+        根因：_save_model_config 只写角色卡（cards/<id>.json），不写 providers
+        表——重启后 load_config_store 从 config.json 读回旧 providers，添加的
+        模型/Provider 消失。
+        """
+        ctx = self._make_ctx()
+        win = MainWindow(ctx)
+        page = win.pages["模型"]
+        page.refresh()
+        # 添加一行 provider（模拟用户添加模型）
+        page._add_row()
+        r = page.table.rowCount() - 1
+        page.table.setItem(r, 0, QTableWidgetItem("智谱"))
+        page.table.setItem(r, 1, QTableWidgetItem("https://open.bigmodel.cn/api/paas/v4/chat/completions"))
+        page.table.setItem(r, 2, QTableWidgetItem("sk-test"))
+        page.table.setItem(r, 3, QTableWidgetItem("zhipu:glm-4.6"))
+        page.table.setItem(r, 4, QTableWidgetItem("zhipu"))
+        # 模拟用户点「保存模型配置」（只保存角色卡模型选择）
+        page._save_model_config()
+        # config.json 里必须包含新增的 zhipu provider
+        with open(ctx.cfg_path, "r", encoding="utf-8") as f:
+            disk = json.load(f)
+        ids = [p.get("id") for p in disk.get("providers", [])]
+        self.assertIn("zhipu", ids,
+                      "保存模型配置后 providers 表必须落盘，否则重启模型丢失")
+        win.close()
+
+    def test_qss_sets_combobox_popup_color(self):
+        """RED 复现：QComboBox 下拉弹层文字颜色必须显式设置。
+
+        用户实测：浅色界面上下拉框文字是白色看不清。根因：QSS 只设置了
+        QComboBox 控件本体 color，未设置 QComboBox QAbstractItemView——
+        深色系统主题下下拉项继承 palette 白字，与浅色背景撞色。
+        """
+        import xiaoli_app.ui as ui_mod
+        self.assertIn("QComboBox QAbstractItemView", ui_mod.APP_QSS,
+                      "QSS 必须设置下拉弹层（QAbstractItemView）颜色")
+        # 弹层文字色必须与界面文字一致（深灰 #374151），不能是白色
+        import re
+        m = re.search(r"QComboBox QAbstractItemView\s*\{([^}]*)\}", ui_mod.APP_QSS)
+        self.assertIsNotNone(m, "QComboBox QAbstractItemView 规则必须存在")
+        self.assertIn("#374151", m.group(1), "下拉弹层文字必须是深灰（与界面一致）")
+
+    def test_settings_page_has_tasks_dir_entry(self):
+        """RED 复现：设置页应有「任务工作目录」编辑入口。
+
+        用户实测：设置页空白——首次启动选的任务工作目录无处查看/修改。
+        根因：设置页只有微信文件目录，没有任务工作目录（tasks_dir）入口。
+        """
+        ctx = self._make_ctx()
+        win = MainWindow(ctx)
+        page = win.pages["设置"]
+        page.refresh()
+        self.assertTrue(hasattr(page, "ed_tasks"),
+                        "设置页应有任务工作目录编辑框 ed_tasks")
+        self.assertEqual(page.ed_tasks.text(), ctx.cfg.get("tasks_dir", ""),
+                         "任务工作目录应回填当前配置")
         win.close()
 
     def test_tasks_page_scans_dir(self):

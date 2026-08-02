@@ -11,7 +11,7 @@ APP_QSS = """
 * { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
 /* 深色系统主题下 palette.WindowText 为白色——必须显式给文字控件设色，否则白字隐形 */
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
-QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar { color: #374151; }
+QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: #374151; }
 QMainWindow, QWidget { background: #EEF2F9; }
 QTabWidget::pane { border: none; background: #EEF2F9; }
 QTabBar::tab { background: transparent; padding: 9px 20px; margin-right: 6px;
@@ -51,6 +51,11 @@ QPushButton:disabled { color: #9CA3AF; background: #F9FAFB; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: #FFFFFF; border: 1px solid #D1D5DB; border-radius: 6px;
     padding: 4px 8px; }
+/* 下拉弹层（QComboBox 弹出的列表）：深色系统主题下 palette 文字是白色，
+   必须显式设深灰文字 + 白底，否则浅色界面上下拉项白字看不清 */
+QComboBox QAbstractItemView {
+    color: #374151; background: #FFFFFF; border: 1px solid #D1D5DB;
+    selection-background-color: #EAF0FE; selection-color: #1F2937; }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid #4A7CF7; background: #FBFDFF; }
 QListWidget, QTableWidget { background: #FFFFFF; border: 1px solid #E5E7EB;
