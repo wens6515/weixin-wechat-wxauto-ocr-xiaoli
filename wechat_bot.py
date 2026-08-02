@@ -963,16 +963,25 @@ class WeChatBot:
         except Exception as e:
             logger.error(f"处理消息异常: {e}\n{traceback.format_exc()}")
 
-    def run(self):
+    def run(self, stop_event=None, poll_interval=2.0):
         state = "暂停中，输入 resume 开始回复" if self.paused else "运行中"
         logger.info(f"✅ 小漓已启动（{state}）")
         while True:
+            if stop_event is not None and stop_event.is_set():
+                logger.info("🛑 引擎已停止")
+                return
             try:
                 self.process_new_messages()
-                time.sleep(2)
             except Exception as e:
                 logger.error(f"主循环异常: {e}\n{traceback.format_exc()}")
-                time.sleep(5)
+            # 可中断睡眠：stop 响应延迟 ≤100ms（控制台模式不传 stop_event，行为不变）
+            remain = poll_interval
+            while remain > 1e-9:
+                if stop_event is not None and stop_event.is_set():
+                    logger.info("🛑 引擎已停止")
+                    return
+                time.sleep(min(0.1, remain))
+                remain -= 0.1
 
 
 class Controller:
