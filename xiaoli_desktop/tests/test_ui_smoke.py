@@ -83,6 +83,26 @@ class TestUiSmoke(unittest.TestCase):
                 refresh()
         win.close()
 
+    def test_pages_filled_on_construct(self):
+        """RED 复现：MainWindow 构造后各页必须自动填充数据。
+
+        用户实测：模型添加后保存成功（config.json 已落盘），但重启程序后
+        模型页表格空白、设置页编辑框空白。根因：MainWindow 从不调用各页
+        refresh()——模型页表格/设置页回填只在 refresh() 里发生，构造后
+        从未执行，界面永远显示空数据（保存的内容都在，只是不显示）。
+        """
+        ctx = self._make_ctx()
+        win = MainWindow(ctx)  # 构造即应填充，不手动调 refresh
+        # 模型页表格应有数据（_make_ctx 有 deepseek provider）
+        models = win.pages["模型"]
+        self.assertGreaterEqual(models.table.rowCount(), 1,
+                                "MainWindow 构造后模型页表格必须自动填充")
+        # 设置页任务目录编辑框应回填
+        settings = win.pages["设置"]
+        self.assertEqual(settings.ed_tasks.text(), ctx.cfg.get("tasks_dir", ""),
+                         "MainWindow 构造后设置页任务目录必须回填")
+        win.close()
+
     def test_home_page_button_states(self):
         """状态机主按钮：初始化 → 启动 bot → 暂停运行 → 继续运行（随引擎状态切换）"""
         import time
