@@ -6,6 +6,7 @@
 import os
 import subprocess
 import tempfile
+import time
 import zipfile
 
 import requests
@@ -267,6 +268,66 @@ def send_prompt_to_tianshu(text, window_title):
     if not window_title or not text:
         return False
     return _send_trigger_to_window(window_title, text)
+
+
+def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None):
+    """定位天枢 CLI 窗口标题，返回 (title, detail)。
+
+    title 非空 = 找到可发送的 CLI 窗口；空 = detail 含失败原因（launch 失败/窗口未出现）。
+    三级定位，逐级降级：
+    1. 配置的 tianshu_window_title（排除桌面端污染值——标题含中文「天枢」的窗口是桌面端）；
+    2. CLI 特征窗口（标题含 npm/rivet/Tianshu 且非桌面端）；
+    3. 启动 CLI（rivet）后按新增窗口匹配（CLI 窗口标题可能是 npm prefix 等不可预测值）。
+    """
+    list_windows_fn = list_windows_fn or _list_windows
+    launch_fn = launch_fn or launch_tianshu
+    sleep_fn = sleep_fn or time.sleep
+    cfg = cfg or {}
+
+    def _is_desktop(name):
+        return "天枢" in name
+
+    # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）
+    t = (cfg.get("tianshu_window_title") or "").strip()
+    if t and not _is_desktop(t):
+        try:
+            for name in list_windows_fn():
+                if t.lower() in name.lower() and not _is_desktop(name):
+                    return t, ""
+        except Exception:
+            pass
+
+    # 2) CLI 特征窗口（npm/rivet/Tianshu，排除桌面端「天枢」）
+    try:
+        for name in list_windows_fn():
+            if _is_desktop(name):
+                continue
+            low = name.lower()
+            if "npm" in low or "rivet" in low or "tianshu" in low:
+                return name, ""
+    except Exception:
+        pass
+
+    # 3) 启动 CLI + 轮询新增窗口
+    before_wins = set()
+    try:
+        before_wins = set(list_windows_fn())
+    except Exception:
+        pass
+    ok_launch, detail = launch_fn(cfg)
+    if not ok_launch:
+        return "", f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
+    sleep_fn(8)  # CLI 启动 + 加载工作目录
+    for _ in range(15):
+        try:
+            wins = set(list_windows_fn())
+            new_wins = [n for n in wins - before_wins if not _is_desktop(n)]
+            if new_wins:
+                return sorted(new_wins)[0], ""
+        except Exception:
+            pass
+        sleep_fn(1)
+    return "", "天枢 CLI 已启动但窗口未出现，请稍后点「重试发送」"
 
 
 def open_first_prompt(path):

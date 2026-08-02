@@ -163,6 +163,23 @@ class TestUiSmoke(unittest.TestCase):
         page.refresh()  # 空目录不崩溃
         win.close()
 
+    def test_app_context_paths_anchor_to_base(self):
+        """配置路径锚定稳定目录，不随 cwd 漂移（保存不丢失的根因修复）"""
+        import xiaoli_app.ui as ui_mod
+        cwd = os.getcwd()
+        try:
+            os.chdir(tempfile.gettempdir())
+            ctx = AppContext()
+            self.assertTrue(os.path.isabs(ctx.cfg_path), "cfg_path 必须是绝对路径")
+            self.assertTrue(os.path.isabs(ctx.cards_dir), "cards_dir 必须是绝对路径")
+            # 源码模式下锚定项目根（xiaoli_desktop）
+            base = os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.abspath(ui_mod.__file__))))
+            self.assertEqual(ctx.cfg_path, os.path.join(base, "config.json"))
+            self.assertEqual(ctx.cards_dir, os.path.join(base, "cards"))
+        finally:
+            os.chdir(cwd)
+
     def test_gui_entry_importable(self):
         # 入口模块可导入（不执行 main，避免启动引擎连微信）
         import xiaoli_gui  # noqa: F401

@@ -221,9 +221,6 @@ class HomePage(QWidget):
             det.setText(str(item.get("detail", "")))
         tianshu_ok = bool(report.get("tianshu", {}).get("ok"))
         self.btn_install.setVisible(not tianshu_ok)
-        win = report.get("tianshu", {}).get("window")
-        if win and not self.ctx.cfg.get("tianshu_window_title"):
-            self.ctx.cfg["tianshu_window_title"] = win
         # 初始化完成后自动触发首轮提示词流程
         eng = self.ctx.engine
         if (eng is not None and eng.state == "initialized"
@@ -302,51 +299,12 @@ class HomePage(QWidget):
                 setup.open_first_prompt(fp)
             except Exception:
                 pass
-        title = (cfg.get("tianshu_window_title") or "").strip()
+        # 定位 CLI 窗口（排除桌面端污染值）：手动配置 → CLI 特征 → 启动后新增窗口
+        title, detail = setup.resolve_cli_window(cfg)
         if not title:
-            try:
-                for name in setup._list_windows():
-                    if "天枢" in name or "Tianshu" in name:
-                        title = name
-                        break
-            except Exception:
-                pass
-        if not title:
-            # 记录启动前的窗口，便于启动后识别 CLI 新窗口（标题可能是 npm prefix 等非关键字）
-            before_wins = set()
-            try:
-                before_wins = set(setup._list_windows())
-            except Exception:
-                pass
-            # 天枢 CLI 未运行 → 自动拉起，等待初始化完成（8 秒）再找窗口
-            ok_launch, detail = setup.launch_tianshu(cfg)
-            if not ok_launch:
-                self._prompt_state = f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
-                self._prompt_running = False
-                return
-            time.sleep(8)  # CLI 启动 + 加载工作目录
-            deadline = time.time() + 15
-            while time.time() < deadline:
-                try:
-                    wins = set(setup._list_windows())
-                    # 1) 关键字匹配（天枢/Tianshu）；2) 启动后新增的窗口（CLI 实际标题）
-                    for name in wins:
-                        if "天枢" in name or "Tianshu" in name:
-                            title = name
-                            break
-                    if not title:
-                        new_wins = wins - before_wins
-                        if new_wins:
-                            title = sorted(new_wins)[0]
-                except Exception:
-                    pass
-                if title:
-                    break
-                time.sleep(1)
-            if not title:
-                self._prompt_state = "天枢 CLI 已启动但窗口未出现，请稍后点「重试发送」"
-                self._prompt_running = False
-                return
+            self._prompt_state = detail or "未找到天枢 CLI 窗口"
+            self._prompt_running = False
+            return
         ok = setup.send_prompt_to_tianshu(text, title)
         self._prompt_state = "首轮提示词已发送给天枢 ✓" if ok else "发送失败，请确认天枢窗口已打开后重试"
         if ok:

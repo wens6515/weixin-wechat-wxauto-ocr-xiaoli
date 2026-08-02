@@ -265,6 +265,63 @@ class TestLaunchTianshu(unittest.TestCase):
         self.assertIn("npm", detail, "提示应包含 npm install 指引")
 
 
+class TestResolveCliWindow(unittest.TestCase):
+    """resolve_cli_window：定位 CLI 窗口，杜绝把提示词发给桌面端窗口"""
+
+    def test_uses_manual_config_title(self):
+        cfg = {"tianshu_window_title": "npm"}  # 用户手动配置的 CLI 标题
+        title, detail = setup.resolve_cli_window(
+            cfg, list_windows_fn=lambda: ["npm", "微信"])
+        self.assertEqual(title, "npm")
+        self.assertEqual(detail, "")
+
+    def test_ignores_desktop_polluted_title(self):
+        # RED 复现：config.json 被环境检查污染为桌面端「天枢 · Tianshu」时，
+        # 必须忽略该值并启动 CLI，而不是把提示词发给桌面端窗口
+        cfg = {"tianshu_window_title": "天枢 · Tianshu"}
+        called = {"launch": False}
+        wins = ["天枢 · Tianshu", "微信"]  # 启动前：桌面端在运行
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            called["launch"] = True
+            wins.append("npm")  # 启动后新增 CLI 窗口
+            return True, "ok"
+
+        title, detail = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertTrue(called["launch"], "桌面端污染值不应阻止 CLI 启动")
+        self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非桌面端")
+
+    def test_launches_cli_and_finds_new_window(self):
+        cfg = {}
+        wins = ["微信"]
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            wins.append("npm")
+            return True, "ok"
+
+        title, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertEqual(title, "npm")
+
+    def test_launch_failure_reports(self):
+        cfg = {}
+        title, detail = setup.resolve_cli_window(
+            cfg, list_windows_fn=lambda: [],
+            launch_fn=lambda c: (False, "未找到 rivet 命令"),
+            sleep_fn=lambda s: None)
+        self.assertEqual(title, "")
+        self.assertIn("rivet", detail)
+
+
 class TestSendPrompt(unittest.TestCase):
     def test_send_prompt_returns_ok(self):
         sent = {}
