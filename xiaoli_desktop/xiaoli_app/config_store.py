@@ -18,6 +18,7 @@ AgentBot 读到的 cfg 与改造前完全同构 → 引擎零改动风险。
 import json
 import logging
 import os
+import shutil
 
 logger = logging.getLogger("xiaoli")
 
@@ -56,8 +57,51 @@ def default_data_dir():
 
 
 def default_tasks_dir():
-    """任务桥默认目录（小漓 ↔ 天枢交换任务文件）。"""
-    return os.path.join(default_data_dir(), "wxauto")
+    """任务桥默认目录（小漓 ↔ 天枢交换任务文件）。
+
+    必须落在天枢 CLI 工作区内（tianshu_workdir 之下）——天枢的路径安全
+    检查拒绝读取工作区外目录（实测：tasks_dir 在 exe 旁时 read_file 报
+    "Path outside project directory"，任务无法执行）。默认
+    tianshu_workdir\\wxauto = D:\\工作间\\wxauto。
+    """
+    workdir = os.environ.get("XIAOLI_TIANSHU_WORKDIR", "").strip() or r"D:\工作间"
+    return os.path.join(workdir, "wxauto")
+
+
+def ensure_tasks_dir_in_workdir(cfg, tasks_dir):
+    """确保任务目录落在天枢工作区内；不在则迁移到 tianshu_workdir\\wxauto。
+
+    返回 (new_tasks_dir, moved)：moved=True 表示发生了迁移（旧目录数据已复制）。
+    幂等：tasks_dir 已在工作区内（或其前缀）时原样返回。
+    """
+    workdir = str(cfg.get("tianshu_workdir") or r"D:\工作间").strip()
+    if not tasks_dir:
+        return tasks_dir, False
+    try:
+        tasks_abs = os.path.abspath(tasks_dir)
+        work_abs = os.path.abspath(workdir)
+        if tasks_abs.startswith(work_abs + os.sep) or tasks_abs == work_abs:
+            return tasks_dir, False  # 已在工作区内
+    except Exception:
+        pass
+    new_dir = os.path.join(workdir, "wxauto")
+    # 旧目录有数据 → 复制（任务历史/成果登记/协议文档不丢）
+    try:
+        if os.path.isdir(tasks_dir) and os.listdir(tasks_dir):
+            os.makedirs(new_dir, exist_ok=True)
+            for name in os.listdir(tasks_dir):
+                src = os.path.join(tasks_dir, name)
+                dst = os.path.join(new_dir, name)
+                if os.path.isdir(src):
+                    if not os.path.exists(dst):
+                        shutil.copytree(src, dst)
+                elif not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+            logger.info(f"[配置] 任务目录已迁移 {tasks_dir} → {new_dir}")
+        return new_dir, True
+    except OSError as e:
+        logger.error(f"[配置] 任务目录迁移失败: {e}，仍用 {new_dir}")
+        return new_dir, True
 
 
 def default_memory_file():
@@ -252,6 +296,11 @@ def load_config_store(path="config.json", cards_dir="cards"):
     }.items():
         if k not in cfg:
             cfg[k] = v
+    # 任务目录必须落在天枢工作区内，否则天枢路径安全检查拒绝读取
+    # （实测 "Path outside project directory"，任务无法执行）。迁移旧位置数据。
+    tasks_dir, _moved = ensure_tasks_dir_in_workdir(cfg, str(cfg.get("tasks_dir") or "").strip())
+    if _moved or not cfg.get("tasks_dir"):
+        cfg["tasks_dir"] = tasks_dir or default_tasks_dir()
     card = _read_card(cards_dir, cfg.get("active_card_id", DEFAULT_CARD_ID))
     if card is None:
         logger.warning(f"[配置] 活跃角色卡不存在: {cfg.get('active_card_id')}，使用空卡投影")

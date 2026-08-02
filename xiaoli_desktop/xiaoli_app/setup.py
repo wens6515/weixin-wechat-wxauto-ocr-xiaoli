@@ -237,20 +237,26 @@ def configure_tianshu_auto_approval(cfg, config_path=None):
         return False, "未找到 rivet 命令（无需配置，或先 npm install -g tianshu-tui）"
     target = "dangerously-skip-permissions"
     # 幂等：读 config.json，已配置则跳过（不重复写盘/执行）
+    # 数据根有多个：CLI 用 %LOCALAPPDATA%\.rivet（rivet logs 实测）；
+    # 桌面端便携版用 exe 旁 TianshuData\.rivet。全部配置，任一缺失都补。
     if config_path is None:
         data_root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
         config_path = os.path.join(data_root, ".rivet", "config.json")
-    try:
-        if os.path.isfile(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            # approval 字段在 agent 子对象下（.agent.approval），不在顶层
-            agent = data.get("agent") if isinstance(data, dict) else None
-            current = agent.get("approval") if isinstance(agent, dict) else None
-            if current == target:
-                return True, "天枢 CLI 已是完全自动（YOLO），无需重复配置"
-    except Exception:
-        pass  # 读取失败 → 按未配置处理，执行命令
+    all_configured = True
+    for cp in _tianshu_config_paths(config_path):
+        try:
+            if os.path.isfile(cp):
+                with open(cp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                agent = data.get("agent") if isinstance(data, dict) else None
+                current = agent.get("approval") if isinstance(agent, dict) else None
+                if current == target:
+                    continue  # 该数据根已配置
+        except Exception:
+            pass
+        all_configured = False
+    if all_configured:
+        return True, "天枢 CLI 已是完全自动（YOLO），无需重复配置"
     try:
         r = subprocess.run(
             [rivet, "config", "set-approval", target],
@@ -261,6 +267,20 @@ def configure_tianshu_auto_approval(cfg, config_path=None):
         return False, f"配置天枢 CLI 自动模式失败（{r.returncode}）"
     except Exception as e:
         return False, f"配置天枢 CLI 自动模式失败: {e}"
+
+
+def _tianshu_config_paths(primary):
+    """天枢各数据根的 config.json 路径（CLI 主根 + 桌面端便携根）。
+
+    桌面端便携版（D:\\AI\\Tianshu\\TianshuData\\.rivet）的 approval 也必须
+    配置——用户可能在桌面端而非 CLI 运行天枢。
+    """
+    paths = [primary]
+    for cand in (r"D:\AI\Tianshu", os.path.expanduser("~")):
+        p = os.path.join(cand, "TianshuData", ".rivet", "config.json")
+        if os.path.isfile(p) and p not in paths:
+            paths.append(p)
+    return paths
 
 
 def launch_tianshu(cfg):
