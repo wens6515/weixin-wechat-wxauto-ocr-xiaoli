@@ -679,6 +679,8 @@ class AgentBot(WeChatBot):
                             # 登记回传的成果文件（源路径 + 主干+发送时刻）：目录扫描时排除，
                             # 防止把 bot 自己发出去的成果（含微信写入接收目录的副本）误当成"用户本次发送的文件"投递进下一轮任务附件
                             self._register_sent_back(fpath)
+                # 无论发送成败，任务结果都写入对话记忆（记忆记录的是任务产出，不是发送状态）
+                self._remember_task_result(chat, result)
             finally:
                 self._sending_lock = False
 
@@ -687,6 +689,21 @@ class AgentBot(WeChatBot):
         except Exception as e:
             logger.error(f"[回传] 轮询异常: {e}")
             return []
+
+    def _remember_task_result(self, chat, result):
+        """任务回传后把结果写入该聊天的对话记忆，让小漓后续能回忆任务成果。
+        与投递时写入的 '[任务] ...' / '[任务已投递天枢处理]' 构成完整对话流"""
+        if not chat:
+            return
+        status = result.get("status", "success")
+        reply_text = str(result.get("reply_text", "")).strip()
+        if status == "failed":
+            reply_text = reply_text or "任务处理失败了，不好意思呀～"
+        summary = f"[任务结果] {reply_text}" if reply_text else "[任务结果] 任务完成"
+        files = result.get("files") or []
+        if files:
+            summary += "，成果文件: " + "、".join(str(f) for f in files)
+        self._add_history(chat, "assistant", summary[:500])
 
     def _tick_poll_outbox(self):
         """按间隔轮询 outbox（不受消息 cooldown / 任务暂停限制）"""
@@ -1603,6 +1620,35 @@ def run_self_test():
               str(bot_h2._sent_back_stems))
         got_h2 = bot_h2._find_user_file(dir_h)
         check("T14 重启后前缀变体仍被排除", got_h2 == target_h, str(got_h2))
+
+        # ---- T15: 任务结果回写对话记忆（deliver 闭包调用 _remember_task_result） ----
+        def make_mem_bot(dirpath):
+            b = AgentBot.__new__(AgentBot)
+            b.memory_db = {}
+            b.memory_file = os.path.join(dirpath, "mem.json")
+            b.max_history = 1000
+            return b
+
+        mem_dir = os.path.join(tmp, "mem")
+        os.makedirs(mem_dir)
+        mb = make_mem_bot(mem_dir)
+        mb._remember_task_result("王文生", {"status": "success", "reply_text": "网站做好了，见成果文件", "files": ["site.zip"]})
+        hist = mb.memory_db.get("王文生", [])
+        check("T15 成功结果写入记忆",
+              len(hist) == 1 and hist[0]["role"] == "assistant"
+              and "[任务结果] 网站做好了，见成果文件，成果文件: site.zip" in hist[0]["content"], str(hist))
+        mb._remember_task_result("王文生", {"status": "failed", "reply_text": ""})
+        check("T15 失败结果写入记忆（默认文案）",
+              len(mb.memory_db["王文生"]) == 2 and "任务处理失败了" in mb.memory_db["王文生"][1]["content"],
+              str(mb.memory_db["王文生"]))
+        mb._remember_task_result("", {"status": "success", "reply_text": "x"})
+        check("T15 空 chat 不写记忆", len(mb.memory_db) == 1, str(mb.memory_db))
+        check("T15 记忆落盘", os.path.isfile(os.path.join(mem_dir, "mem.json")))
+        mb2 = make_mem_bot(mem_dir)
+        mb2._load_memory()
+        check("T15 重启后任务结果记忆仍在",
+              "王文生" in mb2.memory_db and "[任务结果]" in mb2.memory_db["王文生"][0]["content"],
+              str(mb2.memory_db.keys()))
 
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
