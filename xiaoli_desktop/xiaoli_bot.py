@@ -487,6 +487,7 @@ class AgentBot(WeChatBot):
         self.tasks_dir = cfg.get("tasks_dir", r"D:\工作间\wxauto")
         self.tianshu_window_title = cfg.get("tianshu_window_title", "")
         self.tianshu_trigger_command = cfg.get("tianshu_trigger_command", "开始处理")
+        self.tianshu_workdir = cfg.get("tianshu_workdir", "")  # CLI（rivet）工作目录，resolve_cli_window 第 3 级启动时使用
         self.tianshu_poll_interval = cfg.get("tianshu_poll_interval", 5)
         self._last_poll_time = 0
         self._sending_lock = False  # 成果回传期间置 True，暂停消息轮询防发错联系人
@@ -650,8 +651,12 @@ class AgentBot(WeChatBot):
         # resolve 三级定位（手动配置→CLI 特征→启动后新增窗口），含桌面端排除。
         try:
             from xiaoli_app import setup as _setup
-            title, detail = _setup.resolve_cli_window(
-                {"tianshu_window_title": self.tianshu_window_title})
+            # tianshu_workdir 必须传入——第 3 级自动启动 CLI 时 launch_tianshu 用它
+            # 决定 cwd，缺失会落入 ~ 而非用户配置的工作目录。
+            title, detail = _setup.resolve_cli_window({
+                "tianshu_window_title": self.tianshu_window_title,
+                "tianshu_workdir": getattr(self, "tianshu_workdir", ""),
+            })
             if not title:
                 logger.warning(f"[天枢] 未定位到 CLI 窗口（{detail}），任务已投递但未唤起")
                 return True
@@ -1076,6 +1081,10 @@ class AgentBot(WeChatBot):
     def process_new_messages(self):
         if self.paused:
             return
+        if self._sending_lock:
+            # 成果回传期间彻底暂停：不轮询任务目录、不遍历会话，
+            # 防止 ChatWith 切走窗口打断文件发送/发错联系人
+            return
         # 任务成果轮询不受 cooldown / 任务暂停限制，必须最先执行
         self._tick_poll_outbox()
         resume, self._task_was_active, self._task_end_time = should_resume_listen(
@@ -1088,9 +1097,6 @@ class AgentBot(WeChatBot):
         if not resume:
             # 天枢任务进行中或刚完成（缓冲期内）：暂停消息监听，
             # 缓冲期满后自动恢复，避免 ChatWith 切走窗口打断文件发送
-            return
-        if self._sending_lock:
-            # 成果回传期间暂停消息轮询，防止 ChatWith 切走窗口导致发错联系人
             return
         if self._pending_files:
             # 有待处理文件的聊天：暂停其他消息监听，专注等待该聊天的用户指令

@@ -266,12 +266,17 @@ class TestTaskDispatchWindow(unittest.TestCase):
             wins.append("npm")  # CLI 启动后新增窗口
             return True, "ok"
 
+        def fake_console():
+            # 控制台枚举：启动前无 CLI（桌面端/微信不是控制台类），启动后 CLI 进入
+            return ["npm"] if len(wins) > 2 else []
+
         def fake_trigger(title, command, hold=0.5, enter_times=1):
             sent["title"] = title
             return True
 
         from xiaoli_app import setup as _setup
         with mock.patch.object(_setup, "_list_windows", side_effect=fake_list), \
+             mock.patch.object(_setup, "_console_windows", side_effect=fake_console), \
              mock.patch.object(_setup, "launch_tianshu", side_effect=fake_launch), \
              mock.patch.object(xb, "send_trigger_to_window", side_effect=fake_trigger), \
              mock.patch.object(bot, "_send_text", return_value=None), \
