@@ -36,8 +36,8 @@ logger = logging.getLogger("xiaoli")
 def load_config(path="config.json"):
     default_cfg = {
         "bot_nickname": "小漓",
-        "ai_api_url": "http://127.0.0.1:23333/v1/chat/completions",
-        "ai_api_key": "cs-sk-760a5e19-1334-407e-a710-8a0255a522b4",
+        "ai_api_url": "https://api.deepseek.com/v1/chat/completions",
+        "ai_api_key": "",
         "chat_model": "deepseek:deepseek-v4-flash",
         "chat_temperature": 0.7,
         "chat_top_p": 0.9,
@@ -78,6 +78,9 @@ class WeChatBot:
         self.nickname = cfg["bot_nickname"]
         self.api_url = cfg["ai_api_url"]
         self.api_key = cfg["ai_api_key"]
+        # 视觉模型可指向独立端点（角色卡跨 provider 时由 config_store 投影生成）
+        self.vision_api_url = cfg.get("vision_api_url") or self.api_url
+        self.vision_api_key = cfg.get("vision_api_key") or self.api_key
         self.chat_model = cfg["chat_model"]
         self.chat_temperature = cfg.get("chat_temperature", 0.7)
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
@@ -255,7 +258,7 @@ class WeChatBot:
 
     def call_vision_api(self, image_bytes, prompt_text):
         img_base64 = base64.b64encode(image_bytes).decode()
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
         messages = [
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}},
@@ -272,7 +275,7 @@ class WeChatBot:
             "temperature": temp
         }
         try:
-            resp = requests.post(self.api_url, headers=headers, json=payload, timeout=60)
+            resp = requests.post(self.vision_api_url, headers=headers, json=payload, timeout=60)
             if resp.status_code == 200:
                 data = resp.json()
                 choices = data.get("choices", [])

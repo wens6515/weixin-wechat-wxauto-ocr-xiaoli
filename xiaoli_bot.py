@@ -549,6 +549,34 @@ class AgentBot(WeChatBot):
             logger.error("请输入有效序号")
         return None
 
+    def apply_role(self, card, providers=None):
+        """热切换角色卡：人格/昵称/模型/参数/端点（带锁）。
+
+        card 由 card_store 规范化；providers 为 config.json 的 providers 路由表。
+        端点投影：聊天/视觉按各自 provider 解析 base_url + key（config_store.project_config）。
+        """
+        from xiaoli_app.config_store import project_config
+        proj = project_config({"providers": providers or []}, card)
+        with self._model_lock:
+            self.system_prompt = card.get("system_prompt", self.system_prompt)
+            self.nickname = card.get("nickname") or self.nickname
+            self.chat_model = card.get("chat_model") or self.chat_model
+            self.vision_model = card.get("vision_model") or self.vision_model
+            self.file_model = card.get("classify_model") or self.file_model
+            self.chat_temperature = float(card.get("temperature", self.chat_temperature))
+            self.chat_top_p = float(card.get("top_p", self.chat_top_p))
+            self.vision_temp = float(card.get("vision_temp", self.vision_temp))
+            self.vision_max_tokens = int(card.get("vision_max_tokens", self.vision_max_tokens))
+            self.max_history = int(card.get("max_history", self.max_history))
+            self.api_url = proj.get("ai_api_url", self.api_url)
+            self.api_key = proj.get("ai_api_key", self.api_key)
+            self.vision_api_url = proj.get("vision_api_url", self.vision_api_url)
+            self.vision_api_key = proj.get("vision_api_key", self.vision_api_key)
+        logger.info(
+            f"[角色卡] 已切换: {card.get('name')} "
+            f"(chat={self.chat_model}, vision={self.vision_model}, temp={self.chat_temperature})"
+        )
+
     def _classify_task(self, text):
         if not self.task_enabled:
             return {"is_task": False, "task": ""}
