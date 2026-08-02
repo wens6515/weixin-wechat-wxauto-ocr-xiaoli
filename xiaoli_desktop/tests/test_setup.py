@@ -211,6 +211,39 @@ class TestInstallTianshu(unittest.TestCase):
                 setup.install_tianshu(self.tmp)
 
 
+class TestLaunchTianshu(unittest.TestCase):
+    """launch_tianshu：按配置目录/自动探测启动天枢 exe"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="launch_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_launch_finds_exe_in_install_dir(self):
+        exe = os.path.join(self.tmp, "tianshu-desktop.exe")
+        open(exe, "w").close()
+        started = {}
+
+        def fake_popen(cmd, **kw):
+            started["cmd"] = cmd
+            return mock.Mock()
+
+        cfg = {"tianshu_install_dir": self.tmp, "tianshu_download_url": setup.DEFAULT_TIANSHU_URL}
+        with mock.patch("subprocess.Popen", side_effect=fake_popen) as m:
+            ok, detail = setup.launch_tianshu(cfg)
+        self.assertTrue(ok, detail)
+        self.assertEqual(started["cmd"], [exe])
+        m.assert_called_once()
+
+    def test_launch_missing_exe(self):
+        cfg = {"tianshu_install_dir": os.path.join(self.tmp, "nope"),
+               "tianshu_download_url": setup.DEFAULT_TIANSHU_URL}
+        ok, detail = setup.launch_tianshu(cfg)
+        self.assertFalse(ok)
+        self.assertIn("未找到", detail)
+
+
 class TestSendPrompt(unittest.TestCase):
     def test_send_prompt_returns_ok(self):
         sent = {}

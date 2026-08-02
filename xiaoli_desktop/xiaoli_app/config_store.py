@@ -141,16 +141,23 @@ def migrate_config(cfg, cards_dir):
     if out.get("providers"):
         return out  # 已是新结构
 
-    # 用旧端点建默认 provider
-    providers = [{
-        "id": "default",
-        "name": "默认",
-        "base_url": str(out.get("ai_api_url", "")),
-        "api_key": str(out.get("ai_api_key", "")),
-        "models": sorted({m for m in (
-            out.get("chat_model", ""), out.get("vision_model", ""), out.get("file_model", "")
-        ) if m}),
-    }]
+    # 用旧端点建默认 provider；无旧配置时预置 DeepSeek（id=default 与默认卡引用对齐，空 key）
+    url = str(out.get("ai_api_url", "")).strip()
+    if url:
+        providers = [{
+            "id": "default",
+            "name": "默认",
+            "base_url": url,
+            "api_key": str(out.get("ai_api_key", "")),
+            "models": sorted({m for m in (
+                out.get("chat_model", ""), out.get("vision_model", ""), out.get("file_model", "")
+            ) if m}),
+        }]
+    else:
+        p = dict(PRESET_PROVIDERS[0])
+        p["id"] = "default"
+        p["api_key"] = ""
+        providers = [p]
     out["providers"] = providers
 
     # 从旧字段建默认卡（人设用模板通用版，不抄旧 system_prompt——防个人化信息随迁移进发布卡）
