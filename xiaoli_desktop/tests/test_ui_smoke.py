@@ -169,5 +169,34 @@ class TestUiSmoke(unittest.TestCase):
         self.assertTrue(callable(xiaoli_gui.main))
 
 
+class TestUiFixes(unittest.TestCase):
+    """UI 缺陷回归：单击编辑 / 测试连接信号桥 / 表格选中态 QSS"""
+
+    def _page(self):
+        from xiaoli_app.ui import AppContext
+        from xiaoli_app.ui.pages import ModelsPage
+        ctx = AppContext()
+        ctx.cfg = {"providers": []}
+        return ModelsPage(ctx)
+
+    def test_table_single_click_edits(self):
+        from PySide6.QtWidgets import QAbstractItemView
+        mp = self._page()
+        trig = mp.table.editTriggers()
+        self.assertTrue(trig & QAbstractItemView.EditTrigger.SelectedClicked,
+                        "单击应进入编辑（SelectedClicked）")
+
+    def test_probe_signal_bridge_exists(self):
+        mp = self._page()
+        self.assertTrue(hasattr(mp, "_probe_done"),
+                        "测试连接需经信号桥回主线程（跨线程弹窗会死锁）")
+
+    def test_qss_table_selected_state(self):
+        from xiaoli_app.ui import APP_QSS
+        self.assertIn("QTableWidget::item:selected", APP_QSS,
+                      "表格选中行应有变色反馈")
+        self.assertIn("QTableWidget::item:hover", APP_QSS)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

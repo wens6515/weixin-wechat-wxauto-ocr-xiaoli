@@ -5,7 +5,7 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
@@ -657,6 +657,9 @@ class CardsPage(QWidget):
 # =====================================================================
 
 class ModelsPage(QWidget):
+    # 测试连接结果从后台线程回主线程弹窗（跨线程 GUI 会死锁）
+    _probe_done = Signal(str, str)  # (kind, message) kind: "ok" / "fail"
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
@@ -669,6 +672,13 @@ class ModelsPage(QWidget):
         self.table.setColumnWidth(2, 200)
         self.table.setColumnWidth(3, 220)
         self.table.setColumnWidth(4, 90)
+        # 单击即进入编辑（key 框可直接 Ctrl+V 粘贴，不用先敲字符）
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.SelectedClicked
+            | QTableWidget.EditTrigger.EditKeyPressed
+            | QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.AnyKeyPressed)
+        self._probe_done.connect(self._show_probe_result)
         self.cb_show_key = QCheckBox("显示 API Key")
         self.cb_show_key.toggled.connect(lambda on: self._refresh_keys(on))
         btn_row = QHBoxLayout()
@@ -783,20 +793,27 @@ class ModelsPage(QWidget):
         import threading
 
         def probe():
+            # 只做网络请求；结果经 _probe_done 信号回主线程弹窗（跨线程 GUI 会死锁）
             try:
                 import requests
                 models_url = url.replace("/chat/completions", "/models")
-                resp = requests.get(models_url, headers={"Authorization": f"Bearer {key}"}, timeout=10)
+                resp = requests.get(models_url, headers={"Authorization": f"Bearer {key}"}, timeout=(5, 10))
                 if resp.status_code == 200:
                     names = [m.get("id", "") for m in resp.json().get("data", [])]
-                    QMessageBox.information(self, "连接成功",
-                                            f"可用模型（{len(names)} 个）：\n" + "\n".join(names[:20]))
+                    self._probe_done.emit("ok",
+                                          f"可用模型（{len(names)} 个）：\n" + "\n".join(names[:20]))
                 else:
-                    QMessageBox.warning(self, "连接失败", f"HTTP {resp.status_code}: {resp.text[:200]}")
+                    self._probe_done.emit("fail", f"HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
-                QMessageBox.warning(self, "连接失败", str(e))
+                self._probe_done.emit("fail", str(e))
 
         threading.Thread(target=probe, daemon=True).start()
+
+    def _show_probe_result(self, kind, message):
+        if kind == "ok":
+            QMessageBox.information(self, "连接成功", message)
+        else:
+            QMessageBox.warning(self, "连接失败", message)
 
 
 # =====================================================================
@@ -930,7 +947,7 @@ class SettingsPage(QWidget):
         lay.addWidget(g_mem)
 
         # 图片偏移
-        g_img = QGroupBox("图片点击偏移（竖图点击偏位校准）")
+        g_img = QGroupBox("图片点击偏移（已按常见版本校准，点击图片位置偏了再调）")
         fl = QFormLayout(g_img)
         self.sp_off_x = QSpinBox()
         self.sp_off_x.setRange(-200, 200)

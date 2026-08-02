@@ -299,5 +299,20 @@ class TestDefaultPaths(unittest.TestCase):
         self.assertEqual(config_store.default_memory_file(), r"C:\Users\小白\小漓\memory.json")
 
 
+class TestImageClickOffsetDefault(unittest.TestCase):
+    """新 config 默认携带实测校准偏移 [3, -5]（小白开箱即用，不再显示 0）"""
+
+    def test_default_offset_present(self):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="offset_")
+        try:
+            cfg = config_store.load_config_store(
+                os.path.join(tmp, "config.json"), os.path.join(tmp, "cards"))
+            self.assertEqual(cfg.get("image_click_offset"), [3, -5])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
