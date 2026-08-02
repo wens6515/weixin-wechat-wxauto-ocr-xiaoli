@@ -467,7 +467,13 @@ class AgentBot(WeChatBot):
         self._listen_hold_seconds = cfg.get("listen_hold_seconds", 10)
         self._task_was_active = False  # 是否曾因任务暂停监听（用于任务完成后的缓冲期）
         self._task_end_time = None     # 最后一次任务完成（归档）的时刻
-        os.makedirs(self.tasks_dir, exist_ok=True)
+        try:
+            os.makedirs(self.tasks_dir, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"[AgentBot] tasks_dir 创建失败 {self.tasks_dir}: {e}，回退用户目录")
+            from xiaoli_app import config_store as _cs
+            self.tasks_dir = _cs.default_tasks_dir()
+            os.makedirs(self.tasks_dir, exist_ok=True)
         # 首轮提示词引导天枢读 tasks_dir\README.md：首次生成协议文档（已存在不覆盖）
         try:
             from xiaoli_app import setup as _setup

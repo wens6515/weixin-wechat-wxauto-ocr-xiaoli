@@ -6,6 +6,7 @@
 2. 构造 EngineThread（不启动线程，等首页「初始化」按钮触发 initialize）
 3. 托盘 + 主窗口；QTimer 拉取总线事件刷新界面
 """
+import os
 import sys
 
 try:
@@ -13,13 +14,71 @@ try:
 except Exception:
     pass
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
+                               QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox, QPushButton)
 
 from xiaoli_app import config_store
 from xiaoli_app.engine import EngineBus, EngineThread
 from xiaoli_app.ui import AppContext, APP_QSS
 from xiaoli_app.ui.main_window import MainWindow
 from xiaoli_app.ui.tray import TrayIcon
+
+
+class FirstRunDialog(QDialog):
+    """首次启动引导：选择任务工作目录与记忆存储位置（默认 %USERPROFILE%\\小漓）。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("欢迎使用小漓")
+        self.setMinimumWidth(560)
+        form = QFormLayout(self)
+        tip = QLabel(
+            "小漓需要两个文件夹存放工作文件：\n"
+            "任务工作目录：小漓与天枢交换任务/成果文件的地方\n"
+            "记忆存储位置：对话记忆文件（memory.json）\n"
+            "建议保持默认位置，直接点击「开始使用」即可。")
+        tip.setWordWrap(True)
+        form.addRow(tip)
+        self.ed_tasks = QLineEdit(config_store.default_tasks_dir())
+        self.ed_memory = QLineEdit(config_store.default_memory_file())
+        self.ed_tasks.setReadOnly(True)
+        self.ed_memory.setReadOnly(True)
+        btn_tasks = QPushButton("浏览…")
+        btn_tasks.clicked.connect(lambda: self._pick(self.ed_tasks, True))
+        btn_mem = QPushButton("浏览…")
+        btn_mem.clicked.connect(lambda: self._pick(self.ed_memory, False))
+        row_t = QHBoxLayout()
+        row_t.addWidget(self.ed_tasks, 1)
+        row_t.addWidget(btn_tasks)
+        row_m = QHBoxLayout()
+        row_m.addWidget(self.ed_memory, 1)
+        row_m.addWidget(btn_mem)
+        form.addRow("任务工作目录", row_t)
+        form.addRow("记忆存储位置", row_m)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("开始使用")
+        bb.button(QDialogButtonBox.Cancel).setText("取消")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        form.addRow(bb)
+
+    def _pick(self, edit, is_dir):
+        if is_dir:
+            p = QFileDialog.getExistingDirectory(self, "选择文件夹", edit.text())
+            if p:
+                edit.setText(p)
+        else:
+            p, _f = QFileDialog.getSaveFileName(
+                self, "选择记忆文件位置", edit.text(), "JSON (*.json)")
+            if p:
+                edit.setText(p)
+
+    def result_cfg(self):
+        return {
+            "tasks_dir": self.ed_tasks.text().strip() or config_store.default_tasks_dir(),
+            "memory_file": self.ed_memory.text().strip() or config_store.default_memory_file(),
+        }
 
 
 def build_bot_factory(ctx):
@@ -48,6 +107,15 @@ def main():
 
     # 1. 配置：加载/迁移/投影（不连微信、不启动引擎）
     ctx.cfg = config_store.load_config_store(ctx.cfg_path, ctx.cards_dir)
+    # 首次启动（config 文件不存在）→ 引导选择工作目录与记忆位置，避免默认 D:\ 盘缺失崩溃
+    if not os.path.isfile(ctx.cfg_path):
+        dlg = FirstRunDialog()
+        dlg.exec()
+        ctx.cfg.update(dlg.result_cfg())
+        try:
+            config_store.save_config(ctx.cfg, ctx.cfg_path)
+        except OSError as e:
+            QMessageBox.warning(None, "小漓", f"配置保存失败：{e}")
     if not ctx.cfg.get("providers"):
         QMessageBox.warning(
             None, "小漓",

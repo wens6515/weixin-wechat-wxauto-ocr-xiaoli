@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -79,7 +80,8 @@ class TestMigrate(unittest.TestCase):
         self.assertTrue(os.path.isfile(card_path))
         with open(card_path, "r", encoding="utf-8") as f:
             card = json.load(f)
-        self.assertEqual(card["system_prompt"], cfg["system_prompt"])
+        # 迁移建卡使用模板人设（不抄旧 system_prompt——防个人化信息随迁移进发布卡）
+        self.assertEqual(card["system_prompt"], config_store.CARD_TEMPLATE["system_prompt"])
         self.assertEqual(card["nickname"], cfg["bot_nickname"])
         self.assertEqual(card["chat_model"], cfg["chat_model"])
         self.assertEqual(card["vision_model"], cfg["vision_model"])
@@ -217,6 +219,84 @@ class TestMaskKey(unittest.TestCase):
         self.assertEqual(config_store.mask_key(""), "")
         self.assertEqual(config_store.mask_key("abc"), "***")
         self.assertEqual(config_store.mask_key("abcdefgh"), "***efgh")
+
+
+# 隐私关键词：默认人设中绝不允许出现的个人化信息（用户原 config 曾含）
+PRIVACY_KEYWORDS = ("王文生", "郭勇宏", "何镇鸿", "林子杰", "杨冬梅", "王美晨",
+                    "福州", "宿舍", "强盗", "金融", "2024级")
+
+
+class TestPrivacyPrompt(unittest.TestCase):
+    """默认角色卡人设：非空 + 无个人化信息（发布安全）"""
+
+    def test_card_template_prompt_generic(self):
+        sp = config_store.CARD_TEMPLATE["system_prompt"]
+        self.assertTrue(sp.strip(), "默认人设不应为空")
+        for kw in PRIVACY_KEYWORDS:
+            self.assertNotIn(kw, sp, f"默认人设不得含个人化关键词: {kw}")
+        self.assertIn("小漓", sp, "默认人设应保留小漓身份")
+
+    def test_migrated_card_prompt_generic(self):
+        """旧 config（带个人化 system_prompt）迁移后新建的卡应使用模板人设"""
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="privacy_")
+        try:
+            cards_dir = os.path.join(tmp, "cards")
+            legacy = make_legacy_config()
+            legacy["system_prompt"] = "你叫小漓，王文生是你的爹，福州大学学生。"
+            cfg = config_store.migrate_config(legacy, cards_dir)
+            self.assertEqual(cfg["active_card_id"], "xiaoli")
+            card_path = os.path.join(cards_dir, "xiaoli.json")
+            with open(card_path, encoding="utf-8") as f:
+                card = json.load(f)
+            sp = card["system_prompt"]
+            self.assertNotIn("王文生", sp)
+            self.assertNotIn("福州", sp)
+            self.assertIn("小漓", sp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestPresetProviders(unittest.TestCase):
+    """预设主流模型：5 家、结构完整、不含 key"""
+
+    def test_preset_shape(self):
+        provs = config_store.PRESET_PROVIDERS
+        self.assertEqual(len(provs), 5)
+        for p in provs:
+            self.assertTrue(p.get("id"), p)
+            self.assertTrue(p.get("name"), p)
+            self.assertTrue(p.get("base_url", "").startswith("https://"), p)
+            self.assertTrue(p.get("models"), p)
+            self.assertNotIn("api_key", p, "预设不应携带 key")
+            self.assertIn("chat/completions", p["base_url"], p["base_url"])
+
+    def test_preset_ids_unique(self):
+        ids = [p["id"] for p in config_store.PRESET_PROVIDERS]
+        self.assertEqual(len(ids), len(set(ids)))
+
+
+class TestDefaultPaths(unittest.TestCase):
+    """默认数据目录：%USERPROFILE% 下，无 D:\ 依赖"""
+
+    def _with_userprofile(self, value):
+        patcher = unittest.mock.patch.dict(os.environ, {"USERPROFILE": value})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_default_data_dir(self):
+        self._with_userprofile(r"C:\Users\小白")
+        d = config_store.default_data_dir()
+        self.assertEqual(d, r"C:\Users\小白\小漓")
+
+    def test_default_tasks_dir(self):
+        self._with_userprofile(r"C:\Users\小白")
+        self.assertEqual(config_store.default_tasks_dir(), r"C:\Users\小白\小漓\wxauto")
+
+    def test_default_memory_file(self):
+        self._with_userprofile(r"C:\Users\小白")
+        self.assertEqual(config_store.default_memory_file(), r"C:\Users\小白\小漓\memory.json")
 
 
 if __name__ == "__main__":
