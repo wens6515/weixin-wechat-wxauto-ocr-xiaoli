@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """主窗口：六 Tab 面板 + 状态栏 + 定时刷新总线事件。关闭窗口隐藏到托盘。"""
-from PySide6.QtWidgets import QMainWindow, QTabWidget, QLabel, QSystemTrayIcon
+from PySide6.QtWidgets import QMainWindow, QTabWidget, QLabel, QSystemTrayIcon, QMessageBox
 from PySide6.QtCore import QTimer
 
 from .pages import HomePage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
@@ -66,11 +66,27 @@ class MainWindow(QMainWindow):
     # ---------- 托盘联动 ----------
 
     def closeEvent(self, event):
-        """关闭窗口 → 隐藏到托盘（托盘可见时），真正退出走托盘菜单。"""
+        """关闭窗口：弹确认框——隐藏到托盘（继续运行）或完全退出。"""
         tray = getattr(self.ctx, "tray", None)
-        if tray is not None and tray.isVisible():
+        if tray is None or not tray.isVisible():
+            event.accept()  # 无托盘（测试/异常态）：直接关闭
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("小漓")
+        box.setText("关闭窗口后要做什么？")
+        box.setInformativeText("隐藏到托盘：小漓继续在后台运行并回复消息\n完全退出：停止小漓（可从托盘重新打开）")
+        b_hide = box.addButton("隐藏到托盘", QMessageBox.ButtonRole.AcceptRole)
+        b_quit = box.addButton("完全退出", QMessageBox.ButtonRole.DestructiveRole)
+        b_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_quit:
+            event.accept()
+            from PySide6.QtWidgets import QApplication
+            QApplication.quit()  # aboutToQuit → engine.stop
+        elif clicked is b_hide:
             event.ignore()
             self.hide()
             tray.showMessage("小漓", "已最小化到托盘，双击图标重新打开", QSystemTrayIcon.Information, 2000)
-        else:
-            event.accept()
+        else:  # 取消
+            event.ignore()

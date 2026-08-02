@@ -33,6 +33,12 @@ def build_bot_factory(ctx):
 
 
 def main():
+    # 单实例锁：防止双击多开（多实例会并发抢微信窗口/任务冲突）
+    from xiaoli_bot import acquire_single_instance
+    if not acquire_single_instance("XiaoLiGui_SingleInstance"):
+        QMessageBox.warning(None, "小漓", "小漓已在运行（在系统托盘图标处查看）。")
+        return
+
     app = QApplication(sys.argv)
     app.setApplicationName("小漓")
     app.setQuitOnLastWindowClosed(False)  # 关窗不退出（隐藏到托盘）
