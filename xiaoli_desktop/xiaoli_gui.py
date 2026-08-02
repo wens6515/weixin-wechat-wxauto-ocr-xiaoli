@@ -7,8 +7,11 @@
 3. 托盘 + 主窗口；QTimer 拉取总线事件刷新界面
 """
 import json
+import logging
 import os
 import sys
+
+logger = logging.getLogger("xiaoli")
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -182,6 +185,13 @@ def main():
             config_store.save_config(ctx.cfg, ctx.cfg_path)
         except OSError as e:
             QMessageBox.warning(None, "小漓", f"配置保存失败：{e}")
+        # 选择完工作文件夹后立即初始化任务桥：生成 README.md 协议文档
+        # （天枢 CLI 处理任务时读取；首次生成、已存在不覆盖，幂等）
+        try:
+            from xiaoli_app import setup as _setup
+            _setup.ensure_bridge_readme(str(ctx.cfg.get("tasks_dir") or "").strip())
+        except Exception as e:
+            logger.warning(f"[首次引导] 生成任务桥 README 失败: {e}")
     if not ctx.cfg.get("providers"):
         QMessageBox.warning(
             None, "小漓",

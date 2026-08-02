@@ -99,6 +99,43 @@ class TestFirstRunDialog(unittest.TestCase):
         self.assertEqual(out["memory_file"], r"D:\C\m.json")
 
 
+class TestFirstRunBridgeInit(unittest.TestCase):
+    """首次引导选完工作文件夹后，任务桥目录应自动初始化（README.md 协议文档）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="first_run_bridge_")
+        self.tasks_dir = os.path.join(self.tmp, "wxauto")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_bridge_readme_generated_for_new_tasks_dir(self):
+        # RED 复现：旧实现引导只保存 config，不初始化任务桥——新用户选完目录后
+        # tasks_dir 不存在、README.md 缺失，天枢 CLI 首次处理任务时无协议可读。
+        # 修复后引导保存配置即调用 ensure_bridge_readme，目录+README.md 一次到位。
+        from xiaoli_app import setup as _setup
+        made = _setup.ensure_bridge_readme(self.tasks_dir)
+        self.assertTrue(made, "新任务目录应生成 README.md")
+        self.assertTrue(os.path.isfile(os.path.join(self.tasks_dir, "README.md")),
+                        "tasks_dir 下应有 README.md 协议文档")
+        with open(os.path.join(self.tasks_dir, "README.md"), "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("task.json", content)
+        self.assertIn("result.json", content)
+
+    def test_bridge_readme_idempotent(self):
+        # 已存在 README.md 时不覆盖（协议文档首次生成、内容不因重复引导变化）
+        from xiaoli_app import setup as _setup
+        os.makedirs(self.tasks_dir, exist_ok=True)
+        p = os.path.join(self.tasks_dir, "README.md")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("自定义内容")
+        made = _setup.ensure_bridge_readme(self.tasks_dir)
+        self.assertFalse(made, "已存在 README.md 时不应覆盖")
+        with open(p, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "自定义内容")
+
+
 def config_store_default_tasks():
     from xiaoli_app import config_store
     return config_store.default_tasks_dir()

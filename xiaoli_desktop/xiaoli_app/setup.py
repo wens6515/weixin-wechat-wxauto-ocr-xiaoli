@@ -62,6 +62,43 @@ def _list_windows():
     return [name for name, _h in list_windows()]
 
 
+def _console_windows():
+    """枚举控制台/终端类顶层窗口标题（Win32：ConsoleWindowClass / CASCADIA / mintty / WindowClass_）。
+
+    返回标题列表；Win32 不可用（非 Windows / 枚举失败）时返回 None，调用方据此回退全量匹配。
+    天枢 CLI 是 cmd /k rivet 启动的控制台窗口——按窗口类名区分后，浏览器/编辑器等
+    标题含 "npm" 的诱饵窗口（非控制台类）天然被排除，杜绝 resolve_cli_window 的 fail-open 误发。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+    except Exception:
+        return None
+    try:
+        titles = []
+
+        def _cb(hwnd, _lparam):
+            try:
+                buf = ctypes.create_unicode_buffer(512)
+                n = user32.GetWindowTextW(hwnd, buf, 512)
+                if n > 0:
+                    cls = ctypes.create_unicode_buffer(256)
+                    user32.GetClassNameW(hwnd, cls, 256)
+                    cn = (cls.value or "").lower()
+                    if any(k in cn for k in ("console", "cascadia", "mintty", "windowclass")):
+                        titles.append(buf.value.strip())
+            except Exception:
+                pass
+            return True
+
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_cb)
+        user32.EnumWindows(enum_proc, 0)
+        return [t for t in titles if t]
+    except Exception:
+        return None
+
+
 def check_environment(cfg):
     """环境检测报告：{wechat, tianshu, first_prompt}，每项 {ok, detail}。"""
     out = {}
@@ -281,21 +318,27 @@ def send_prompt_to_tianshu(text, window_title):
     return _send_trigger_to_window(window_title, text, enter_times=2)
 
 
-def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None):
+def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
+                       console_windows_fn=None):
     """定位天枢 CLI 窗口标题，返回 (title, detail)。
 
     title 非空 = 找到可发送的 CLI 窗口；空 = detail 含失败原因（launch 失败/窗口未出现）。
     三级定位，逐级降级：
     1. 配置的 tianshu_window_title（排除桌面端污染值——标题含 tianshu/天枢 的窗口是桌面端）；
+       优先在控制台窗口里匹配，控制台枚举不可用时回退全量（用户显式配置是强信号）；
        命中时返回匹配到的实际窗口标题（而非配置子串，避免 find_window_by_title 子串误选）；
-    2. CLI 特征窗口（标题含 npm/rivet 且非桌面端——CLI 窗口标题实测为 npm prefix；
-       Tianshu/天枢 是桌面端特征，不在此列）；
-    3. 启动 CLI（rivet）后按新增窗口匹配（过滤桌面端；新窗口标题与既有窗口重复时
-       按窗口数增加兜底选 CLI 特征窗口，宁缺毋滥——不得把提示词发给桌面端）。
+    2. CLI 特征控制台窗口（标题含 npm/rivet 且非桌面端——CLI 窗口标题实测为 npm prefix，
+       是 cmd/rivet 启动的控制台窗口；Tianshu/天枢 是桌面端特征，不在此列）；
+       只在控制台窗口里匹配——标题含 npm 的浏览器/编辑器等诱饵窗口不是控制台类，
+       绝不可选（fail-open 反例）；仅当控制台枚举不可用（None）才回退全量；
+    3. 启动 CLI（rivet）后按 CLI 特征窗口名（npm prefix）轮询定位
+       （过滤桌面端；第 2 级已确认无 CLI 特征窗口才走到这里，启动后出现的
+       CLI 特征窗口就是刚启动的 CLI，宁缺毋滥——不得把提示词发给桌面端/诱饵窗口）。
     """
     list_windows_fn = list_windows_fn or _list_windows
     launch_fn = launch_fn or launch_tianshu
     sleep_fn = sleep_fn or time.sleep
+    console_windows_fn = console_windows_fn or _console_windows
     cfg = cfg or {}
 
     def _is_desktop(name):
@@ -304,54 +347,66 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
         纯英文标题（Tianshu）漏判会被第 2 级 CLI 特征误选，首轮提示词发错目标。"""
         return "天枢" in name or "tianshu" in name.lower()
 
+    def _is_cli_feature(name):
+        low = name.lower()
+        return "npm" in low or "rivet" in low
+
+    def _cli_candidates():
+        """CLI 窗口候选：控制台类窗口标题；控制台枚举不可用（None）时回退全量。
+
+        返回 None（枚举不可用）以外的任何值均视为"枚举正常"——空列表表示系统里
+        没有控制台窗口，此时不得从全量里挑诱饵（宁缺毋滥，走下一级启动 CLI）。"""
+        cons = console_windows_fn()
+        if cons is None:
+            return list_windows_fn()
+        return cons
+
     # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）。
-    #    返回匹配到的实际窗口标题 name（而非配置子串 t）——find_window_by_title
-    #    按子串匹配，返回宽泛子串（如 "npm"）会选中第一个含该词的无关窗口。
+    #    优先在控制台窗口里匹配（CLI 是 cmd/rivet 控制台，浏览器等诱饵窗口天然排除）；
+    #    控制台枚举不可用时回退全量（用户显式配置是强信号）。
     t = (cfg.get("tianshu_window_title") or "").strip()
     if t and not _is_desktop(t):
         try:
-            for name in list_windows_fn():
+            for name in _cli_candidates():
                 if t.lower() in name.lower() and not _is_desktop(name):
                     return name, ""
         except Exception:
             pass
 
-    # 2) CLI 特征窗口（npm/rivet——CLI 窗口标题实测为 npm prefix；Tianshu 是桌面端特征）
+    # 2) CLI 特征窗口（npm/rivet——CLI 窗口标题实测为 npm prefix；Tianshu 是桌面端特征）。
+    #    只在控制台窗口里匹配：标题含 npm 的浏览器/编辑器等诱饵窗口不是控制台类，
+    #    绝不可选（fail-open 反例 C1）；仅当控制台枚举不可用（None）才回退全量。
     try:
-        for name in list_windows_fn():
+        for name in _cli_candidates():
             if _is_desktop(name):
                 continue
-            low = name.lower()
-            if "npm" in low or "rivet" in low:
+            if _is_cli_feature(name):
                 return name, ""
     except Exception:
         pass
 
-    # 3) 启动 CLI + 轮询新增窗口
-    before_wins = set()
-    try:
-        before_wins = set(list_windows_fn())
-    except Exception:
-        pass
+    # 3) 启动 CLI + 按 CLI 特征窗口名（npm prefix）轮询定位
     ok_launch, detail = launch_fn(cfg)
     if not ok_launch:
         return "", f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
     sleep_fn(8)  # CLI 启动 + 加载工作目录
     for _ in range(15):
         try:
-            wins = set(list_windows_fn())
-            # 新增窗口里过滤桌面端——慢启动的桌面端（天枢/Tianshu）绝不可选，
-            # 否则首轮提示词又发到桌面端窗口（commit c67b995/d0b4ca6 的场景）。
-            new_wins = [n for n in sorted(wins - before_wins) if not _is_desktop(n)]
-            if not new_wins and len(wins) > len(before_wins):
-                # 新 CLI 窗口标题与既有窗口重复（CLI 标题固定为 npm prefix）→ 差集为空；
-                # 但窗口数增加了，从全集中选 CLI 特征窗口（两个都是 CLI，发哪个均可）。
-                new_wins = [n for n in wins if not _is_desktop(n)]
-            for n in new_wins:
-                low = n.lower()
-                if "npm" in low or "rivet" in low:
-                    return n, ""
-            # 新增窗口全为桌面端/无关窗口 → 不返回，继续轮询（宁缺毋滥，不得误发）
+            # 直接按 CLI 特征窗口名定位：天枢 CLI 窗口标题实测为 npm prefix
+            # （含 npm/rivet）。只在控制台窗口里匹配（_cli_candidates 控制台优先，
+            # 枚举不可用时回退全量）——标题含 npm 的浏览器/编辑器等诱饵窗口
+            # 不是控制台类，天然排除（test_skips_decoy_npm_window 场景）。
+            # 不依赖"新增窗口差集"——标题与既有窗口重复时差集为空会漏判
+            # （test_stage3_duplicate_title_fallback 场景），且第 2 级已确认
+            # 无 CLI 特征窗口才会走到这里，启动后出现的 CLI 特征窗口就是刚
+            # 启动的 CLI。桌面端（天枢/Tianshu）绝不可选，否则首轮提示词
+            # 误发到桌面端窗口（commit c67b995/d0b4ca6 的场景）。
+            for name in _cli_candidates():
+                if _is_desktop(name):
+                    continue
+                if _is_cli_feature(name):
+                    return name, ""
+            # 全是桌面端/无关窗口 → 不返回，继续轮询（宁缺毋滥，不得误发）
         except Exception:
             pass
         sleep_fn(1)

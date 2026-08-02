@@ -281,7 +281,8 @@ class TestResolveCliWindow(unittest.TestCase):
     def test_uses_manual_config_title(self):
         cfg = {"tianshu_window_title": "npm"}  # 用户手动配置的 CLI 标题
         title, detail = setup.resolve_cli_window(
-            cfg, list_windows_fn=lambda: ["npm", "微信"])
+            cfg, list_windows_fn=lambda: ["npm", "微信"],
+            console_windows_fn=lambda: ["npm"])  # CLI 是控制台窗口
         self.assertEqual(title, "npm")
         self.assertEqual(detail, "")
 
@@ -300,9 +301,14 @@ class TestResolveCliWindow(unittest.TestCase):
             wins.append("npm")  # 启动后新增 CLI 窗口
             return True, "ok"
 
+        def fake_console():
+            # 控制台枚举：启动前无 CLI 窗口（逼走第 3 级），启动后 CLI 出现
+            return ["npm"] if called["launch"] else []
+
         title, detail = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
-            launch_fn=fake_launch, sleep_fn=lambda s: None)
+            launch_fn=fake_launch, sleep_fn=lambda s: None,
+            console_windows_fn=fake_console)  # 无控制台 CLI → 走第 3 级启动
         self.assertTrue(called["launch"], "桌面端污染值不应阻止 CLI 启动")
         self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非桌面端")
 
@@ -317,9 +323,13 @@ class TestResolveCliWindow(unittest.TestCase):
             wins.append("npm")
             return True, "ok"
 
+        def fake_console():
+            return ["npm"] if "npm" in wins else []
+
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
-            launch_fn=fake_launch, sleep_fn=lambda s: None)
+            launch_fn=fake_launch, sleep_fn=lambda s: None,
+            console_windows_fn=fake_console)
         self.assertEqual(title, "npm")
 
     def test_launch_failure_reports(self):
@@ -327,7 +337,7 @@ class TestResolveCliWindow(unittest.TestCase):
         title, detail = setup.resolve_cli_window(
             cfg, list_windows_fn=lambda: [],
             launch_fn=lambda c: (False, "未找到 rivet 命令"),
-            sleep_fn=lambda s: None)
+            sleep_fn=lambda s: None, console_windows_fn=lambda: [])
         self.assertEqual(title, "")
         self.assertIn("rivet", detail)
 
@@ -346,9 +356,14 @@ class TestResolveCliWindow(unittest.TestCase):
             wins.append("npm")  # CLI 启动后新增窗口（npm prefix）
             return True, "ok"
 
+        def fake_console():
+            # 桌面端辅助窗口不是控制台类，天然不进控制台枚举；启动后 CLI 进入
+            return ["npm"] if called["launch"] else []
+
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
-            launch_fn=fake_launch, sleep_fn=lambda s: None)
+            launch_fn=fake_launch, sleep_fn=lambda s: None,
+            console_windows_fn=fake_console)  # 第 2 级天然排除桌面端辅助窗口
         self.assertTrue(called["launch"], "桌面端辅助窗口不应被当作 CLI")
         self.assertEqual(title, "npm", "应跳过 app.tianshu.* 辅助窗口，只认 CLI 新增窗口")
 
@@ -367,9 +382,14 @@ class TestResolveCliWindow(unittest.TestCase):
             wins.append("npm")  # 启动后新增 CLI 窗口
             return True, "ok"
 
+        def fake_console():
+            # 纯英文桌面端「Tianshu」不是控制台类，不进控制台枚举；启动后 CLI 进入
+            return ["npm"] if called["launch"] else []
+
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
-            launch_fn=fake_launch, sleep_fn=lambda s: None)
+            launch_fn=fake_launch, sleep_fn=lambda s: None,
+            console_windows_fn=fake_console)
         self.assertTrue(called["launch"], "纯英文桌面端标题不应阻止 CLI 启动")
         self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非纯英文桌面端")
 
@@ -387,11 +407,89 @@ class TestResolveCliWindow(unittest.TestCase):
             wins.append("天枢 · Tianshu")  # 桌面端慢启动，CLI 未出现
             return True, "ok"
 
+        def fake_console():
+            # 桌面端不是控制台类，CLI 未出现 → 控制台枚举始终为空
+            return []
+
         title, detail = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
-            launch_fn=fake_launch, sleep_fn=lambda s: None)
+            launch_fn=fake_launch, sleep_fn=lambda s: None,
+            console_windows_fn=fake_console)
         self.assertEqual(title, "", "新增窗口全是桌面端时不得把提示词发给桌面端")
         self.assertIn("未出现", detail)
+
+    def test_skips_decoy_npm_window(self):
+        # RED 复现（对抗审查反例 C1，fail-open）：浏览器/编辑器等非控制台窗口
+        # 标题含 "npm"（如 "npm docs - Mozilla Firefox"）且枚举先于真实 CLI——
+        # 修复前第 2 级对全量窗口裸子串匹配会选中诱饵，提示词粘贴进错误窗口。
+        # 修复后第 2 级只匹配控制台窗口（console_windows_fn），诱饵天然排除。
+        cfg = {}
+        decoy_first = ["npm docs - Mozilla Firefox", "微信", "npm"]  # 诱饵先于真实 CLI
+        title, detail = setup.resolve_cli_window(
+            cfg,
+            list_windows_fn=lambda: list(decoy_first),
+            console_windows_fn=lambda: ["npm"],  # 真实 CLI 是控制台窗口
+            sleep_fn=lambda s: None)
+        self.assertEqual(title, "npm",
+                         "第 2 级应跳过诱饵窗口，只匹配控制台里的真实 CLI")
+
+    def test_console_no_cli_skips_decoy(self):
+        # RED 复现：控制台枚举正常但没有 CLI 窗口——即使全量里有标题含 npm 的
+        # 诱饵窗口，也不得从中选（宁缺毋滥），应进入第 3 级启动 CLI。
+        # 修复前第 2 级全量裸子串匹配会选中诱饵，launch 不被调用。
+        cfg = {}
+        called = {"launch": False}
+        wins = ["npm docs - Mozilla Firefox", "微信"]
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            called["launch"] = True
+            wins.append("npm")  # 真实 CLI 启动后新增窗口
+            return True, "ok"
+
+        def fake_console():
+            # 启动前系统无控制台 CLI（诱饵是浏览器，非控制台类）；
+            # 启动后真实 CLI（npm）进入控制台枚举
+            return ["npm"] if called["launch"] else []
+
+        title, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            console_windows_fn=fake_console,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertTrue(called["launch"], "无控制台 CLI 时应启动而非选诱饵窗口")
+        self.assertEqual(title, "npm", "应把提示词发给启动后新增的 CLI 窗口")
+
+    def test_stage3_duplicate_title_fallback(self):
+        # RED 复现（第 3 级兜底 dead code）：新 CLI 窗口标题与既有窗口重复
+        # （同为 "npm"）时，旧实现用 set 差集 + set 长度判断——标题重复则差集为空、
+        # 长度不变，len(wins) > len(before_wins) 恒 False，兜底永不触发，最终报
+        # 「窗口未出现」。修复后按列表保留重复标题、比较窗口总数并选 CLI 特征窗口。
+        cfg = {}
+        wins = ["微信", "npm"]  # 启动前已有一个 "npm" 窗口
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            wins.append("npm")  # 新 CLI 窗口标题与既有 "npm" 重复
+            return True, "ok"
+
+        def fake_console():
+            # 启动前控制台里没有 CLI（既有 "npm" 是桌面端/非控制台窗口——
+            # 第 2 级不会命中它）；启动后真实 CLI（npm）进入控制台枚举。
+            # 新实现第 3 级按 CLI 特征窗口名定位，不依赖"新增窗口差集"——
+            # 标题重复时差集为空会漏判，按名称定位天然免疫。
+            return ["npm"] if len(wins) > 2 else []
+
+        title, detail = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            console_windows_fn=fake_console,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertEqual(title, "npm",
+                         "新 CLI 标题与既有窗口重复时按 CLI 特征窗口名定位应命中")
+        self.assertEqual(detail, "")
 
 
 class TestSendPrompt(unittest.TestCase):
