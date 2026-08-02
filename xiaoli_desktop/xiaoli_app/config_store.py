@@ -18,7 +18,7 @@ AgentBot 读到的 cfg 与改造前完全同构 → 引擎零改动风险。
 import json
 import logging
 import os
-import shutil
+import sys
 
 logger = logging.getLogger("xiaoli")
 
@@ -59,49 +59,43 @@ def default_data_dir():
 def default_tasks_dir():
     """任务桥默认目录（小漓 ↔ 天枢交换任务文件）。
 
-    必须落在天枢 CLI 工作区内（tianshu_workdir 之下）——天枢的路径安全
-    检查拒绝读取工作区外目录（实测：tasks_dir 在 exe 旁时 read_file 报
-    "Path outside project directory"，任务无法执行）。默认
-    tianshu_workdir\\wxauto = D:\\工作间\\wxauto。
+    便携默认：程序（exe/脚本）所在目录旁 wxauto——程序拷到哪数据跟到哪。
+    环境变量 XIAOLI_TIANSHU_WORKDIR 可覆盖（指定工作区根，如开发机联调）。
+    天枢 CLI 以 tianshu_workdir 为 cwd 启动（路径安全检查基于 cwd），
+    tasks_dir 是其直接子目录时任意位置都能工作——不再要求固定 D:\\ 目录。
     """
-    workdir = os.environ.get("XIAOLI_TIANSHU_WORKDIR", "").strip() or r"D:\工作间"
-    return os.path.join(workdir, "wxauto")
+    workdir = os.environ.get("XIAOLI_TIANSHU_WORKDIR", "").strip()
+    if workdir:
+        return os.path.join(workdir, "wxauto")
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, "wxauto")
 
 
-def ensure_tasks_dir_in_workdir(cfg, tasks_dir):
-    """确保任务目录落在天枢工作区内；不在则迁移到 tianshu_workdir\\wxauto。
+def sync_workdir_to_tasks(cfg):
+    """tianshu_workdir 跟随 tasks_dir 的父目录（天枢 CLI 的 cwd 锚点）。
 
-    返回 (new_tasks_dir, moved)：moved=True 表示发生了迁移（旧目录数据已复制）。
-    幂等：tasks_dir 已在工作区内（或其前缀）时原样返回。
+    天枢 CLI 路径安全检查基于进程 cwd（源码实测 workspace root =
+    resolve(cwd)）；桌面端以 tianshu_workdir 为 cwd 启动 CLI，tasks_dir
+    是它的直接子目录时检查天然通过——用户选任意目录都能工作。
+    仅当 tasks_dir 非空且当前 workdir 不是它的祖先时更新。返回是否更新。
     """
-    workdir = str(cfg.get("tianshu_workdir") or r"D:\工作间").strip()
-    if not tasks_dir:
-        return tasks_dir, False
+    tasks = str(cfg.get("tasks_dir") or "").strip()
+    if not tasks:
+        return False
     try:
-        tasks_abs = os.path.abspath(tasks_dir)
-        work_abs = os.path.abspath(workdir)
-        if tasks_abs.startswith(work_abs + os.sep) or tasks_abs == work_abs:
-            return tasks_dir, False  # 已在工作区内
+        tasks_abs = os.path.abspath(tasks)
+        workdir = str(cfg.get("tianshu_workdir") or "").strip()
+        if workdir:
+            work_abs = os.path.abspath(workdir)
+            if tasks_abs.startswith(work_abs + os.sep) or tasks_abs == work_abs:
+                return False  # 已在工作目录内
+        cfg["tianshu_workdir"] = os.path.dirname(tasks_abs)
+        return True
     except Exception:
-        pass
-    new_dir = os.path.join(workdir, "wxauto")
-    # 旧目录有数据 → 复制（任务历史/成果登记/协议文档不丢）
-    try:
-        if os.path.isdir(tasks_dir) and os.listdir(tasks_dir):
-            os.makedirs(new_dir, exist_ok=True)
-            for name in os.listdir(tasks_dir):
-                src = os.path.join(tasks_dir, name)
-                dst = os.path.join(new_dir, name)
-                if os.path.isdir(src):
-                    if not os.path.exists(dst):
-                        shutil.copytree(src, dst)
-                elif not os.path.exists(dst):
-                    shutil.copy2(src, dst)
-            logger.info(f"[配置] 任务目录已迁移 {tasks_dir} → {new_dir}")
-        return new_dir, True
-    except OSError as e:
-        logger.error(f"[配置] 任务目录迁移失败: {e}，仍用 {new_dir}")
-        return new_dir, True
+        return False
 
 
 def default_memory_file():
@@ -296,11 +290,13 @@ def load_config_store(path="config.json", cards_dir="cards"):
     }.items():
         if k not in cfg:
             cfg[k] = v
-    # 任务目录必须落在天枢工作区内，否则天枢路径安全检查拒绝读取
-    # （实测 "Path outside project directory"，任务无法执行）。迁移旧位置数据。
-    tasks_dir, _moved = ensure_tasks_dir_in_workdir(cfg, str(cfg.get("tasks_dir") or "").strip())
-    if _moved or not cfg.get("tasks_dir"):
-        cfg["tasks_dir"] = tasks_dir or default_tasks_dir()
+    # 任务目录：用户显式设置的路径一律保留（引导/设置页的选择即事实），
+    # 为空时给便携默认。天枢 CLI 路径检查基于 cwd——tianshu_workdir 跟随
+    # tasks_dir 父目录（sync_workdir_to_tasks），用户选任意目录都能工作，
+    # 不再强制迁入固定工作区（历史缺陷：f95bf8a 迁移逻辑静默覆盖用户设置）。
+    if not str(cfg.get("tasks_dir") or "").strip():
+        cfg["tasks_dir"] = default_tasks_dir()
+    sync_workdir_to_tasks(cfg)
     card = _read_card(cards_dir, cfg.get("active_card_id", DEFAULT_CARD_ID))
     if card is None:
         logger.warning(f"[配置] 活跃角色卡不存在: {cfg.get('active_card_id')}，使用空卡投影")

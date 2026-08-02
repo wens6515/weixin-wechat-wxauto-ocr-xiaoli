@@ -291,41 +291,36 @@ class TestDefaultPaths(unittest.TestCase):
         self.assertEqual(d, r"C:\Users\小白\小漓")
 
     def test_default_tasks_dir(self):
-        # 任务目录必须落在天枢工作区内（tianshu_workdir 之下）——
-        # 否则天枢路径安全检查拒绝读取（"Path outside project directory"）
-        self._with_userprofile(r"C:\Users\小白")
-        self.assertEqual(config_store.default_tasks_dir(), r"D:\工作间\wxauto")
+        # 便携默认：环境变量 XIAOLI_TIANSHU_WORKDIR 优先；否则程序目录旁 wxauto
+        with mock.patch.dict(os.environ, {"XIAOLI_TIANSHU_WORKDIR": r"D:\工作间"}):
+            self.assertEqual(config_store.default_tasks_dir(), r"D:\工作间\wxauto")
+        # 无环境变量 → 程序（exe/脚本）所在目录旁——程序拷到哪数据跟到哪
+        base = os.path.dirname(os.path.dirname(os.path.abspath(config_store.__file__)))
+        self.assertEqual(config_store.default_tasks_dir(), os.path.join(base, "wxauto"))
 
-    def test_tasks_dir_outside_workdir_is_migrated(self):
-        """RED 复现：tasks_dir 落在天枢工作区外（如 exe 旁）时，加载必须迁移。
+    def test_tasks_dir_outside_workdir_kept_and_syncs_workdir(self):
+        """用户显式设置的任务目录（如程序旁的 wxauto）必须保留，不被强制迁移。
 
-        用户实测：任务目录在 D:\\AI\\小漓\\dist\\小漓\\wxauto（工作区
-        D:\\工作间 之外），天枢 read_file 报 "Path outside project
-        directory"，任务无法执行。修复后 load_config_store 自动迁移到
-        工作区内 D:\\工作间\\wxauto，并保留旧目录数据。
+        历史缺陷：f95bf8a 的迁移逻辑把工作区外的 tasks_dir 强制迁回
+        D:\\工作间\\wxauto——用户设置被静默覆盖（重启后设置页显示旧路径）。
+        修复：天枢 CLI 路径安全检查基于进程 cwd（源码 path-validate.ts
+        实测 workspace root = resolve(cwd)），桌面端以 tianshu_workdir 为
+        cwd 启动 CLI——workdir 跟随 tasks_dir 的父目录即可，任意目录都能工作。
         """
-        import shutil
         import tempfile
-        tmp = tempfile.mkdtemp(prefix="migrate_")
+        tmp = tempfile.mkdtemp(prefix="keep_out_")
         old_dir = os.path.join(tmp, "dist", "小漓", "wxauto")
-        os.makedirs(os.path.join(old_dir, "sent"), exist_ok=True)
-        with open(os.path.join(old_dir, "README.md"), "w", encoding="utf-8") as f:
-            f.write("任务桥协议")
-        with open(os.path.join(old_dir, "sent_back_stems.json"), "w", encoding="utf-8") as f:
-            json.dump({"x": 1}, f)
+        os.makedirs(old_dir, exist_ok=True)
         cfg_path = os.path.join(tmp, "config.json")
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"tasks_dir": old_dir,
                        "tianshu_workdir": r"D:\工作间"}, f)
         cfg = config_store.load_config_store(cfg_path, os.path.join(tmp, "cards"))
-        new_dir = cfg.get("tasks_dir")
-        self.assertTrue(new_dir.startswith(r"D:\工作间"),
-                        f"tasks_dir 必须迁入工作区，实际 {new_dir}")
-        self.assertTrue(os.path.isdir(new_dir), "迁移后新目录必须存在")
-        self.assertTrue(os.path.isfile(os.path.join(new_dir, "README.md")),
-                        "旧目录的 README.md 必须随迁移复制")
-        self.assertTrue(os.path.isfile(os.path.join(new_dir, "sent_back_stems.json")),
-                        "成果登记必须随迁移复制")
+        self.assertEqual(cfg.get("tasks_dir"), old_dir,
+                         "用户显式设置的任务目录不得被迁移")
+        self.assertEqual(cfg.get("tianshu_workdir"), os.path.dirname(old_dir),
+                         "tianshu_workdir 应同步为任务目录的父目录（天枢 CLI cwd）")
+        import shutil
         shutil.rmtree(tmp, ignore_errors=True)
 
     def test_tasks_dir_inside_workdir_kept(self):
@@ -386,8 +381,11 @@ class TestMigrateDefaultProvider(unittest.TestCase):
                             "投影后 ai_api_url 不应为空（否则 Invalid URL）")
             self.assertTrue(cfg.get("vision_api_url", "").startswith("https://"),
                             "投影后 vision_api_url 不应为空（图片识别依赖）")
-            self.assertEqual(cfg.get("tianshu_workdir"), r"D:\工作间",
-                             "天枢 CLI 工作目录默认应为 D:\\工作间")
+            tasks_dir = cfg.get("tasks_dir")
+            self.assertTrue(tasks_dir and os.path.isabs(tasks_dir),
+                            "空 config 应有默认任务目录")
+            self.assertEqual(cfg.get("tianshu_workdir"), os.path.dirname(tasks_dir),
+                             "tianshu_workdir 应同步为任务目录的父目录（天枢 CLI cwd）")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

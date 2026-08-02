@@ -1203,7 +1203,12 @@ class SettingsPage(QWidget):
             self.ed_tasks.setText(p)
 
     def _save_tasks_dir(self):
-        self.ctx.cfg["tasks_dir"] = self.ed_tasks.text().strip()
+        new_tasks = self.ed_tasks.text().strip()
+        old_workdir = str((self.ctx.cfg or {}).get("tianshu_workdir") or "").strip()
+        self.ctx.cfg["tasks_dir"] = new_tasks
+        # 天枢 CLI 以 tianshu_workdir 为 cwd（路径检查基于 cwd）——任务目录
+        # 改到哪，工作目录就同步到它的父目录，用户选任意目录都能工作
+        workdir_changed = config_store.sync_workdir_to_tasks(self.ctx.cfg)
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         # 新任务目录自动初始化任务桥协议文档（幂等，已存在不覆盖）
         try:
@@ -1211,7 +1216,12 @@ class SettingsPage(QWidget):
             _setup.ensure_bridge_readme(self.ctx.cfg.get("tasks_dir", ""))
         except Exception:
             pass
-        QMessageBox.information(self, "已保存", "任务工作目录已保存")
+        msg = "任务工作目录已保存"
+        new_workdir = str((self.ctx.cfg or {}).get("tianshu_workdir") or "").strip()
+        if workdir_changed and old_workdir and old_workdir != new_workdir:
+            msg += (f"\n天枢 CLI 工作目录已同步为：{new_workdir}\n"
+                    "若天枢 CLI 窗口已打开，请重启它以在新目录下工作")
+        QMessageBox.information(self, "已保存", msg)
 
     def _refresh_stems(self):
         cfg = self.ctx.cfg or {}
