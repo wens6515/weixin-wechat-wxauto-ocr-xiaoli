@@ -291,8 +291,56 @@ class TestDefaultPaths(unittest.TestCase):
         self.assertEqual(d, r"C:\Users\小白\小漓")
 
     def test_default_tasks_dir(self):
+        # 任务目录必须落在天枢工作区内（tianshu_workdir 之下）——
+        # 否则天枢路径安全检查拒绝读取（"Path outside project directory"）
         self._with_userprofile(r"C:\Users\小白")
-        self.assertEqual(config_store.default_tasks_dir(), r"C:\Users\小白\小漓\wxauto")
+        self.assertEqual(config_store.default_tasks_dir(), r"D:\工作间\wxauto")
+
+    def test_tasks_dir_outside_workdir_is_migrated(self):
+        """RED 复现：tasks_dir 落在天枢工作区外（如 exe 旁）时，加载必须迁移。
+
+        用户实测：任务目录在 D:\\AI\\小漓\\dist\\小漓\\wxauto（工作区
+        D:\\工作间 之外），天枢 read_file 报 "Path outside project
+        directory"，任务无法执行。修复后 load_config_store 自动迁移到
+        工作区内 D:\\工作间\\wxauto，并保留旧目录数据。
+        """
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="migrate_")
+        old_dir = os.path.join(tmp, "dist", "小漓", "wxauto")
+        os.makedirs(os.path.join(old_dir, "sent"), exist_ok=True)
+        with open(os.path.join(old_dir, "README.md"), "w", encoding="utf-8") as f:
+            f.write("任务桥协议")
+        with open(os.path.join(old_dir, "sent_back_stems.json"), "w", encoding="utf-8") as f:
+            json.dump({"x": 1}, f)
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"tasks_dir": old_dir,
+                       "tianshu_workdir": r"D:\工作间"}, f)
+        cfg = config_store.load_config_store(cfg_path, os.path.join(tmp, "cards"))
+        new_dir = cfg.get("tasks_dir")
+        self.assertTrue(new_dir.startswith(r"D:\工作间"),
+                        f"tasks_dir 必须迁入工作区，实际 {new_dir}")
+        self.assertTrue(os.path.isdir(new_dir), "迁移后新目录必须存在")
+        self.assertTrue(os.path.isfile(os.path.join(new_dir, "README.md")),
+                        "旧目录的 README.md 必须随迁移复制")
+        self.assertTrue(os.path.isfile(os.path.join(new_dir, "sent_back_stems.json")),
+                        "成果登记必须随迁移复制")
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_tasks_dir_inside_workdir_kept(self):
+        """已在工作区内（D:\\工作间\\wxauto）→ 不迁移、原样保留。"""
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="keep_")
+        cfg_path = os.path.join(tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"tasks_dir": r"D:\工作间\wxauto",
+                       "tianshu_workdir": r"D:\工作间"}, f)
+        cfg = config_store.load_config_store(cfg_path, os.path.join(tmp, "cards"))
+        self.assertEqual(cfg.get("tasks_dir"), r"D:\工作间\wxauto",
+                         "工作区内目录不应被迁移")
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
 
     def test_default_memory_file(self):
         self._with_userprofile(r"C:\Users\小白")

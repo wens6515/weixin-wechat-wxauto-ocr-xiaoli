@@ -545,7 +545,9 @@ class TestConfigureTianshuAuto(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _call(self):
-        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}):
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}), \
+             mock.patch.object(setup, "_tianshu_config_paths",
+                               side_effect=lambda p: [p]):
             return setup.configure_tianshu_auto_approval({})
 
     def test_no_rivet_skips(self):
@@ -607,6 +609,43 @@ class TestConfigureTianshuAuto(unittest.TestCase):
         self.assertEqual(ran, [["rivet", "config", "set-approval",
                                 "dangerously-skip-permissions"]],
                          "顶层 approval 不算已配置，应执行 set-approval")
+
+    def test_desktop_data_root_also_configured(self):
+        """桌面端便携根（TianshuData\.rivet）未配置时也必须执行 set-approval。
+
+        用户环境：CLI 数据根已 YOLO，但桌面端 TianshuData\.rivet\config.json
+        仍 suggest——切到桌面端运行天枢时同样会卡确认。多数据根任一未配置
+        都必须执行（rivet config set-approval 写 CLI 主根；桌面端根由
+        后续 _tianshu_config_paths 检查驱动重跑直至全配）。
+        """
+        # 主根已配置
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"agent": {"approval": "dangerously-skip-permissions"}}, f)
+        # 模拟存在一个未配置的桌面端根
+        desk_root = os.path.join(self.tmp, "TianshuData", ".rivet")
+        os.makedirs(desk_root, exist_ok=True)
+        with open(os.path.join(desk_root, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"agent": {"approval": "suggest"}}, f)
+        ran = []
+
+        class FakeCompleted:
+            returncode = 0
+
+        def fake_run(args, **kw):
+            ran.append(args)
+            return FakeCompleted()
+
+        with mock.patch("shutil.which", return_value="rivet"), \
+             mock.patch.object(subprocess, "run", side_effect=fake_run), \
+             mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}), \
+             mock.patch.object(
+                 setup, "_tianshu_config_paths",
+                 side_effect=lambda p: [p, os.path.join(desk_root, "config.json")]):
+            ok, detail = setup.configure_tianshu_auto_approval({})
+        self.assertTrue(ok)
+        self.assertEqual(ran, [["rivet", "config", "set-approval",
+                                "dangerously-skip-permissions"]],
+                         "桌面端根未配置时必须执行 set-approval")
 
     def test_command_failure_reports(self):
         # set-approval 失败 → 返回失败与原因（不崩溃）
