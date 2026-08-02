@@ -305,6 +305,16 @@ class HomePage(QWidget):
             self._prompt_state = detail or "未找到天枢 CLI 窗口"
             self._prompt_running = False
             return
+        # 首轮提示词会让天枢读 tasks_dir\README.md——读文件是工具调用，
+        # 会话若仍 Manual 模式，初始化这一刻就弹确认（无人值守断链）。
+        # 必须先切 YOLO（会话内即时生效，config 级只影响下次启动）。
+        try:
+            setup._send_trigger_to_window(title, "/permission yolo confirm")
+            time.sleep(0.5)  # 等 CLI 完成模式切换
+        except Exception as e:
+            self._prompt_state = f"切换 YOLO 失败（{e}），首轮提示词可能触发确认"
+            self._prompt_running = False
+            return
         ok = setup.send_prompt_to_tianshu(text, title)
         self._prompt_state = "首轮提示词已发送给天枢 ✓" if ok else "发送失败，请确认天枢窗口已打开后重试"
         if ok:

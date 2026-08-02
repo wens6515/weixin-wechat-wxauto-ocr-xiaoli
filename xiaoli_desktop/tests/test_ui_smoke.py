@@ -103,6 +103,41 @@ class TestUiSmoke(unittest.TestCase):
                          "MainWindow 构造后设置页任务目录必须回填")
         win.close()
 
+    def test_prompt_flow_switches_yolo_before_first_prompt(self):
+        """RED 复现：初始化发送首轮提示词前必须先切 YOLO。
+
+        用户指出：首轮提示词让天枢去读 tasks_dir\\README.md——读文件是工具
+        调用，若会话仍是 Manual 模式，初始化那一刻就弹确认，无人值守断链。
+        所以 YOLO 切换必须在初始化（发首轮提示词）时做，而非投递任务时。
+        """
+        from unittest import mock
+        from xiaoli_app import setup as setup_mod
+        from xiaoli_app.ui.pages import HomePage
+        ctx = self._make_ctx()
+        page = HomePage(ctx)
+        page._prompt_running = False
+        page._prompt_done = False
+        calls = []
+
+        def fake_trigger(title, command, hold=0.5, enter_times=1):
+            calls.append(("trigger", command))
+            return True
+
+        def fake_resolve(cfg):
+            return "npm", ""
+
+        with mock.patch.object(setup_mod, "resolve_cli_window", side_effect=fake_resolve), \
+             mock.patch.object(setup_mod, "_send_trigger_to_window", side_effect=fake_trigger), \
+             mock.patch.object(setup_mod, "build_first_prompt", return_value="首轮提示词内容"):
+            page._prompt_worker()
+        cmds = [c[1] for c in calls]
+        self.assertGreaterEqual(len(cmds), 2,
+                                "初始化必须至少发送两次：YOLO 切换 + 首轮提示词")
+        self.assertEqual(cmds[0], "/permission yolo confirm",
+                         "首轮提示词之前必须先切 YOLO，否则读 README.md 时弹确认")
+        self.assertEqual(cmds[1], "首轮提示词内容",
+                         "YOLO 切换后发送首轮提示词")
+
     def test_home_page_button_states(self):
         """状态机主按钮：初始化 → 启动 bot → 暂停运行 → 继续运行（随引擎状态切换）"""
         import time
