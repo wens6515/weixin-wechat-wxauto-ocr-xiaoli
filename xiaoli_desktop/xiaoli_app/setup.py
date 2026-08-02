@@ -28,6 +28,8 @@ FIRST_PROMPT_DEFAULT = """你是天枢，正在为微信 AI 助手「小漓」�
 4. 完成后在同一任务目录写 result.json（{{"status":"success","reply_text":"...","files":["成果文件..."]}}），成果文件也放该目录；
 5. 不要写 result.json 以外的状态文件——小漓检测到 result.json 就会把成果发回微信并把目录归档。
 
+全程无人值守：不要进入 Plan Mode（/plan-mode 保持关闭）、不要提交计划等待审批、不要向用户请求任何确认或补充信息——遇到歧义按最合理的方式执行并在 reply_text 里说明。所有工具调用已在 YOLO 模式下自动放行，直接执行即可。
+
 注意：reply_text 是发给微信用户的回复，请用通俗友好的中文，用户可能不了解技术细节。"""
 
 # 任务桥协议文档（初始化时写入 tasks_dir\\README.md，首次生成、已存在不覆盖）。
@@ -285,8 +287,11 @@ def launch_tianshu(cfg):
         # 避免与 _is_desktop 的 tianshu 关键词冲突（CLI 被误判桌面端、提示词误发）。
         # 实测：Popen(list) 引号二次转义 → "系统找不到文件 \Tianshu\"；
         #       shell=True 字符串在 python 进程下也不弹窗（仅 Git Bash 手工调用有效）。
+        # RIVET_PLAN_MODE_SUGGEST=0：关闭复杂任务自动进入 Plan Mode——
+        # 无人值守场景任务不能卡在 plan 审批（README：默认 auto 命中多模块/
+        # 重构/安全任务时自主进入，等 /plan-approve 确认）。
         subprocess.Popen(
-            ["cmd", "/k", "rivet"],
+            ["cmd", "/k", "set RIVET_PLAN_MODE_SUGGEST=0 && rivet"],
             cwd=workdir,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         return True, f"天枢 CLI 已启动（{workdir}）"

@@ -285,6 +285,46 @@ class TestTaskDispatchWindow(unittest.TestCase):
         self.assertEqual(sent["title"], "npm",
                          "任务唤起必须发给 CLI 窗口（npm），不得激活桌面端「天枢 · Tianshu」")
 
+    def test_dispatch_switches_cli_to_yolo_before_trigger(self):
+        """RED 复现：投递任务时必须先把天枢 CLI 会话切到 YOLO 再发触发指令。
+
+        用户实测：config 级 approval 已配 dangerously-skip-permissions（YOLO），
+        但任务处理仍要手动确认。根因：config set-approval 只影响下次启动的会话，
+        小漓唤起的是已运行的 CLI 窗口（仍 Manual），必须会话内 `/permission
+        yolo confirm` 即时切换，否则任务卡在权限确认。
+        """
+        import xiaoli_bot as xb
+        bot = self._make_bot()
+        self._tmp = bot.tasks_dir
+        cmds = []
+        wins = ["天枢 · Tianshu", "微信"]  # 桌面端 + 微信在运行（无 CLI）
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg):
+            wins.append("npm")  # CLI 启动后新增窗口
+            return True, "ok"
+
+        def fake_console():
+            # 控制台枚举：启动前无 CLI，启动后 CLI（npm）进入
+            return ["npm"] if len(wins) > 2 else []
+
+        def fake_trigger(title, command, hold=0.5, enter_times=1):
+            cmds.append(command)
+            return True
+
+        from xiaoli_app import setup as _setup
+        with mock.patch.object(_setup, "_list_windows", side_effect=fake_list), \
+             mock.patch.object(_setup, "_console_windows", side_effect=fake_console), \
+             mock.patch.object(_setup, "launch_tianshu", side_effect=fake_launch), \
+             mock.patch.object(xb, "send_trigger_to_window", side_effect=fake_trigger), \
+             mock.patch.object(bot, "_send_text", return_value=None), \
+             mock.patch.object(xb, "dispatch_task", return_value="T1"):
+            bot._dispatch_and_notify("测试群", "老王", "做一个贪吃蛇")
+        self.assertEqual(cmds, ["/permission yolo confirm", "开始处理"],
+                         "必须先发 YOLO 切换指令再发触发指令，否则任务卡在确认")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -672,6 +672,15 @@ class AgentBot(WeChatBot):
             if not title:
                 logger.warning(f"[天枢] 未定位到 CLI 窗口（{detail}），任务已投递但未唤起")
                 return True
+            # 先把 CLI 会话切到 YOLO（完全自动）：config 级 approval 只影响下次
+            # 启动，已运行的 CLI 窗口仍是 Manual——任务处理会卡在权限确认，
+            # 无人值守时无法继续。`/permission yolo confirm` 会话内即时切换，
+            # 无二次确认；再发触发指令。发送失败不阻塞投递（任务已落盘）。
+            try:
+                send_trigger_to_window(title, "/permission yolo confirm")
+                time.sleep(0.5)  # 等 CLI 完成模式切换
+            except Exception as e:
+                logger.warning(f"[天枢] 切换 YOLO 失败（{e}），任务可能需手动确认")
             ok = send_trigger_to_window(title, self.tianshu_trigger_command)
             if not ok:
                 logger.error(f"[天枢] 唤起窗口失败: {title}，任务 {task_id} 保留在 {os.path.join(self.tasks_dir, task_id)}")

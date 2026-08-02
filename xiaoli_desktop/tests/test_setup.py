@@ -620,6 +620,35 @@ class TestConfigureTianshuAuto(unittest.TestCase):
         self.assertIn("失败", detail)
 
 
+class TestUnattendedMode(unittest.TestCase):
+    """完全自动（无人值守）配置：CLI 启动禁 Plan Mode + 提示词禁审批等待。"""
+
+    def test_launch_tianshu_disables_plan_mode(self):
+        # RED 复现：任务卡在确认的第二个来源——复杂任务自动进入 Plan Mode
+        # 等 /plan-approve 审批（README：RIVET_PLAN_MODE_SUGGEST 默认 auto）。
+        # 修复后启动命令必须注入 RIVET_PLAN_MODE_SUGGEST=0。
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen["cmd"] = cmd
+            return mock.MagicMock()
+
+        with mock.patch("shutil.which", return_value="rivet"), \
+             mock.patch.object(subprocess, "Popen", side_effect=fake_popen):
+            ok, detail = setup.launch_tianshu({})
+        self.assertTrue(ok)
+        cmd_str = " ".join(seen["cmd"])
+        self.assertIn("RIVET_PLAN_MODE_SUGGEST=0", cmd_str,
+                      "CLI 启动必须关闭自动进入 Plan Mode，否则任务卡在审批")
+
+    def test_first_prompt_forbids_approval_wait(self):
+        # 提示词必须声明无人值守：不进入 Plan Mode、不请求确认、直接执行
+        prompt = setup.build_first_prompt({"tasks_dir": r"D:\tasks"})
+        self.assertIn("无人值守", prompt)
+        self.assertIn("Plan Mode", prompt)
+        self.assertIn("不要向用户请求任何确认", prompt)
+
+
 class TestConfigDefaults(unittest.TestCase):
     def test_new_defaults_present(self):
         from xiaoli_app import config_store
