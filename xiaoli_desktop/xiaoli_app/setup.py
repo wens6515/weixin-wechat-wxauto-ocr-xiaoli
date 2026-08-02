@@ -285,7 +285,9 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None)
     cfg = cfg or {}
 
     def _is_desktop(name):
-        return "天枢" in name
+        """桌面端窗口特征：中文「天枢」或 app.tianshu.* Electron 辅助窗口。"""
+        low = name.lower()
+        return "天枢" in name or low.startswith("app.tianshu") or "tianshu-desktop" in low
 
     # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）
     t = (cfg.get("tianshu_window_title") or "").strip()

@@ -321,6 +321,27 @@ class TestResolveCliWindow(unittest.TestCase):
         self.assertEqual(title, "")
         self.assertIn("rivet", detail)
 
+    def test_skips_desktop_aux_window(self):
+        # 桌面端 Electron 辅助窗口标题不含中文「天枢」但含 tianshu——
+        # 上一版 CLI 特征匹配会误命中它，把提示词发到桌面端
+        cfg = {}
+        called = {"launch": False}
+        wins = ["天枢 · Tianshu", "app.tianshu.desktop-siw", "微信"]
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            called["launch"] = True
+            wins.append("npm")  # CLI 启动后新增窗口（npm prefix）
+            return True, "ok"
+
+        title, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list,
+            launch_fn=fake_launch, sleep_fn=lambda s: None)
+        self.assertTrue(called["launch"], "桌面端辅助窗口不应被当作 CLI")
+        self.assertEqual(title, "npm", "应跳过 app.tianshu.* 辅助窗口，只认 CLI 新增窗口")
+
 
 class TestSendPrompt(unittest.TestCase):
     def test_send_prompt_returns_ok(self):
