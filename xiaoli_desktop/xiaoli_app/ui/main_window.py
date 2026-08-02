@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import QMainWindow, QTabWidget, QLabel, QSystemTrayIcon
 from PySide6.QtCore import QTimer
 
-from .pages import StatusPage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
+from .pages import HomePage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
 
 
 class MainWindow(QMainWindow):
@@ -16,7 +16,7 @@ class MainWindow(QMainWindow):
         # 六页
         self.tabs = QTabWidget()
         self.pages = {}
-        for cls, name in ((StatusPage, "状态"), (CardsPage, "角色卡"),
+        for cls, name in ((HomePage, "首页"), (CardsPage, "角色卡"),
                           (ModelsPage, "模型"), (TasksPage, "任务"),
                           (LogPage, "日志"), (SettingsPage, "设置")):
             page = cls(ctx)

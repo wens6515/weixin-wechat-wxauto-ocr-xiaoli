@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""控制面板六个页面：状态 / 角色卡 / 模型 / 任务 / 日志 / 设置。"""
+"""控制面板六个页面：首页（状态机）/ 角色卡 / 模型 / 任务 / 日志 / 设置。"""
 import json
 import os
+import threading
 import time
 
 from PySide6.QtCore import Qt, QTimer
@@ -9,7 +10,8 @@ from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
     QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox, QSpinBox,
-    QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox,
+    QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QFrame,
+    QProgressBar,
 )
 
 from xiaoli_app import card_store, config_store
@@ -21,63 +23,319 @@ def _key_display(key):
 
 
 # =====================================================================
-# 状态页
+# 首页：状态机主按钮 + 环境检查 + 一键安装 + 首轮提示词
 # =====================================================================
 
-class StatusPage(QWidget):
+class HomePage(QWidget):
+    """首页：初始化 → 启动 bot ⇄ 暂停运行 状态机；环境检查卡片；天枢一键安装；首轮提示词发送。
+
+    线程模型：耗时操作（环境检测/下载安装/发送提示词）跑后台线程，结果写回普通属性
+    （GIL 原子），主线程 tick() 读取后更新控件——避免跨线程触碰 Qt 控件。
+    """
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
+        self._env_report = None      # worker 写入
+        self._env_running = False
+        self._install_running = False
+        self._download_progress = 0
+        self._install_state = None   # None | "ok" | "失败: ..."
+        self._prompt_state = None
+        self._prompt_done = False
+        self._prompt_running = False
+
         lay = QVBoxLayout(self)
-        self.lbl_state = QLabel("引擎未启动")
-        self.lbl_wx = QLabel("微信连接：-")
-        self.lbl_card = QLabel("活跃角色卡：-")
-        self.lbl_model = QLabel("聊天模型：-  视觉模型：-")
-        self.btn_pause = QPushButton("暂停回复")
-        self.btn_pause.clicked.connect(self.toggle_pause)
-        lay.addWidget(self.lbl_state)
-        lay.addWidget(self.lbl_wx)
-        lay.addWidget(self.lbl_card)
-        lay.addWidget(self.lbl_model)
-        lay.addWidget(self.btn_pause)
+        lay.setContentsMargins(32, 28, 32, 20)
+        lay.setSpacing(14)
+
+        # 标题
+        self.lbl_title = QLabel("小漓")
+        self.lbl_title.setObjectName("title")
+        self.lbl_subtitle = QLabel("你的微信 AI 助手 · 聊天 / 图片识别 / 任务桥")
+        self.lbl_subtitle.setObjectName("subtitle")
+        lay.addWidget(self.lbl_title)
+        lay.addWidget(self.lbl_subtitle)
+
+        # 状态 + 主按钮
+        self.lbl_state = QLabel("尚未初始化")
+        self.lbl_state.setObjectName("stateLabel")
+        self.btn_main = QPushButton("初始化")
+        self.btn_main.setObjectName("btnMain")
+        self.btn_main.setProperty("tone", "primary")
+        self.btn_main.setMinimumSize(220, 52)
+        self.btn_main.clicked.connect(self._on_main_clicked)
+        row = QHBoxLayout()
+        row.addWidget(self.lbl_state)
+        row.addStretch(1)
+        row.addWidget(self.btn_main)
+        lay.addLayout(row)
+
+        # 环境检查卡片
+        self.env_frame = QFrame()
+        self.env_frame.setObjectName("card")
+        ev = QVBoxLayout(self.env_frame)
+        ev.setContentsMargins(16, 12, 16, 12)
+        ev.setSpacing(8)
+        ev.addWidget(QLabel("环境检查"))
+        self.env_rows = {}
+        for key, title in (("wechat", "微信 PC 版"), ("tianshu", "天枢 CLI"),
+                           ("first_prompt", "首轮提示词")):
+            r = QHBoxLayout()
+            tag = QLabel("—")
+            tag.setStyleSheet("font-weight:600;")
+            det = QLabel("检测中…")
+            det.setWordWrap(True)
+            r.addWidget(QLabel(title))
+            r.addStretch(1)
+            r.addWidget(tag)
+            r.addWidget(det)
+            ev.addLayout(r)
+            self.env_rows[key] = (tag, det)
+        self.btn_check = QPushButton("重新检查环境")
+        self.btn_check.clicked.connect(self._check_env)
+        self.btn_install = QPushButton("一键安装天枢")
+        self.btn_install.setVisible(False)
+        self.btn_install.clicked.connect(self._install_tianshu)
+        ev.addLayout(self._row(self.btn_check, self.btn_install))
+        lay.addWidget(self.env_frame)
+
+        # 进度条（下载进度）
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setVisible(False)
+        lay.addWidget(self.progress)
+
+        # 首轮提示词状态
+        self.lbl_prompt = QLabel("")
+        self.lbl_prompt.setWordWrap(True)
+        self.btn_retry = QPushButton("重试发送首轮提示词")
+        self.btn_retry.setVisible(False)
+        self.btn_retry.clicked.connect(lambda: self._run_prompt_flow(force=True))
+        lay.addWidget(self.lbl_prompt)
+        lay.addWidget(self.btn_retry)
         lay.addStretch(1)
 
-    def refresh(self):
+    @staticmethod
+    def _row(*widgets):
+        r = QHBoxLayout()
+        for w in widgets:
+            r.addWidget(w)
+        r.addStretch(1)
+        return r
+
+    # ---------- 主按钮状态机 ----------
+
+    def _on_main_clicked(self):
         eng = self.ctx.engine
         if eng is None:
-            self.lbl_state.setText("引擎未启动")
-            self.btn_pause.setEnabled(False)
             return
-        bot = eng.bot
-        if eng.is_alive() and bot is not None:
-            if bot.paused:
-                self.lbl_state.setText("引擎运行中（已暂停回复）")
-                self.btn_pause.setText("恢复回复")
-            else:
-                self.lbl_state.setText("引擎运行中")
-                self.btn_pause.setText("暂停回复")
-            self.lbl_wx.setText(f"微信连接：{'已连接' if getattr(bot, 'wx', None) is not None else '连接中…'}")
-        else:
-            self.lbl_state.setText("引擎启动中…")
-            self.btn_pause.setText("暂停回复")
-        self.btn_pause.setEnabled(True)
-        card = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id())
-        if card:
-            self.lbl_card.setText(f"活跃角色卡：{card.get('name', '?')} {card.get('emoji', '')}")
-            self.lbl_model.setText(
-                f"聊天模型：{card.get('chat_model', '-')}  视觉模型：{card.get('vision_model', '-')}")
-        else:
-            self.lbl_card.setText("活跃角色卡：-")
-            self.lbl_model.setText("聊天模型：-  视觉模型：-")
+        s = eng.state
+        if s in ("idle", "error"):
+            eng.initialize()
+        elif s == "initialized":
+            eng.start_bot()
+        elif s == "running":
+            eng.pause()
+        elif s == "paused":
+            eng.resume()
 
     def toggle_pause(self):
+        """托盘菜单调用：运行 ⇄ 暂停。"""
         eng = self.ctx.engine
-        if eng is None or eng.bot is None:
+        if eng is None:
             return
-        if eng.bot.paused:
-            eng.resume()
-        else:
+        if eng.state == "running":
             eng.pause()
+        elif eng.state == "paused":
+            eng.resume()
+
+    def _refresh_main_button(self):
+        eng = self.ctx.engine
+        state = eng.state if eng is not None else "idle"
+        tone, text, enabled = "primary", "初始化", True
+        if state == "initializing":
+            text, enabled = "初始化中…", False
+        elif state == "initialized":
+            text = "启动 bot"
+        elif state == "running":
+            text, tone = "暂停运行", "warn"
+        elif state == "paused":
+            text = "继续运行"
+        elif state == "stopped":
+            text, enabled = "已停止", False
+        elif state == "error":
+            text = "重新初始化"
+        self.btn_main.setText(text)
+        self.btn_main.setEnabled(enabled)
+        if self.btn_main.property("tone") != tone:
+            self.btn_main.setProperty("tone", tone)
+            self.btn_main.style().unpolish(self.btn_main)
+            self.btn_main.style().polish(self.btn_main)
+        labels = {
+            "idle": "尚未初始化", "initializing": "正在初始化…", "initialized": "已就绪，点击「启动 bot」",
+            "running": "运行中", "paused": "已暂停", "stopped": "引擎已停止", "error": "初始化失败",
+        }
+        self.lbl_state.setText(labels.get(state, state))
+        if state == "error" and getattr(eng, "error", None):
+            self.lbl_state.setText(f"初始化失败：{eng.error}")
+
+    # ---------- 环境检查 ----------
+
+    def _check_env(self):
+        if self._env_running:
+            return
+        self._env_running = True
+        self._env_report = None
+        for tag, det in self.env_rows.values():
+            tag.setText("…")
+            tag.setStyleSheet("font-weight:600; color:#9CA3AF;")
+            det.setText("检测中…")
+        threading.Thread(target=self._check_env_worker, daemon=True).start()
+
+    def _check_env_worker(self):
+        from xiaoli_app import setup
+        try:
+            report = setup.check_environment(self.ctx.cfg)
+        except Exception as e:
+            report = {k: {"ok": False, "detail": f"检测异常: {e}"}
+                      for k in ("wechat", "tianshu", "first_prompt")}
+        self._env_report = report
+        self._env_running = False
+
+    def _apply_env_report(self):
+        report = self._env_report
+        if report is None:
+            return
+        self._env_report = None
+        for key in ("wechat", "tianshu", "first_prompt"):
+            tag, det = self.env_rows[key]
+            item = report.get(key, {"ok": False, "detail": "无数据"})
+            ok = bool(item.get("ok"))
+            tag.setText("✓" if ok else "✗")
+            tag.setStyleSheet("font-weight:600; color:#10B981;" if ok else "font-weight:600; color:#EF4444;")
+            det.setText(str(item.get("detail", "")))
+        tianshu_ok = bool(report.get("tianshu", {}).get("ok"))
+        self.btn_install.setVisible(not tianshu_ok)
+        win = report.get("tianshu", {}).get("window")
+        if win and not self.ctx.cfg.get("tianshu_window_title"):
+            self.ctx.cfg["tianshu_window_title"] = win
+        # 初始化完成后自动触发首轮提示词流程
+        eng = self.ctx.engine
+        if (eng is not None and eng.state == "initialized"
+                and not self._prompt_done and not self._prompt_running):
+            self._run_prompt_flow()
+
+    # ---------- 一键安装天枢 ----------
+
+    def _install_tianshu(self):
+        if self._install_running:
+            return
+        self._install_running = True
+        self._install_state = None
+        self._download_progress = 0
+        self.progress.setVisible(True)
+        self.progress.setValue(0)
+        self.btn_install.setEnabled(False)
+        threading.Thread(target=self._install_worker, daemon=True).start()
+
+    def _install_worker(self):
+        from xiaoli_app import setup, config_store
+        dest = os.path.join(os.path.expanduser("~"), "Tianshu")
+        try:
+            inst = setup.install_tianshu(
+                dest, progress_cb=lambda p: setattr(self, "_download_progress", p))
+            self.ctx.cfg["tianshu_install_dir"] = inst
+            try:
+                config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+            except Exception:
+                pass
+            self._install_state = "ok"
+        except Exception as e:
+            self._install_state = f"失败：{e}"
+        self._install_running = False
+        self._download_progress = 100
+
+    def _apply_install_state(self):
+        if self._install_running:
+            self.progress.setVisible(True)
+            self.progress.setValue(self._download_progress)
+            self.btn_install.setEnabled(False)
+            return
+        if self._install_state is not None:
+            self.progress.setVisible(False)
+            self.btn_install.setEnabled(True)
+            st = self._install_state
+            self._install_state = None
+            QMessageBox.information(
+                self, "天枢安装", "天枢已安装完成" if st == "ok" else st)
+            if st == "ok":
+                self._check_env()
+
+    # ---------- 首轮提示词流程 ----------
+
+    def _run_prompt_flow(self, force=False):
+        if self._prompt_running:
+            return
+        if self._prompt_done and not force:
+            return
+        self._prompt_running = True
+        self.lbl_prompt.setText("正在发送首轮提示词…")
+        threading.Thread(target=self._prompt_worker, daemon=True).start()
+
+    def _prompt_worker(self):
+        from xiaoli_app import setup
+        fp = (self.ctx.cfg.get("first_prompt_path") or "").strip()
+        if not fp or not os.path.isfile(fp):
+            self._prompt_state = f"首轮提示词文件不存在：{fp}"
+            self._prompt_running = False
+            return
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                text = f.read().strip()
+        except Exception as e:
+            self._prompt_state = f"读取首轮提示词失败：{e}"
+            self._prompt_running = False
+            return
+        try:
+            setup.open_first_prompt(fp)
+        except Exception:
+            pass
+        title = (self.ctx.cfg.get("tianshu_window_title") or "").strip()
+        if not title:
+            try:
+                for name in setup._list_windows():
+                    if "天枢" in name or "Tianshu" in name:
+                        title = name
+                        break
+            except Exception:
+                pass
+        if not title:
+            self._prompt_state = "已打开提示词文件；未找到天枢窗口，请先启动天枢后点「重试发送」"
+            self._prompt_running = False
+            return
+        ok = setup.send_prompt_to_tianshu(text, title)
+        self._prompt_state = "首轮提示词已发送给天枢 ✓" if ok else "发送失败，请确认天枢窗口已打开后重试"
+        if ok:
+            self._prompt_done = True
+        self._prompt_running = False
+
+    def _apply_prompt_state(self):
+        if self._prompt_state is None:
+            return
+        txt = self._prompt_state
+        self._prompt_state = None
+        self.lbl_prompt.setText(txt)
+        self.btn_retry.setVisible("✓" not in txt and "不存在" not in txt)
+
+    # ---------- 主窗口 tick 驱动 ----------
+
+    def tick(self):
+        self._refresh_main_button()
+        if self._env_report is not None and not self._env_running:
+            self._apply_env_report()
+        self._apply_install_state()
+        self._apply_prompt_state()
 
 
 # =====================================================================

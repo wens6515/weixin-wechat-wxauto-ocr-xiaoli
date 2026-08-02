@@ -83,37 +83,47 @@ class TestUiSmoke(unittest.TestCase):
                 refresh()
         win.close()
 
-    def test_status_page_reflects_engine(self):
+    def test_home_page_button_states(self):
+        """状态机主按钮：初始化 → 启动 bot → 暂停运行 → 继续运行（随引擎状态切换）"""
+        import time
         from xiaoli_app.engine import EngineThread
         ctx = self._make_ctx()
         win = MainWindow(ctx)
-        page = win.pages["状态"]
-        page.refresh()
-        self.assertIn("引擎未启动", page.lbl_state.text())
-        self.assertFalse(page.btn_pause.isEnabled())
-        # 未启动的引擎 → 启动中
+        page = win.pages["首页"]
+        page.tick()
+        self.assertEqual(page.btn_main.text(), "初始化")
+        self.assertEqual(page.lbl_state.text(), "尚未初始化")
+        # 初始化（FakeBot 工厂，不连微信）
         class FakeBot:
             paused = False
-            wx = object()
 
-            def run(self, stop_event=None, poll_interval=2.0):
-                while not (stop_event and stop_event.is_set()):
-                    import time
-                    time.sleep(0.01)
+            def process_new_messages(self):
+                pass
 
-        fake_eng = EngineThread(lambda: FakeBot(), poll_interval=0.01)
-        ctx.engine = fake_eng
+        eng = EngineThread(lambda: FakeBot(), poll_interval=0.01)
+        ctx.engine = eng
         ctx.bus = None
-        page.refresh()
-        self.assertIn("启动中", page.lbl_state.text())
-        # 启动后 → 运行中 + 微信已连接
-        fake_eng.start()
-        import time
-        time.sleep(0.15)
-        page.refresh()
-        self.assertIn("运行中", page.lbl_state.text())
-        self.assertIn("已连接", page.lbl_wx.text())
-        fake_eng.stop()
+        eng.initialize()
+        deadline = time.time() + 3
+        while time.time() < deadline and eng.state != "initialized":
+            time.sleep(0.02)
+        self.assertEqual(eng.state, "initialized")
+        page.tick()
+        self.assertEqual(page.btn_main.text(), "启动 bot")
+        # 启动 → 运行中
+        eng.start_bot()
+        time.sleep(0.05)
+        page.tick()
+        self.assertEqual(page.btn_main.text(), "暂停运行")
+        # 暂停
+        eng.pause()
+        page.tick()
+        self.assertEqual(page.btn_main.text(), "继续运行")
+        # 恢复
+        eng.resume()
+        page.tick()
+        self.assertEqual(page.btn_main.text(), "暂停运行")
+        eng.stop()
         win.close()
 
     def test_cards_page_load_and_collect(self):
