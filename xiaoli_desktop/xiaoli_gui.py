@@ -181,6 +181,9 @@ def main():
         dlg = FirstRunDialog(cfg=ctx.cfg)
         dlg.exec()
         ctx.cfg.update(dlg.result_cfg())
+        # 天枢 CLI 以 tianshu_workdir 为 cwd（路径检查基于 cwd）——引导选的
+        # 任务目录在哪，天枢 CLI 就在其父目录下工作
+        config_store.sync_workdir_to_tasks(ctx.cfg)
         try:
             config_store.save_config(ctx.cfg, ctx.cfg_path)
         except OSError as e:
