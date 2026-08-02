@@ -6,6 +6,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -228,6 +229,28 @@ class TestTaskDispatchWindow(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(getattr(self, "_tmp", ""), ignore_errors=True)
+
+    def test_stale_task_does_not_block_polling(self):
+        """RED 复现：任务卡死（无 result.json 且超过阈值）不应永久阻塞消息轮询。
+        用户实测：投递"贪吃蛇"后任务未归档，bot 从此不再轮询微信消息。"""
+        import xiaoli_bot as xb
+        tmp = tempfile.mkdtemp(prefix="stale_task_")
+        self._tmp = tmp
+        # 卡死任务：只有 task.json、无 result.json，创建于很久以前
+        task_dir = os.path.join(tmp, "2026080220352060b5")
+        os.makedirs(task_dir)
+        with open(os.path.join(task_dir, "task.json"), "w", encoding="utf-8") as f:
+            json.dump({"task": "做一个贪吃蛇", "created_at": time.time() - 60}, f)
+        self.assertTrue(xb.has_active_tasks(tmp), "新任务应判为活跃（基线）")
+        # 卡死任务：创建时间超过阈值且无 result.json → 不再活跃 → 轮询可恢复
+        with open(os.path.join(task_dir, "task.json"), "w", encoding="utf-8") as f:
+            json.dump({"task": "做一个贪吃蛇", "created_at": time.time() - 99999}, f)
+        self.assertFalse(xb.has_active_tasks(tmp, stale_after=3600),
+                         "卡死超过阈值的任务不得阻塞消息轮询")
+        # 正常完成的判定不受影响
+        with open(os.path.join(task_dir, "result.json"), "w", encoding="utf-8") as f:
+            json.dump({"status": "success"}, f)
+        self.assertFalse(xb.has_active_tasks(tmp, stale_after=3600))
 
     def test_dispatch_uses_cli_window_not_desktop(self):
         import xiaoli_bot as xb

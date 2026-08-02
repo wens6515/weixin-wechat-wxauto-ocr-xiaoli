@@ -1064,6 +1064,20 @@ class SettingsPage(QWidget):
         sl.addStretch(1)
         lay.addWidget(g_send)
 
+        # 微信文件目录（任务附件识别源）
+        g_files = QGroupBox("微信文件目录（收到的文件下载位置）")
+        ffl = QHBoxLayout(g_files)
+        self.ed_files = QLineEdit()
+        self.ed_files.setReadOnly(True)
+        btn_files = QPushButton("浏览…")
+        btn_files.clicked.connect(self._pick_files_dir)
+        self.btn_files_save = QPushButton("保存")
+        self.btn_files_save.clicked.connect(self._save_files_dir)
+        ffl.addWidget(self.ed_files, 1)
+        ffl.addWidget(btn_files)
+        ffl.addWidget(self.btn_files_save)
+        lay.addWidget(g_files)
+
         # 成果排除登记
         g_stem = QGroupBox("成果排除登记（防止 bot 发出去的成果被误当用户文件）")
         stl = QVBoxLayout(g_stem)
@@ -1096,6 +1110,7 @@ class SettingsPage(QWidget):
         self.sp_off_y.setValue(int(off[1]))
         idx = self.cb_send.findData(cfg.get("file_send_method", "clipboard"))
         self.cb_send.setCurrentIndex(max(0, idx))
+        self.ed_files.setText(cfg.get("file_storage_path", ""))
         self._refresh_stems()
 
     def _view_memory(self):
@@ -1138,6 +1153,17 @@ class SettingsPage(QWidget):
         self.ctx.cfg["file_send_method"] = self.cb_send.currentData()
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         QMessageBox.information(self, "已保存", "发送方式已保存")
+
+    def _pick_files_dir(self):
+        p = QFileDialog.getExistingDirectory(
+            self, "选择微信文件目录", self.ed_files.text() or "")
+        if p:
+            self.ed_files.setText(p)
+
+    def _save_files_dir(self):
+        self.ctx.cfg["file_storage_path"] = self.ed_files.text().strip()
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        QMessageBox.information(self, "已保存", "微信文件目录已保存")
 
     def _refresh_stems(self):
         cfg = self.ctx.cfg or {}
