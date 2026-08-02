@@ -192,6 +192,23 @@ class TestApplyRole(unittest.TestCase):
         self.assertEqual(bot.api_url, "")
         self.assertEqual(bot.vision_api_url, "")
 
+    def test_apply_role_strips_provider_prefix(self):
+        """RED 复现：模型名带厂商前缀（deepseek:deepseek-v4-flash）直接进
+        API payload 会 400——apply_role 必须剥离为纯模型名（deepseek-v4-flash）。"""
+        bot = self._make_bot()
+        card = make_card(
+            chat_provider="deepseek", chat_model="deepseek:deepseek-v4-flash",
+            vision_provider="zhipu", vision_model="zhipu:glm-4.6v",
+            classify_provider="deepseek", classify_model="deepseek:deepseek-reasoner",
+        )
+        bot.apply_role(card, self._providers())
+        self.assertEqual(bot.chat_model, "deepseek-v4-flash",
+                         "chat_model 必须剥离厂商前缀，否则 API 400")
+        self.assertEqual(bot.vision_model, "glm-4.6v",
+                         "vision_model 必须剥离厂商前缀，否则 API 400")
+        self.assertEqual(bot.file_model, "deepseek-reasoner",
+                         "classify_model 必须剥离厂商前缀，否则 API 400")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
