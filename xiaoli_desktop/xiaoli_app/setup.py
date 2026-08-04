@@ -108,18 +108,19 @@ def _console_windows():
 
 
 def _process_has_rivet(pid):
-    """进程树验证：PID 自身或任一子进程（递归）命令行含 rivet。
+    """全局验证：系统里是否存在命令行含 rivet 的进程（CLI 在跑）。
 
-    终端宿主（Windows Terminal）把 CLI 窗口标题改写为「Windows PowerShell」
-    时，标题特征失效——但 CLI 是 cmd /k ... rivet 启动的，进程树里必有
-    rivet（窗口 PID 是 conhost/WT/cmd，自身命令行不含 rivet，rivet 在
-    子进程 node 里）；用户自己开的 PowerShell 则没有。失败（PowerShell
-    不可用等）返回 False = 不认作 CLI（宁缺毋滥，防 fail-open 误发）。
+    不做窗口进程树关联——WT 标签场景下窗口 PID（WindowsTerminal.exe）与
+    CLI 进程（cmd/node）无父子关系（标签进程不挂在 WT 窗口进程下，且
+    cmd 可能孤儿化），从窗口 PID 向下查必然为空（用户实测 17:16 日志
+    「未定位到 CLI 窗口」的根因）。CLI 是 cmd /k ... rivet 启动的，进程
+    表里必有 rivet 命令行；用户自己开的 PowerShell 系统里无 rivet 进程
+    → 不会误认（fail-open 反例）。失败（PowerShell 不可用等）返回 False
+    = 不认作 CLI（宁缺毋滥）。
     """
     try:
         import subprocess
-        # 一次拉全进程表（PID|PPID|CommandLine），内存里递归查子进程。
-        # wmic 在新 Windows 上已弃用，用 PowerShell Get-CimInstance。
+        # 一次拉全进程表（PID|PPID|CommandLine），扫描含 rivet 的行。
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | "
@@ -130,30 +131,12 @@ def _process_has_rivet(pid):
             # 都闪一次）。capture_output 只重定向 stdout/stderr，stdin
             # 仍继承 → Windows 为子进程新建控制台。
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        rows = []
         for line in (out.stdout or "").splitlines():
-            parts = line.split("|", 2)
-            if len(parts) == 3 and parts[0].strip().isdigit():
-                rows.append((int(parts[0]), int(parts[1]),
-                             (parts[2] or "").lower()))
-        children = {}
-        for p, pp, cmd in rows:
-            children.setdefault(pp, []).append((p, cmd))
-        # 从目标 PID 向下递归（含自身）
-        stack = [pid]
-        seen = set()
-        while stack:
-            cur = stack.pop()
-            if cur in seen:
-                continue
-            seen.add(cur)
-            for cpid, cmd in children.get(cur, []):
-                if "rivet" in cmd:
-                    return True
-                stack.append(cpid)
-        # 自身命令行
-        for p, _pp, cmd in rows:
-            if p == pid and "rivet" in cmd:
+            low = line.lower()
+            # rivet-runtime 是桌面端（tianshu-desktop）的 serve 进程——它
+            # 也在跑（node ... rivet-runtime\main.js serve），但不是 CLI。
+            # 只认 CLI 特征：cmd /k ... rivet 或 tianshu-tui 主程序。
+            if "rivet" in low and "rivet-runtime" not in low:
                 return True
     except Exception:
         pass
