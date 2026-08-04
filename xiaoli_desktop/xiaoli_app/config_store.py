@@ -351,7 +351,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "tianshu_install_dir": "",
         "tianshu_download_url": "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main",
         "first_prompt_path": "",  # 空 = 用内置模板（build_first_prompt）；非空且文件存在时优先读文件
-        "image_click_offset": [3, -5],  # 图片点击偏移（实测校准值，小白开箱即用；位置偏了再到设置页调）
+        "image_click_offset": [-200, -130],  # 图片点击偏移（用户实测校准 2026-08-04：真人点击测 [-199,-131] 取整；位置偏了再到设置页调）
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
     }.items():
