@@ -145,6 +145,11 @@ class TestUiSmoke(unittest.TestCase):
         ctx = self._make_ctx()
         win = MainWindow(ctx)
         page = win.pages["首页"]
+        # 隔离：tick 在 engine initialized 后会自动触发首轮提示词流程（_run_prompt_flow
+        # 启动真实 worker 线程 → resolve 命中系统里真实存在的 CLI 窗口 → 真实发送指令）。
+        # 本测试只测按钮状态机，屏蔽流程入口——否则残留线程会在后续测试的 mock 窗口期
+        # 向真实 CLI 窗口发 yolo/提示词，污染断言（系统开着「npm prefix」窗口时必现）。
+        page._run_prompt_flow = lambda force=False: None
         page.tick()
         self.assertEqual(page.btn_main.text(), "初始化")
         self.assertEqual(page.lbl_state.text(), "尚未初始化")
@@ -301,6 +306,35 @@ class TestUiSmoke(unittest.TestCase):
         # 入口模块可导入（不执行 main，避免启动引擎连微信）
         import xiaoli_gui  # noqa: F401
         self.assertTrue(callable(xiaoli_gui.main))
+
+    def test_prompt_flow_failure_stops_auto_retry(self):
+        """RED 复现：首轮提示词流程失败后，tick 不得自动重试发起。
+
+        用户实测：初始化发首轮提示词时 resolve 每次都走到第 3 级 launch
+        新 CLI 窗口；失败后 tick 每个周期都重新触发 _run_prompt_flow →
+        每轮都开新 CLI 窗口，无限循环。修复后 tick 只自动发起一次，
+        失败只能由「重试发送」按钮（force=True）手动再次发起。
+        """
+        from unittest import mock
+        from xiaoli_app.ui.pages import HomePage
+        ctx = self._make_ctx()
+
+        class FakeEngine:
+            state = "initialized"
+
+        ctx.engine = FakeEngine()
+        page = HomePage(ctx)
+        page._prompt_done = False
+        page._prompt_running = False
+        # 流程发起过但未成功（_prompt_done 仍 False）——失败后不得自动重试
+        page._prompt_attempted = True
+        with mock.patch.object(page, "_run_prompt_flow") as m:
+            page._refresh_main_button()
+            m.assert_not_called()
+        # 手动重试（force=True）不受 attempted 限制
+        with mock.patch.object(page, "_run_prompt_flow") as m:
+            page._run_prompt_flow(force=True)
+            m.assert_called_once()
 
 
 class TestUiFixes(unittest.TestCase):
