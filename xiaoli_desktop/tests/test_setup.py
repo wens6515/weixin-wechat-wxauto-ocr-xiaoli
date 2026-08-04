@@ -278,6 +278,11 @@ class TestLaunchTianshu(unittest.TestCase):
 class TestResolveCliWindow(unittest.TestCase):
     """resolve_cli_window：定位 CLI 窗口，杜绝把提示词发给桌面端窗口"""
 
+    def setUp(self):
+        # launch 冷却护栏使用模块级状态，测试间必须重置（否则前一个测试的
+        # launch 会让后续测试的 resolve 跳过第 3 级 launch，断言误红）
+        setup._last_launch_mono = None
+
     def test_uses_manual_config_title(self):
         cfg = {"tianshu_window_title": "npm"}  # 用户手动配置的 CLI 标题
         title, detail = setup.resolve_cli_window(
@@ -490,6 +495,42 @@ class TestResolveCliWindow(unittest.TestCase):
         self.assertEqual(title, "npm",
                          "新 CLI 标题与既有窗口重复时按 CLI 特征窗口名定位应命中")
         self.assertEqual(detail, "")
+
+    def test_no_repeat_launch_within_cooldown(self):
+        # RED 复现：CLI 窗口枚举不到/标题不匹配时（用户实测：初始化发首轮
+        # 提示词，resolve 每次都走到第 3 级 launch → 每轮都开新 CLI 窗口，
+        # 窗口一个接一个地开，循环不止）。冷却期内第 3 级不得重复 launch，
+        # 只轮询已启动的窗口——launch 幂等护栏，从机制上切断窗口风暴。
+        cfg = {}
+        launch_count = {"n": 0}
+        wins = ["微信"]
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            launch_count["n"] += 1
+            wins.append("npm")
+            return True, "ok"
+
+        def fake_console():
+            # 模拟枚举异常/标题不匹配：CLI 窗口存在但从未被枚举到
+            return []
+
+        # 第一次：launch 1 次，轮询 15 轮也找不到 → 返回失败
+        title1, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list, launch_fn=fake_launch,
+            sleep_fn=lambda s: None, console_windows_fn=fake_console)
+        self.assertEqual(title1, "")
+        self.assertEqual(launch_count["n"], 1)
+
+        # 冷却期内第二次：不得再 launch（窗口风暴护栏）
+        title2, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list, launch_fn=fake_launch,
+            sleep_fn=lambda s: None, console_windows_fn=fake_console)
+        self.assertEqual(launch_count["n"], 1,
+                         "冷却期内不得重复 launch 新 CLI 窗口（窗口风暴护栏）")
+        self.assertEqual(title2, "")
 
 
 class TestSendPrompt(unittest.TestCase):
