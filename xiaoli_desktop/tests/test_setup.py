@@ -284,11 +284,11 @@ class TestResolveCliWindow(unittest.TestCase):
         setup._last_launch_mono = None
 
     def test_uses_manual_config_title(self):
-        cfg = {"tianshu_window_title": "npm"}  # 用户手动配置的 CLI 标题
+        cfg = {"tianshu_window_title": "npm prefix"}  # 用户手动配置的 CLI 标题
         title, detail = setup.resolve_cli_window(
-            cfg, list_windows_fn=lambda: ["npm", "微信"],
-            console_windows_fn=lambda: ["npm"])  # CLI 是控制台窗口
-        self.assertEqual(title, "npm")
+            cfg, list_windows_fn=lambda: ["npm prefix", "微信"],
+            console_windows_fn=lambda: ["npm prefix"])  # CLI 是控制台窗口
+        self.assertEqual(title, "npm prefix")
         self.assertEqual(detail, "")
 
     def test_ignores_desktop_polluted_title(self):
@@ -303,19 +303,19 @@ class TestResolveCliWindow(unittest.TestCase):
 
         def fake_launch(cfg2):
             called["launch"] = True
-            wins.append("npm")  # 启动后新增 CLI 窗口
+            wins.append("npm prefix")  # 启动后新增 CLI 窗口
             return True, "ok"
 
         def fake_console():
             # 控制台枚举：启动前无 CLI 窗口（逼走第 3 级），启动后 CLI 出现
-            return ["npm"] if called["launch"] else []
+            return ["npm prefix"] if called["launch"] else []
 
         title, detail = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
             launch_fn=fake_launch, sleep_fn=lambda s: None,
             console_windows_fn=fake_console)  # 无控制台 CLI → 走第 3 级启动
         self.assertTrue(called["launch"], "桌面端污染值不应阻止 CLI 启动")
-        self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非桌面端")
+        self.assertEqual(title, "npm prefix", "应把提示词发给 CLI 新增窗口而非桌面端")
 
     def test_launches_cli_and_finds_new_window(self):
         cfg = {}
@@ -325,17 +325,17 @@ class TestResolveCliWindow(unittest.TestCase):
             return list(wins)
 
         def fake_launch(cfg2):
-            wins.append("npm")
+            wins.append("npm prefix")
             return True, "ok"
 
         def fake_console():
-            return ["npm"] if "npm" in wins else []
+            return ["npm prefix"] if "npm prefix" in wins else []
 
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
             launch_fn=fake_launch, sleep_fn=lambda s: None,
             console_windows_fn=fake_console)
-        self.assertEqual(title, "npm")
+        self.assertEqual(title, "npm prefix")
 
     def test_launch_failure_reports(self):
         cfg = {}
@@ -358,19 +358,19 @@ class TestResolveCliWindow(unittest.TestCase):
 
         def fake_launch(cfg2):
             called["launch"] = True
-            wins.append("npm")  # CLI 启动后新增窗口（npm prefix）
+            wins.append("npm prefix")  # CLI 启动后新增窗口（npm prefix）
             return True, "ok"
 
         def fake_console():
             # 桌面端辅助窗口不是控制台类，天然不进控制台枚举；启动后 CLI 进入
-            return ["npm"] if called["launch"] else []
+            return ["npm prefix"] if called["launch"] else []
 
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
             launch_fn=fake_launch, sleep_fn=lambda s: None,
             console_windows_fn=fake_console)  # 第 2 级天然排除桌面端辅助窗口
         self.assertTrue(called["launch"], "桌面端辅助窗口不应被当作 CLI")
-        self.assertEqual(title, "npm", "应跳过 app.tianshu.* 辅助窗口，只认 CLI 新增窗口")
+        self.assertEqual(title, "npm prefix", "应跳过 app.tianshu.* 辅助窗口，只认 CLI 新增窗口")
 
     def test_skips_english_only_desktop_title(self):
         # 纯英文桌面端窗口标题「Tianshu」（无中文「天枢」）也不得被第 2 级
@@ -384,19 +384,19 @@ class TestResolveCliWindow(unittest.TestCase):
 
         def fake_launch(cfg2):
             called["launch"] = True
-            wins.append("npm")  # 启动后新增 CLI 窗口
+            wins.append("npm prefix")  # 启动后新增 CLI 窗口
             return True, "ok"
 
         def fake_console():
             # 纯英文桌面端「Tianshu」不是控制台类，不进控制台枚举；启动后 CLI 进入
-            return ["npm"] if called["launch"] else []
+            return ["npm prefix"] if called["launch"] else []
 
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
             launch_fn=fake_launch, sleep_fn=lambda s: None,
             console_windows_fn=fake_console)
         self.assertTrue(called["launch"], "纯英文桌面端标题不应阻止 CLI 启动")
-        self.assertEqual(title, "npm", "应把提示词发给 CLI 新增窗口而非纯英文桌面端")
+        self.assertEqual(title, "npm prefix", "应把提示词发给 CLI 新增窗口而非纯英文桌面端")
 
     def test_never_sends_to_new_desktop_window(self):
         # RED 复现：CLI 启动后新增的全是桌面端窗口（桌面端慢启动、CLI 未出现）——
@@ -425,17 +425,17 @@ class TestResolveCliWindow(unittest.TestCase):
 
     def test_skips_decoy_npm_window(self):
         # RED 复现（对抗审查反例 C1，fail-open）：浏览器/编辑器等非控制台窗口
-        # 标题含 "npm"（如 "npm docs - Mozilla Firefox"）且枚举先于真实 CLI——
+        # 标题含 "npm prefix"（如 "npm docs - Mozilla Firefox"）且枚举先于真实 CLI——
         # 修复前第 2 级对全量窗口裸子串匹配会选中诱饵，提示词粘贴进错误窗口。
         # 修复后第 2 级只匹配控制台窗口（console_windows_fn），诱饵天然排除。
         cfg = {}
-        decoy_first = ["npm docs - Mozilla Firefox", "微信", "npm"]  # 诱饵先于真实 CLI
+        decoy_first = ["npm docs - Mozilla Firefox", "微信", "npm prefix"]  # 诱饵先于真实 CLI
         title, detail = setup.resolve_cli_window(
             cfg,
             list_windows_fn=lambda: list(decoy_first),
-            console_windows_fn=lambda: ["npm"],  # 真实 CLI 是控制台窗口
+            console_windows_fn=lambda: ["npm prefix"],  # 真实 CLI 是控制台窗口
             sleep_fn=lambda s: None)
-        self.assertEqual(title, "npm",
+        self.assertEqual(title, "npm prefix",
                          "第 2 级应跳过诱饵窗口，只匹配控制台里的真实 CLI")
 
     def test_console_no_cli_skips_decoy(self):
@@ -451,48 +451,48 @@ class TestResolveCliWindow(unittest.TestCase):
 
         def fake_launch(cfg2):
             called["launch"] = True
-            wins.append("npm")  # 真实 CLI 启动后新增窗口
+            wins.append("npm prefix")  # 真实 CLI 启动后新增窗口
             return True, "ok"
 
         def fake_console():
             # 启动前系统无控制台 CLI（诱饵是浏览器，非控制台类）；
             # 启动后真实 CLI（npm）进入控制台枚举
-            return ["npm"] if called["launch"] else []
+            return ["npm prefix"] if called["launch"] else []
 
         title, _ = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
             console_windows_fn=fake_console,
             launch_fn=fake_launch, sleep_fn=lambda s: None)
         self.assertTrue(called["launch"], "无控制台 CLI 时应启动而非选诱饵窗口")
-        self.assertEqual(title, "npm", "应把提示词发给启动后新增的 CLI 窗口")
+        self.assertEqual(title, "npm prefix", "应把提示词发给启动后新增的 CLI 窗口")
 
     def test_stage3_duplicate_title_fallback(self):
         # RED 复现（第 3 级兜底 dead code）：新 CLI 窗口标题与既有窗口重复
-        # （同为 "npm"）时，旧实现用 set 差集 + set 长度判断——标题重复则差集为空、
+        # （同为 "npm prefix"）时，旧实现用 set 差集 + set 长度判断——标题重复则差集为空、
         # 长度不变，len(wins) > len(before_wins) 恒 False，兜底永不触发，最终报
         # 「窗口未出现」。修复后按列表保留重复标题、比较窗口总数并选 CLI 特征窗口。
         cfg = {}
-        wins = ["微信", "npm"]  # 启动前已有一个 "npm" 窗口
+        wins = ["微信", "npm prefix"]  # 启动前已有一个 "npm prefix" 窗口
 
         def fake_list():
             return list(wins)
 
         def fake_launch(cfg2):
-            wins.append("npm")  # 新 CLI 窗口标题与既有 "npm" 重复
+            wins.append("npm prefix")  # 新 CLI 窗口标题与既有 "npm prefix" 重复
             return True, "ok"
 
         def fake_console():
-            # 启动前控制台里没有 CLI（既有 "npm" 是桌面端/非控制台窗口——
+            # 启动前控制台里没有 CLI（既有 "npm prefix" 是桌面端/非控制台窗口——
             # 第 2 级不会命中它）；启动后真实 CLI（npm）进入控制台枚举。
             # 新实现第 3 级按 CLI 特征窗口名定位，不依赖"新增窗口差集"——
             # 标题重复时差集为空会漏判，按名称定位天然免疫。
-            return ["npm"] if len(wins) > 2 else []
+            return ["npm prefix"] if len(wins) > 2 else []
 
         title, detail = setup.resolve_cli_window(
             cfg, list_windows_fn=fake_list,
             console_windows_fn=fake_console,
             launch_fn=fake_launch, sleep_fn=lambda s: None)
-        self.assertEqual(title, "npm",
+        self.assertEqual(title, "npm prefix",
                          "新 CLI 标题与既有窗口重复时按 CLI 特征窗口名定位应命中")
         self.assertEqual(detail, "")
 
@@ -510,7 +510,7 @@ class TestResolveCliWindow(unittest.TestCase):
 
         def fake_launch(cfg2):
             launch_count["n"] += 1
-            wins.append("npm")
+            wins.append("npm prefix")
             return True, "ok"
 
         def fake_console():
@@ -558,7 +558,7 @@ class TestSendPrompt(unittest.TestCase):
             return True
 
         with mock.patch.object(setup, "_send_trigger_to_window", side_effect=fake_trigger):
-            ok = setup.send_prompt_to_tianshu("首轮提示词", "npm")
+            ok = setup.send_prompt_to_tianshu("首轮提示词", "npm prefix")
         self.assertTrue(ok)
         self.assertEqual(sent["enter_times"], 2, "首轮提示词必须按两次回车")
 
@@ -789,12 +789,124 @@ class TestFirstRunGuide(unittest.TestCase):
 
         with mock.patch.object(ctypes.windll, "user32", FakeUser32()), \
              mock.patch("subprocess.run", side_effect=fake_taskkill):
-            ok = setup.close_window_by_title("npm", sleep_fn=lambda s: None)
+            ok = setup.close_window_by_title("npm prefix", sleep_fn=lambda s: None)
         self.assertTrue(ok)
         self.assertEqual(posted, [(1, 0x0010)],
                          "只向标题匹配的窗口发 WM_CLOSE（等效用户点 X），不匹配的窗口不动")
         self.assertEqual(killed, [["taskkill", "/F", "/PID", "1234"]],
                          "WM_CLOSE 后兜底按匹配窗口的进程 PID 强杀（比 WINDOWTITLE 过滤可靠）")
+
+    def test_find_npm_prefix_window_skips_npm_subcommand_windows(self):
+        """RED 复现：用户手动开的 npm 子命令窗口（「npm root」等）标题含
+        "npm" 但**不是**天枢 CLI——监控必须只认「npm prefix」/rivet 特征，
+        否则 /yes 误发到无关窗口（真机日志 14:24:44 向「npm root」发送）。"""
+        self.assertIsNone(
+            setup._find_npm_prefix_window(
+                console_windows_fn=lambda: ["npm root", "微信"]),
+            "「npm root」是 npm 子命令窗口，不是天枢 CLI，不得命中")
+        self.assertEqual(
+            setup._find_npm_prefix_window(
+                console_windows_fn=lambda: ["npm prefix", "微信"]),
+            "npm prefix")
+        self.assertIsNone(
+            setup._find_npm_prefix_window(
+                console_windows_fn=lambda: ["npm docs - Mozilla Firefox"]),
+            "浏览器等含 npm 的非 CLI 窗口不得命中")
+
+    def test_run_first_run_guide_checks_window_after_confirm(self):
+        """RED 复现：自动监控 npm prefix 触发 /yes 是错误设计（用户实测）。
+        正确流程：弹窗指导 → 用户操作完点「确认完成」→ 确认后才检查 npm
+        prefix（配置完成窗口标题才变）→ 有则发 /yes → 关窗。
+        取消（即使窗口已出现）→ 不检查不发送不标记。
+        """
+        cfg = {}
+        wins = ["微信"]  # 配置中：窗口标题还不是 npm prefix
+        flow = []
+
+        def fake_detect():
+            return "rivet"
+
+        def fake_launch(c):
+            flow.append("launch")
+            return True, "ok"
+
+        def fake_console():
+            return list(wins)
+
+        def fake_dialog(title, text, buttons=None):
+            flow.append("dialog")
+            # 弹窗期间用户完成配置（窗口变 npm prefix），然后点确认
+            wins.append("npm prefix")
+            return "确认完成"
+
+        sent = []
+
+        def fake_send(t, cmd, hold=0.5, enter_times=1):
+            sent.append(cmd)
+            return True
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=fake_detect, launch_fn=fake_launch,
+            console_windows_fn=fake_console, sleep_fn=lambda s: None,
+            send_fn=fake_send, close_fn=lambda t: True,
+            dialog_fn=fake_dialog)
+        self.assertTrue(ok)
+        self.assertEqual(sent, ["/yes"], "确认完成后检测到 npm prefix 必须发送 /yes")
+        self.assertTrue(cfg.get("tianshu_guided"))
+        # 顺序：先打开 CLI → 弹窗（用户确认）→ 再 /yes
+        self.assertEqual(flow, ["launch", "dialog"])
+
+    def test_run_first_run_guide_cancel_skips_even_if_window_appeared(self):
+        """用户点「取消」（即使 CLI 窗口已出现）→ 不得发 /yes、不得标记。
+        监控自动触发版在此场景会误发（窗口出现即触发）——RED 锚点。"""
+        cfg = {}
+        wins = ["npm prefix"]  # 窗口已出现（用户配完）
+
+        def fake_launch(c):
+            return True, "ok"
+
+        def fake_console():
+            return list(wins)
+
+        def fake_dialog(title, text, buttons=None):
+            return "取消"
+
+        sent = []
+
+        def fake_send(t, cmd, hold=0.5, enter_times=1):
+            sent.append(cmd)
+            return True
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=lambda: "rivet", launch_fn=fake_launch,
+            console_windows_fn=fake_console, sleep_fn=lambda s: None,
+            send_fn=fake_send, close_fn=lambda t: True,
+            dialog_fn=fake_dialog)
+        self.assertFalse(ok)
+        self.assertEqual(sent, [], "用户取消不得发送 /yes")
+        self.assertFalse(cfg.get("tianshu_guided", False))
+
+    def test_run_first_run_guide_confirm_but_no_window_reports(self):
+        """用户点确认但未检测到 npm prefix（没配完/窗口未变）→ 提示、不标记。"""
+        shown = []
+        cfg = {}
+
+        def fake_console():
+            return ["微信"]  # 无 npm prefix
+
+        def fake_dialog(title, text, buttons=None):
+            shown.append(title)
+            return "确认完成"
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=lambda: "rivet", launch_fn=lambda c: (True, "ok"),
+            console_windows_fn=fake_console, sleep_fn=lambda s: None,
+            send_fn=lambda *a, **k: True, close_fn=lambda t: True,
+            dialog_fn=fake_dialog)
+        self.assertFalse(ok)
+        self.assertFalse(cfg.get("tianshu_guided", False))
+        self.assertIn("未检测到", " ".join(shown),
+                      "确认后未检测到 CLI 窗口必须弹提示（可重试）")
 
     def test_run_first_run_guide_marks_guided_on_confirm(self):
         import tempfile
@@ -826,9 +938,9 @@ class TestFirstRunGuide(unittest.TestCase):
 
             def fake_dialog(title, text, buttons=None):
                 flow.append(("dialog", title))
-                # 弹窗期间：用户完成配置，窗口标题变 npm prefix（自动监控接管）
+                # 弹窗期间：用户完成配置，窗口标题变 npm prefix，然后点确认
                 wins.append("npm prefix")
-                return ""
+                return "确认完成"
 
             ok = setup.run_first_run_guide(
                 cfg, cfg_path=cfg_path, detect_fn=fake_detect,
@@ -875,45 +987,6 @@ class TestFirstRunGuide(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(cfg.get("tianshu_guided", False),
                          "未监控到 npm prefix 不得标记 guided（设置页可重跑引导）")
-
-    def test_run_first_run_guide_auto_sends_yes_when_npm_prefix_appears(self):
-        """RED 复现：用户配置 Tianshu agent（选模型/输 key）期间窗口标题
-        还不是 npm prefix——旧流程弹窗等用户点「确认完成」才发 /yes，用户
-        没点/没看到就永远不发（真机实测：日志有发送记录但用户没看到效果）。
-        新流程：弹操作提示 + 监控 npm prefix 出现 → 自动发 /yes → 关窗。
-        """
-        cfg = {}
-        wins = ["微信"]  # 配置中：窗口标题还不是 npm prefix
-
-        def fake_detect():
-            return "rivet"
-
-        def fake_launch(c):
-            return True, "ok"
-
-        def fake_console():
-            return list(wins)
-
-        def fake_dialog(title, text, buttons=None):
-            # 弹窗期间：用户开始配置 → 配置完成进入会话，窗口标题变 npm prefix
-            wins.append("npm prefix")
-            return ""  # 用户没点任何按钮（自动监控接管）
-
-        sent = []
-
-        def fake_send(t, cmd, hold=0.5, enter_times=1):
-            sent.append(cmd)
-            return True
-
-        ok = setup.run_first_run_guide(
-            cfg, detect_fn=fake_detect, launch_fn=fake_launch,
-            console_windows_fn=fake_console, sleep_fn=lambda s: None,
-            send_fn=fake_send, close_fn=lambda t: True,
-            dialog_fn=fake_dialog)
-        self.assertTrue(ok)
-        self.assertEqual(sent, ["/yes"],
-                         "监控到 npm prefix 后必须自动发送 /yes（无需用户点确认）")
-        self.assertTrue(cfg.get("tianshu_guided"))
 
     def test_run_first_run_guide_cancel_without_window_does_not_mark(self):
         """弹窗期间始终未出现 npm prefix（用户取消/超时）→ 不标记 guided。"""
@@ -963,7 +1036,7 @@ class TestFirstRunGuide(unittest.TestCase):
         def fake_dialog(title, text, buttons=None):
             flow.append("dialog")
             wins.append("npm prefix")  # 弹窗期间用户配置完成
-            return ""
+            return "确认完成"
 
         ok = setup.run_first_run_guide(
             cfg, detect_fn=fake_detect, install_fn=fake_install,

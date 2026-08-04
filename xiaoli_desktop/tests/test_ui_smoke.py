@@ -124,7 +124,7 @@ class TestUiSmoke(unittest.TestCase):
             return True
 
         def fake_resolve(cfg):
-            return "npm", ""
+            return "npm prefix", ""
 
         with mock.patch.object(setup_mod, "resolve_cli_window", side_effect=fake_resolve), \
              mock.patch.object(setup_mod, "_send_trigger_to_window", side_effect=fake_trigger), \
