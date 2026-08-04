@@ -201,6 +201,15 @@ def main():
             config_store.grant_tasks_dir_to_tianshu(str(ctx.cfg.get("tasks_dir") or "").strip())
         except Exception as e:
             logger.warning(f"[首次引导] 天枢 CLI 授权失败: {e}")
+        # 首次启动一次性引导：确保 Tianshu CLI 安装 → 打开 CLI 窗口让用户
+        # 自行配置模型/API key → 确认后发 /yes（全自动持久化，重启后仍生效）
+        # → 关闭 CLI 窗口。完成后 config 标记 tianshu_guided=True，
+        # 此后初始化不再切 YOLO（用户实测 /yes 一次即永久，替代旧 yolo 机制）。
+        try:
+            from xiaoli_app import setup as _setup
+            _setup.run_first_run_guide(ctx.cfg, parent=None, cfg_path=ctx.cfg_path)
+        except Exception as e:
+            logger.warning(f"[首次引导] 天枢 CLI 引导失败: {e}")
     if not ctx.cfg.get("providers"):
         QMessageBox.warning(
             None, "小漓",
