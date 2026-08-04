@@ -508,18 +508,9 @@ class AgentBot(WeChatBot):
             _setup.ensure_bridge_readme(self.tasks_dir)
         except Exception as e:
             logger.warning(f"[AgentBot] 生成任务桥 README 失败: {e}")
-        # 已有天枢 CLI → 配置完全自动（YOLO）：任务处理无需手动回车确认，
-        # 否则无人值守时任务卡在权限确认，全自动回复链路断裂。
-        # 幂等：config.json 已配置则跳过；无 rivet 命令返回 False 不报错。
-        try:
-            from xiaoli_app import setup as _setup
-            _ok, _detail = _setup.configure_tianshu_auto_approval(cfg)
-            if _ok:
-                logger.info(f"[天枢] {_detail}")
-            else:
-                logger.info(f"[天枢] 自动模式配置跳过：{_detail}")
-        except Exception as e:
-            logger.warning(f"[AgentBot] 配置天枢自动模式异常: {e}")
+        # 全自动模式由首启一次性引导的 /yes 保证（持久化，重启后仍生效，
+        # 见 run_first_run_guide）——不再配置 config 级 YOLO（旧机制：
+        # rivet config set-approval 只影响下次启动，且 /yes 已覆盖此需求）。
         # 是否暂停消息监听由 has_active_tasks 每次实时判断，不保存粘滞状态
         self.dispatched_msg_ids = set()
         self._load_dispatched_ids()
@@ -679,15 +670,9 @@ class AgentBot(WeChatBot):
             if not title:
                 logger.warning(f"[天枢] 未定位到 CLI 窗口（{detail}），任务已投递但未唤起")
                 return True
-            # 先把 CLI 会话切到 YOLO（完全自动）：config 级 approval 只影响下次
-            # 启动，已运行的 CLI 窗口仍是 Manual——任务处理会卡在权限确认，
-            # 无人值守时无法继续。`/permission yolo confirm` 会话内即时切换，
-            # 无二次确认；再发触发指令。发送失败不阻塞投递（任务已落盘）。
-            try:
-                send_trigger_to_window(title, "/permission yolo confirm")
-                time.sleep(0.5)  # 等 CLI 完成模式切换
-            except Exception as e:
-                logger.warning(f"[天枢] 切换 YOLO 失败（{e}），任务可能需手动确认")
+            # 全自动模式由首启一次性引导的 /yes 保证（持久化，重启后仍生效，
+            # 见 run_first_run_guide）——这里不再会话内切 YOLO（旧机制：
+            # /permission yolo confirm 每次投递都要重发）。直接发触发指令。
             ok = send_trigger_to_window(title, self.tianshu_trigger_command)
             if not ok:
                 logger.error(f"[天枢] 唤起窗口失败: {title}，任务 {task_id} 保留在 {os.path.join(self.tasks_dir, task_id)}")
