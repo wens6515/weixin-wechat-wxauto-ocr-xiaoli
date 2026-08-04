@@ -311,16 +311,9 @@ class HomePage(QWidget):
             self._prompt_state = detail or "未找到天枢 CLI 窗口"
             self._prompt_running = False
             return
-        # 首轮提示词会让天枢读 tasks_dir\README.md——读文件是工具调用，
-        # 会话若仍 Manual 模式，初始化这一刻就弹确认（无人值守断链）。
-        # 必须先切 YOLO（会话内即时生效，config 级只影响下次启动）。
-        try:
-            setup._send_trigger_to_window(title, "/permission yolo confirm")
-            time.sleep(0.5)  # 等 CLI 完成模式切换
-        except Exception as e:
-            self._prompt_state = f"切换 YOLO 失败（{e}），首轮提示词可能触发确认"
-            self._prompt_running = False
-            return
+        # 全自动模式由首启一次性引导的 /yes 保证（持久化，重启后仍生效，
+        # 见 run_first_run_guide）——这里不再切 YOLO（旧机制：会话级
+        # /permission yolo confirm，每次启动都要重发）。
         ok = setup.send_prompt_to_tianshu(text, title)
         self._prompt_state = "首轮提示词已发送给天枢 ✓" if ok else "发送失败，请确认天枢窗口已打开后重试"
         if ok:
@@ -1210,8 +1203,19 @@ class SettingsPage(QWidget):
 
     def _save_tasks_dir(self):
         new_tasks = self.ed_tasks.text().strip()
+        old_tasks = str((self.ctx.cfg or {}).get("tasks_dir") or "").strip()
         old_workdir = str((self.ctx.cfg or {}).get("tianshu_workdir") or "").strip()
         self.ctx.cfg["tasks_dir"] = new_tasks
+        # 任务目录实际变更 → 清除原目录文件 + 重置一次性引导标记（新目录重走首启引导）。
+        # 用户明确要求：更改工作目录时删除原工作目录文件。防护：tasks_dir 若恰为
+        # tianshu_workdir 本身（sync 派生关系异常场景）则不删 CLI 工作根，只提示。
+        tasks_moved = bool(old_tasks) and os.path.normcase(os.path.abspath(old_tasks)) \
+            != os.path.normcase(os.path.abspath(new_tasks))
+        if tasks_moved:
+            if os.path.normcase(os.path.abspath(old_tasks)) != os.path.normcase(os.path.abspath(old_workdir or "")):
+                import shutil
+                shutil.rmtree(old_tasks, ignore_errors=True)
+            self.ctx.cfg["tianshu_guided"] = False  # 新目录需重新引导（/yes 全自动）
         # 天枢 CLI 以 tianshu_workdir 为 cwd（路径检查基于 cwd）——任务目录
         # 改到哪，工作目录就同步到它的父目录，用户选任意目录都能工作
         workdir_changed = config_store.sync_workdir_to_tasks(self.ctx.cfg)
@@ -1226,6 +1230,8 @@ class SettingsPage(QWidget):
         grant_ok, grant_changed = config_store.grant_tasks_dir_to_tianshu(new_tasks)
         msg = "任务工作目录已保存"
         new_workdir = str((self.ctx.cfg or {}).get("tianshu_workdir") or "").strip()
+        if tasks_moved:
+            msg += "\n原工作目录文件已清除，将在新目录重新引导天枢 CLI"
         if workdir_changed and old_workdir and old_workdir != new_workdir:
             msg += f"\n天枢 CLI 工作目录已同步为：{new_workdir}"
         if grant_changed:
@@ -1234,7 +1240,23 @@ class SettingsPage(QWidget):
             msg += "\n（未能自动授权天枢 CLI，任务可能需手动确认路径）"
         if workdir_changed or grant_changed:
             msg += "\n若天枢 CLI 窗口已打开，请重启它以生效"
-        QMessageBox.information(self, "已保存", msg)
+        if tasks_moved:
+            ret = QMessageBox.question(
+                self, "已保存", msg + "\n\n是否现在重新引导天枢 CLI（打开窗口 → 确认后自动开全自动）？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret == QMessageBox.StandardButton.Yes:
+                self._run_guide()
+        else:
+            QMessageBox.information(self, "已保存", msg)
+
+    def _run_guide(self):
+        """重新跑首启一次性引导（/yes 全自动）——目录变更后或用户手动触发。"""
+        try:
+            from xiaoli_app import setup as _setup
+            _setup.run_first_run_guide(self.ctx.cfg, parent=self,
+                                       cfg_path=self.ctx.cfg_path)
+        except Exception as e:
+            QMessageBox.warning(self, "引导失败", f"天枢 CLI 引导失败：{e}")
 
     def _refresh_stems(self):
         cfg = self.ctx.cfg or {}

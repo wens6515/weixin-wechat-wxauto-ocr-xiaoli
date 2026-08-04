@@ -103,12 +103,12 @@ class TestUiSmoke(unittest.TestCase):
                          "MainWindow 构造后设置页任务目录必须回填")
         win.close()
 
-    def test_prompt_flow_switches_yolo_before_first_prompt(self):
-        """RED 复现：初始化发送首轮提示词前必须先切 YOLO。
+    def test_prompt_flow_sends_first_prompt_directly(self):
+        """首轮提示词流程：全自动由首启 /yes 持久化保证（见 run_first_run_guide），
+        初始化不再切 YOLO——resolve 定位后直接发送首轮提示词。
 
-        用户指出：首轮提示词让天枢去读 tasks_dir\\README.md——读文件是工具
-        调用，若会话仍是 Manual 模式，初始化那一刻就弹确认，无人值守断链。
-        所以 YOLO 切换必须在初始化（发首轮提示词）时做，而非投递任务时。
+        历史：旧机制在发首轮提示词前先发 /permission yolo confirm（会话级，
+        每次启动都要重切）；用户实测 /yes 一次即持久化，此机制已退役。
         """
         from unittest import mock
         from xiaoli_app import setup as setup_mod
@@ -131,12 +131,8 @@ class TestUiSmoke(unittest.TestCase):
              mock.patch.object(setup_mod, "build_first_prompt", return_value="首轮提示词内容"):
             page._prompt_worker()
         cmds = [c[1] for c in calls]
-        self.assertGreaterEqual(len(cmds), 2,
-                                "初始化必须至少发送两次：YOLO 切换 + 首轮提示词")
-        self.assertEqual(cmds[0], "/permission yolo confirm",
-                         "首轮提示词之前必须先切 YOLO，否则读 README.md 时弹确认")
-        self.assertEqual(cmds[1], "首轮提示词内容",
-                         "YOLO 切换后发送首轮提示词")
+        self.assertEqual(cmds, ["首轮提示词内容"],
+                         "resolve 定位后直接发送首轮提示词（不再先切 YOLO）")
 
     def test_home_page_button_states(self):
         """状态机主按钮：初始化 → 启动 bot → 暂停运行 → 继续运行（随引擎状态切换）"""
@@ -335,6 +331,38 @@ class TestUiSmoke(unittest.TestCase):
         with mock.patch.object(page, "_run_prompt_flow") as m:
             page._run_prompt_flow(force=True)
             m.assert_called_once()
+
+    def test_save_tasks_dir_moves_clears_old_and_resets_guide(self):
+        """RED 复现：更改任务工作目录时，必须清除原目录文件并重置首启引导标记。
+
+        用户要求：更改工作目录 → 删除原工作目录文件 → 新目录完成像第一次启动
+        那样的操作（重新引导 /yes 全自动）。
+        """
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from xiaoli_app.ui.pages import SettingsPage
+        ctx = self._make_ctx()
+        old_tasks = os.path.join(self.tmp, "old_tasks")
+        new_tasks = os.path.join(self.tmp, "new_tasks")
+        os.makedirs(old_tasks, exist_ok=True)
+        with open(os.path.join(old_tasks, "task.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        ctx.cfg["tasks_dir"] = old_tasks
+        ctx.cfg["tianshu_guided"] = True
+        page = SettingsPage(ctx)
+        page.refresh()
+        page.ed_tasks.setText(new_tasks)
+        with mock.patch.object(page, "_run_guide") as m_run, \
+             mock.patch("xiaoli_app.ui.pages.QMessageBox.question",
+                        return_value=QMessageBox.StandardButton.Yes), \
+             mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}):  # 隔离 grant 授权写入
+            page._save_tasks_dir()
+        self.assertFalse(os.path.isdir(old_tasks), "原工作目录文件必须被清除")
+        self.assertFalse(ctx.cfg.get("tianshu_guided"),
+                         "目录变更后必须重置引导标记（新目录重走首启引导）")
+        self.assertTrue(os.path.isfile(os.path.join(new_tasks, "README.md")),
+                        "新目录必须自动生成任务桥 README")
+        m_run.assert_called_once()
 
 
 class TestUiFixes(unittest.TestCase):

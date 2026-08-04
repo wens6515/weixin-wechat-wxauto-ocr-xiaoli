@@ -299,12 +299,9 @@ class TestTaskDispatchWindow(unittest.TestCase):
                          "任务唤起必须发给 CLI 窗口（npm），不得激活桌面端「天枢 · Tianshu」")
 
     def test_dispatch_switches_cli_to_yolo_before_trigger(self):
-        """RED 复现：投递任务时必须先把天枢 CLI 会话切到 YOLO 再发触发指令。
-
-        用户实测：config 级 approval 已配 dangerously-skip-permissions（YOLO），
-        但任务处理仍要手动确认。根因：config set-approval 只影响下次启动的会话，
-        小漓唤起的是已运行的 CLI 窗口（仍 Manual），必须会话内 `/permission
-        yolo confirm` 即时切换，否则任务卡在权限确认。
+        """投递任务时唤起天枢 CLI：全自动由首启 /yes 持久化保证（见
+        run_first_run_guide），投递路径不再会话内切 YOLO，直接发触发指令。
+        回归锚点：resolve 定位 npm 窗口的链路必须保持可用。
         """
         import xiaoli_bot as xb
         bot = self._make_bot()
@@ -335,8 +332,8 @@ class TestTaskDispatchWindow(unittest.TestCase):
              mock.patch.object(bot, "_send_text", return_value=None), \
              mock.patch.object(xb, "dispatch_task", return_value="T1"):
             bot._dispatch_and_notify("测试群", "老王", "做一个贪吃蛇")
-        self.assertEqual(cmds, ["/permission yolo confirm", "开始处理"],
-                         "必须先发 YOLO 切换指令再发触发指令，否则任务卡在确认")
+        self.assertEqual(cmds, ["开始处理"],
+                         "全自动由首启 /yes 持久化保证（见 run_first_run_guide），投递时不再切 YOLO，直接发触发指令")
 
 
 if __name__ == "__main__":
