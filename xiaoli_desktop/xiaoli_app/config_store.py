@@ -176,11 +176,11 @@ CARD_TEMPLATE = {
         "回复要简短，不要虚构不知道的事情；如果发消息的人你不认识，那就是你的新朋友，友好地回应对方。"
     ),
     "nickname": "小漓",
-    "chat_provider": "default",
+    "chat_provider": "deepseek",
     "chat_model": "",
-    "vision_provider": "default",
+    "vision_provider": "deepseek",
     "vision_model": "",
-    "classify_provider": "default",
+    "classify_provider": "deepseek",
     "classify_model": "",
     "temperature": 0.7,
     "top_p": 0.9,
@@ -232,12 +232,12 @@ def migrate_config(cfg, cards_dir):
     if out.get("providers"):
         return out  # 已是新结构
 
-    # 用旧端点建默认 provider；无旧配置时预置 DeepSeek（id=default 与默认卡引用对齐，空 key）
+    # 用旧端点建默认 provider；无旧配置时预置 DeepSeek（id=deepseek 与默认卡引用对齐，空 key）
     url = str(out.get("ai_api_url", "")).strip()
     if url:
         providers = [{
-            "id": "default",
-            "name": "默认",
+            "id": "deepseek",
+            "name": "DeepSeek 深度求索",
             "base_url": url,
             "api_key": str(out.get("ai_api_key", "")),
             "models": sorted({m for m in (
@@ -245,8 +245,7 @@ def migrate_config(cfg, cards_dir):
             ) if m}),
         }]
     else:
-        p = dict(PRESET_PROVIDERS[0])
-        p["id"] = "default"
+        p = dict(PRESET_PROVIDERS[0])  # 已是 id=deepseek（历史缺陷：覆盖成 default 导致手动配置 providers 后引用失效）
         p["api_key"] = ""
         providers = [p]
     out["providers"] = providers
@@ -277,19 +276,33 @@ def _provider(cfg, provider_id):
     return None
 
 
+def _fallback_provider(cfg):
+    """找不到卡引用 provider 时回退第一个可用 provider（旧卡引用 default 等
+    已废弃 id 时兜底——否则投影出空 base_url → API 请求 Invalid URL ''）。"""
+    for p in cfg.get("providers") or []:
+        return p
+    return None
+
+
 def project_config(cfg, card):
     """根据 providers + 活跃卡重建旧字段投影。返回新 cfg（原 cfg 不变）。
 
     规则：
     - 聊天/分类沿用 chat provider 端点（模型名可不同）
     - 视觉可跨 provider（生成 vision_api_url / vision_api_key）
-    - 未知 provider → 对应 url/key 置空，不崩溃（UI 配置缺失时引擎仍可启动）
+    - 未知 provider → 回退第一个可用 provider（不置空 URL）；全部缺失才置空
     """
     out = dict(cfg)
     card = card or {}
 
-    chat_p = _provider(out, card.get("chat_provider") or "default") or {}
-    vision_p = _provider(out, card.get("vision_provider") or card.get("chat_provider") or "default") or {}
+    chat_p = _provider(out, card.get("chat_provider") or "deepseek")
+    if chat_p is None:
+        chat_p = _fallback_provider(out)
+    vision_p = _provider(out, card.get("vision_provider") or card.get("chat_provider") or "deepseek")
+    if vision_p is None:
+        vision_p = chat_p or _fallback_provider(out)
+    chat_p = chat_p or {}
+    vision_p = vision_p or {}
 
     chat_url = str(chat_p.get("base_url", ""))
     chat_key = str(chat_p.get("api_key", ""))

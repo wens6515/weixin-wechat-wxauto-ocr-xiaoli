@@ -63,7 +63,7 @@ class TestMigrate(unittest.TestCase):
         # provider 从旧端点生成
         self.assertEqual(len(out["providers"]), 1)
         p = out["providers"][0]
-        self.assertEqual(p["id"], "default")
+        self.assertEqual(p["id"], "deepseek", "默认 provider id 应为 deepseek（非 default）")
         self.assertEqual(p["base_url"], cfg["ai_api_url"])
         self.assertEqual(p["api_key"], cfg["ai_api_key"])
         # 活跃卡指向默认卡
@@ -155,6 +155,20 @@ class TestProject(unittest.TestCase):
         # 非模型字段保留
         self.assertEqual(out["tasks_dir"], r"D:\工作间\wxauto")
 
+    def test_project_falls_back_when_card_provider_missing(self):
+        """RED 复现：默认卡 provider 引用 'default'，但用户手动配置的 providers
+        里没有该 id（只有 deepseek/zhipu）→ 投影出空 base_url → API 请求
+        Invalid URL ''（真机日志 13:45:09 故障链）。修复后必须回退到可用
+        provider（取第一个），不得置空。"""
+        cfg = {"providers": self._providers(), "active_card_id": "xiaoli"}
+        # 旧卡/迁移卡残留的 default 引用（用户手动加 provider 后 default 不存在）
+        card = self._card(chat_provider="default", vision_provider="default",
+                          classify_provider="default")
+        out = config_store.project_config(cfg, card)
+        self.assertTrue(str(out["ai_api_url"]).startswith("https://"),
+                        "卡引用的 provider 不存在时必须回退可用 provider，不得置空 URL")
+        self.assertTrue(str(out["ai_api_key"]), "回退后必须有可用的 api_key")
+
     def test_project_vision_cross_provider(self):
         card = self._card(vision_provider="zhipu", vision_model="glm-4v-plus")
         cfg = {"providers": self._providers(), "active_card_id": "xiaoli"}
@@ -169,9 +183,10 @@ class TestProject(unittest.TestCase):
         card = self._card(chat_provider="nope", vision_provider="nope")
         cfg = {"providers": self._providers(), "active_card_id": "xiaoli"}
         out = config_store.project_config(cfg, card)
-        # 未知 provider：ai_api_url 置空，不崩溃
-        self.assertEqual(out["ai_api_url"], "")
-        self.assertEqual(out["ai_api_key"], "")
+        # 未知 provider：回退第一个可用 provider（不置空 URL——否则 API 请求
+        # Invalid URL ''，真机日志 13:45:09 故障链），全部缺失才置空
+        self.assertEqual(out["ai_api_url"], "https://api.deepseek.com/v1/chat/completions")
+        self.assertEqual(out["ai_api_key"], "sk-ds-1")
 
     def test_project_classify_uses_chat_endpoint(self):
         card = self._card(classify_model="deepseek-reasoner")
@@ -358,10 +373,11 @@ class TestImageClickOffsetDefault(unittest.TestCase):
 
 
 class TestMigrateDefaultProvider(unittest.TestCase):
-    """空 config 迁移：默认 provider 为 id=default 的 DeepSeek（空 key）。
+    """空 config 迁移：默认 provider 为 id=deepseek 的 DeepSeek（空 key）。
 
-    根因：provider id 与默认卡引用 "default" 不对齐 → 投影 url/key 全空 →
-    视觉调用 Invalid URL（真机日志 17:34:09 故障链）。
+    用户要求：模型 id 写 deepseek，不要写 default。历史缺陷链：迁移 provider
+    id 写成 default → 用户手动配置 providers（deepseek/zhipu）后 default 不存在
+    → 投影 url/key 全空 → Invalid URL（真机日志 13:45:09 故障链）。
     """
 
     def test_empty_config_gets_deepseek_default(self):
@@ -374,7 +390,7 @@ class TestMigrateDefaultProvider(unittest.TestCase):
             provs = cfg.get("providers") or []
             self.assertTrue(provs, "空 config 迁移后应有默认 provider")
             p = provs[0]
-            self.assertEqual(p["id"], "default", "默认 provider id 须与默认卡引用对齐")
+            self.assertEqual(p["id"], "deepseek", "默认 provider id 应为 deepseek（非 default）")
             self.assertTrue(p["base_url"].startswith("https://"), p["base_url"])
             self.assertFalse(p.get("api_key"), "key 必须为空")
             self.assertTrue(cfg.get("ai_api_url", "").startswith("https://"),

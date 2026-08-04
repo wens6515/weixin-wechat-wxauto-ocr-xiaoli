@@ -191,8 +191,10 @@ class TestApplyRole(unittest.TestCase):
         bot = self._make_bot()
         card = make_card(chat_provider="nope", vision_provider="nope")
         bot.apply_role(card, self._providers())
-        self.assertEqual(bot.api_url, "")
-        self.assertEqual(bot.vision_api_url, "")
+        # 未知 provider：回退第一个可用 provider（不置空 URL——否则 API 请求
+        # Invalid URL ''，真机日志 13:45:09 故障链）
+        self.assertEqual(bot.api_url, "https://api.deepseek.com/v1/chat/completions")
+        self.assertEqual(bot.vision_api_url, "https://api.deepseek.com/v1/chat/completions")
 
     def test_apply_role_strips_provider_prefix(self):
         """RED 复现：模型名带厂商前缀（deepseek:deepseek-v4-flash）直接进

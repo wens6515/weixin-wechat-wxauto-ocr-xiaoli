@@ -1244,11 +1244,21 @@ class SettingsPage(QWidget):
         if workdir_changed or grant_changed:
             msg += "\n若天枢 CLI 窗口已打开，请重启它以生效"
         if tasks_moved:
+            # 明确提醒：工作目录已更改，天枢 CLI 必须在新目录重新引导（/yes 全自动）
+            # 才能正常处理任务——否则 CLI 仍以旧目录为 cwd，任务桥断链。
             ret = QMessageBox.question(
-                self, "已保存", msg + "\n\n是否现在重新引导天枢 CLI（打开窗口 → 确认后自动开全自动）？",
+                self, "已保存",
+                msg + "\n\n⚠ 工作目录已更改：天枢 CLI 需要在新的工作目录重新引导"
+                      "（打开窗口 → 确认配置后自动发送 /yes 开启全自动），"
+                      "否则任务处理会失效。\n\n是否现在重新引导？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if ret == QMessageBox.StandardButton.Yes:
                 self._run_guide()
+            else:
+                QMessageBox.information(
+                    self, "提示",
+                    "稍后可在设置页点击「重新引导天枢 CLI」完成引导。\n"
+                    "在完成引导前，请勿向微信发送任务。")
         else:
             QMessageBox.information(self, "已保存", msg)
 

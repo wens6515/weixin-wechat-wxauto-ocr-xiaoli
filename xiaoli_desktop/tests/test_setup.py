@@ -747,16 +747,18 @@ class TestFirstRunGuide(unittest.TestCase):
             "npm prefix", sleep_fn=lambda s: None,
             send_fn=fake_send, close_fn=fake_close)
         self.assertTrue(ok)
-        self.assertEqual(calls, [("send", "npm prefix", "/yes", 1), ("close", "npm prefix")],
-                         "必须先发 /yes 再关闭窗口（/yes 持久化全自动，重启后仍生效）")
+        self.assertEqual(calls, [("send", "npm prefix", "/yes", 2), ("close", "npm prefix")],
+                         "必须先发 /yes 再关闭窗口；天枢 agent 首轮对话需两次回车（enter_times=2）")
 
     def test_close_window_by_title_posts_wm_close_to_matching(self):
         from unittest import mock
         import ctypes
         posted = []
+        killed = []
 
         class FakeUser32:
             _titles = {1: "npm prefix", 2: "微信"}
+            _pids = {1: 1234, 2: 5678}
 
             def GetWindowTextW(self, hwnd, buf, n):
                 t = self._titles.get(hwnd, "")
@@ -772,12 +774,27 @@ class TestFirstRunGuide(unittest.TestCase):
                 posted.append((hwnd, msg))
                 return True
 
+            def GetWindowThreadProcessId(self, hwnd, pid_out):
+                # pid_out 是 ctypes.byref 包装——cast 成 DWORD 指针写值
+                try:
+                    ptr = ctypes.cast(pid_out, ctypes.POINTER(ctypes.wintypes.DWORD))
+                    ptr.contents.value = self._pids.get(hwnd, 0)
+                except Exception:
+                    pass
+                return 0
+
+        def fake_taskkill(args, **kw):
+            killed.append(args)
+            return mock.Mock(returncode=0)
+
         with mock.patch.object(ctypes.windll, "user32", FakeUser32()), \
-             mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)):
+             mock.patch("subprocess.run", side_effect=fake_taskkill):
             ok = setup.close_window_by_title("npm", sleep_fn=lambda s: None)
         self.assertTrue(ok)
         self.assertEqual(posted, [(1, 0x0010)],
                          "只向标题匹配的窗口发 WM_CLOSE（等效用户点 X），不匹配的窗口不动")
+        self.assertEqual(killed, [["taskkill", "/F", "/PID", "1234"]],
+                         "WM_CLOSE 后兜底按匹配窗口的进程 PID 强杀（比 WINDOWTITLE 过滤可靠）")
 
     def test_run_first_run_guide_marks_guided_on_confirm(self):
         import tempfile

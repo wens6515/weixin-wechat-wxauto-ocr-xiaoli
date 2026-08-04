@@ -514,11 +514,12 @@ def open_first_prompt(path):
 # set-approval 机制。首启引导一次性完成，此后初始化不再切 YOLO。
 
 def close_window_by_title(title, sleep_fn=None):
-    """按标题子串定位顶层窗口 → WM_CLOSE 优雅关闭；1s 后仍在则 taskkill 强杀兜底。
+    """按标题子串定位顶层窗口 → WM_CLOSE 优雅关闭；1s 后仍在则 taskkill /PID 强杀兜底。
 
     cmd /k 运行批处理时点 X 可能弹「Terminate batch job (Y/N)?」不退出——
-    WM_CLOSE 后窗口仍在时用 taskkill /F /FI WINDOWTITLE 兜底（引导场景
-    CLI 无未完成任务，强杀不丢数据）。返回是否定位到并尝试关闭。
+    WM_CLOSE 后窗口仍在时按窗口进程 PID 强杀兜底（引导场景 CLI 无未完成
+    任务，强杀不丢数据）。PID 方式比 taskkill WINDOWTITLE 过滤可靠（中文/
+    特殊字符标题不受影响）。返回是否定位到并尝试关闭。
     """
     sleep_fn = sleep_fn or time.sleep
     try:
@@ -552,27 +553,37 @@ def close_window_by_title(title, sleep_fn=None):
         except Exception:
             pass
     sleep_fn(1.0)
-    # 窗口可能仍存在（cmd 批处理确认框）→ taskkill /F 按窗口标题强杀兜底
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/FI", f"WINDOWTITLE eq {title}"],
-            capture_output=True, timeout=10)
-    except Exception:
-        pass
+    # 窗口可能仍存在（cmd 批处理确认框）→ 按窗口进程 PID 强杀兜底
+    pids = set()
+    for hwnd in found:
+        try:
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value:
+                pids.add(pid.value)
+        except Exception:
+            pass
+    for pid in pids:
+        try:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
     return True
 
 
 def send_yes_and_close(title, sleep_fn=None, send_fn=None, close_fn=None):
     """向 CLI 窗口发送 /yes（全自动持久化，重启后仍生效），等待后关闭窗口。
 
-    返回 bool。/yes 与 yolo 同发送机制（激活→剪贴板→回车 1 次）。
+    返回 bool。天枢 agent 首轮对话需按两次回车才提交（与首轮提示词同）——
+    enter_times=2；若目标窗口已进入会话（非首轮）二次回车也不影响。
     """
     sleep_fn = sleep_fn or time.sleep
     send_fn = send_fn or _send_trigger_to_window
     close_fn = close_fn or close_window_by_title
     if not title:
         return False
-    ok = send_fn(title, "/yes")
+    ok = send_fn(title, "/yes", enter_times=2)
     sleep_fn(1.0)  # 等 CLI 完成模式切换
     close_fn(title)
     return ok
