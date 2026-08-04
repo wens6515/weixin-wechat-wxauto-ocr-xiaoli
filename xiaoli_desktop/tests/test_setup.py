@@ -804,13 +804,17 @@ class TestFirstRunGuide(unittest.TestCase):
         try:
             cfg = {"tasks_dir": r"D:\tasks"}
             flow = []
+            wins = ["微信"]
 
             def fake_detect():
                 return r"C:\Users\me\AppData\Roaming\npm\rivet"
 
-            def fake_resolve(c):
-                flow.append(("resolve", c))
-                return "npm prefix", ""
+            def fake_launch(c):
+                flow.append(("launch", c))
+                return True, "ok"
+
+            def fake_console():
+                return list(wins)
 
             def fake_send(title, command, hold=0.5, enter_times=1):
                 flow.append(("send", command))
@@ -822,21 +826,23 @@ class TestFirstRunGuide(unittest.TestCase):
 
             def fake_dialog(title, text, buttons=None):
                 flow.append(("dialog", title))
-                return "确认完成"
+                # 弹窗期间：用户完成配置，窗口标题变 npm prefix（自动监控接管）
+                wins.append("npm prefix")
+                return ""
 
             ok = setup.run_first_run_guide(
                 cfg, cfg_path=cfg_path, detect_fn=fake_detect,
-                resolve_fn=fake_resolve, send_fn=fake_send,
-                close_fn=fake_close, sleep_fn=lambda s: None,
-                dialog_fn=fake_dialog)
+                launch_fn=fake_launch, console_windows_fn=fake_console,
+                send_fn=fake_send, close_fn=fake_close,
+                sleep_fn=lambda s: None, dialog_fn=fake_dialog)
             self.assertTrue(ok)
             self.assertTrue(cfg.get("tianshu_guided"),
-                            "确认完成后必须标记 tianshu_guided（此后初始化不再切 YOLO）")
-            self.assertIn(("send", "/yes"), flow, "确认后必须发送 /yes")
+                            "引导完成后必须标记 tianshu_guided（此后初始化不再切 YOLO）")
+            self.assertIn(("send", "/yes"), flow, "监控到 npm prefix 后必须发送 /yes")
             self.assertIn(("close",), flow, "发送 /yes 后必须关闭 CLI 窗口")
-            # 顺序：先定位窗口，再弹窗，再 /yes，再关闭
-            self.assertEqual(flow[0], ("resolve", cfg))
-            self.assertEqual(flow[1], ("dialog", "天枢 CLI 首次配置引导"))
+            # 顺序：先打开 CLI，再弹窗，再 /yes，再关闭
+            self.assertEqual(flow[0], ("launch", cfg))
+            self.assertEqual(flow[1], ("dialog", "天枢 CLI 配置引导"))
             self.assertEqual(flow[-2], ("send", "/yes"))
             self.assertEqual(flow[-1], ("close",))
             # 标记已落盘
@@ -849,22 +855,96 @@ class TestFirstRunGuide(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_run_first_run_guide_later_does_not_mark(self):
+        # 「稍后再说」已改为自动监控：弹窗期间始终未出现 npm prefix（取消/超时）
         cfg = {}
+        wins = ["微信"]
+
+        def fake_launch(c):
+            return True, "ok"
+
+        def fake_console():
+            return list(wins)
 
         def fake_dialog(title, text, buttons=None):
-            return "稍后再说"
+            return ""  # 用户取消，窗口从未出现
 
         ok = setup.run_first_run_guide(
-            cfg, detect_fn=lambda: "rivet",
-            resolve_fn=lambda c: ("npm prefix", ""),
+            cfg, detect_fn=lambda: "rivet", launch_fn=fake_launch,
+            console_windows_fn=fake_console,
             sleep_fn=lambda s: None, dialog_fn=fake_dialog)
         self.assertFalse(ok)
         self.assertFalse(cfg.get("tianshu_guided", False),
-                         "「稍后再说」不得标记 guided（设置页可重跑引导）")
+                         "未监控到 npm prefix 不得标记 guided（设置页可重跑引导）")
+
+    def test_run_first_run_guide_auto_sends_yes_when_npm_prefix_appears(self):
+        """RED 复现：用户配置 Tianshu agent（选模型/输 key）期间窗口标题
+        还不是 npm prefix——旧流程弹窗等用户点「确认完成」才发 /yes，用户
+        没点/没看到就永远不发（真机实测：日志有发送记录但用户没看到效果）。
+        新流程：弹操作提示 + 监控 npm prefix 出现 → 自动发 /yes → 关窗。
+        """
+        cfg = {}
+        wins = ["微信"]  # 配置中：窗口标题还不是 npm prefix
+
+        def fake_detect():
+            return "rivet"
+
+        def fake_launch(c):
+            return True, "ok"
+
+        def fake_console():
+            return list(wins)
+
+        def fake_dialog(title, text, buttons=None):
+            # 弹窗期间：用户开始配置 → 配置完成进入会话，窗口标题变 npm prefix
+            wins.append("npm prefix")
+            return ""  # 用户没点任何按钮（自动监控接管）
+
+        sent = []
+
+        def fake_send(t, cmd, hold=0.5, enter_times=1):
+            sent.append(cmd)
+            return True
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=fake_detect, launch_fn=fake_launch,
+            console_windows_fn=fake_console, sleep_fn=lambda s: None,
+            send_fn=fake_send, close_fn=lambda t: True,
+            dialog_fn=fake_dialog)
+        self.assertTrue(ok)
+        self.assertEqual(sent, ["/yes"],
+                         "监控到 npm prefix 后必须自动发送 /yes（无需用户点确认）")
+        self.assertTrue(cfg.get("tianshu_guided"))
+
+    def test_run_first_run_guide_cancel_without_window_does_not_mark(self):
+        """弹窗期间始终未出现 npm prefix（用户取消/超时）→ 不标记 guided。"""
+        cfg = {}
+        wins = ["微信"]
+
+        def fake_detect():
+            return "rivet"
+
+        def fake_launch(c):
+            return True, "ok"
+
+        def fake_console():
+            return list(wins)
+
+        def fake_dialog(title, text, buttons=None):
+            return ""  # 用户点了取消，窗口从未出现
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=fake_detect, launch_fn=fake_launch,
+            console_windows_fn=fake_console, sleep_fn=lambda s: None,
+            send_fn=lambda *a, **k: True, close_fn=lambda t: True,
+            dialog_fn=fake_dialog)
+        self.assertFalse(ok)
+        self.assertFalse(cfg.get("tianshu_guided", False),
+                         "未监控到 npm prefix 不得标记 guided")
 
     def test_run_first_run_guide_installs_cli_when_missing(self):
         cfg = {}
         flow = []
+        wins = ["微信"]
 
         def fake_detect():
             return ""  # 未安装 rivet
@@ -873,17 +953,22 @@ class TestFirstRunGuide(unittest.TestCase):
             flow.append("install")
             return True
 
-        def fake_resolve(c):
-            flow.append("resolve")
-            return "npm prefix", ""
+        def fake_launch(c):
+            flow.append("launch")
+            return True, "ok"
+
+        def fake_console():
+            return list(wins)
 
         def fake_dialog(title, text, buttons=None):
             flow.append("dialog")
-            return "确认完成"
+            wins.append("npm prefix")  # 弹窗期间用户配置完成
+            return ""
 
         ok = setup.run_first_run_guide(
             cfg, detect_fn=fake_detect, install_fn=fake_install,
-            resolve_fn=fake_resolve, send_fn=lambda *a, **k: True,
+            launch_fn=fake_launch, console_windows_fn=fake_console,
+            send_fn=lambda *a, **k: True,
             close_fn=lambda *a, **k: True,
             sleep_fn=lambda s: None, dialog_fn=fake_dialog)
         self.assertTrue(ok)
