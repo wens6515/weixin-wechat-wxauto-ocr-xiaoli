@@ -66,9 +66,12 @@ def _list_windows():
 
 
 def _console_windows():
-    """枚举控制台/终端类顶层窗口标题（Win32：ConsoleWindowClass / CASCADIA / mintty / WindowClass_）。
+    """枚举控制台/终端类顶层窗口，返回 [(标题, PID)] 列表。
 
-    返回标题列表；Win32 不可用（非 Windows / 枚举失败）时返回 None，调用方据此回退全量匹配。
+    Win32：ConsoleWindowClass / CASCADIA / mintty / WindowClass_。PID 用于
+    进程树验证（终端宿主把 CLI 标题改写为「Windows PowerShell」时，靠
+    PID 查进程命令行是否含 rivet 来确认是 CLI 而非用户自己的 PowerShell）。
+    枚举失败（非 Windows）返回 None，调用方据此回退全量匹配。
     天枢 CLI 是 cmd /k rivet 启动的控制台窗口——按窗口类名区分后，浏览器/编辑器等
     标题含 "npm" 的诱饵窗口（非控制台类）天然被排除，杜绝 resolve_cli_window 的 fail-open 误发。
     """
@@ -90,16 +93,72 @@ def _console_windows():
                     user32.GetClassNameW(hwnd, cls, 256)
                     cn = (cls.value or "").lower()
                     if any(k in cn for k in ("console", "cascadia", "mintty", "windowclass")):
-                        titles.append(buf.value.strip())
+                        pid = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        titles.append((buf.value.strip(), int(pid.value)))
             except Exception:
                 pass
             return True
 
         enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_cb)
         user32.EnumWindows(enum_proc, 0)
-        return [t for t in titles if t]
+        return [t for t in titles if t[0]]
     except Exception:
         return None
+
+
+def _process_has_rivet(pid):
+    """进程树验证：PID 对应的进程命令行（含子进程）是否出现 rivet。
+
+    终端宿主（Windows Terminal）把 CLI 窗口标题改写为「Windows PowerShell」
+    时，标题特征失效——但 CLI 是 cmd /k ... rivet 启动的，进程树里必有
+    rivet；用户自己开的 PowerShell 则没有。失败（wmic 不可用等）返回 False
+    = 不认作 CLI（宁缺毋滥，防 fail-open 误发）。"""
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["wmic", "process", "where", f"ProcessId={pid}",
+             "get", "CommandLine", "/format:list"],
+            capture_output=True, text=True, timeout=5)
+        return "rivet" in (out.stdout or "").lower()
+    except Exception:
+        return False
+
+
+def _is_cli_feature(name, pid=None, process_has_rivet_fn=None):
+    """CLI 窗口特征识别：标题特征 + 弱特征进程验证。
+
+    强特征：「npm prefix」精确短语（CLI 实测标题）或 rivet——裸 "npm" 会
+    误判用户手动开的 npm 子命令窗口（npm root 等），/yes 打错窗口。
+    弱特征：终端宿主默认标题（Windows PowerShell / Command Prompt / 命令
+    提示符——Win11 默认终端接管 CLI 窗口时标题被改写）——必须进程树含
+    rivet 才认（用户自己开的 PowerShell 窗口标题相同但进程无 rivet）。"""
+    low = name.lower()
+    if "npm prefix" in low or "rivet" in low:
+        return True
+    weak = ("windows powershell" in low or "command prompt" in low
+            or "命令提示符" in name or "powershell" in low)
+    if weak and pid is not None:
+        fn = process_has_rivet_fn or _process_has_rivet
+        try:
+            return bool(fn(pid))
+        except Exception:
+            return False
+    return False
+
+
+def _norm_console_entries(entries):
+    """归一化控制台窗口枚举结果：兼容 [(title, pid)] 与纯 [title] 两种形态。
+
+    _console_windows 现返回 (title, pid) 元组；测试与旧调用方可能注入纯
+    字符串列表——统一成 [(title, pid or None)]，pid 缺失时弱特征不启用。"""
+    out = []
+    for e in entries or []:
+        if isinstance(e, (tuple, list)) and len(e) >= 2:
+            out.append((str(e[0]), e[1]))
+        else:
+            out.append((str(e), None))
+    return out
 
 
 def check_environment(cfg):
@@ -405,16 +464,19 @@ _last_launch_mono = None
 
 
 def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
-                       console_windows_fn=None):
+                       console_windows_fn=None, process_has_rivet_fn=None):
     """定位天枢 CLI 窗口标题，返回 (title, detail)。
 
     title 非空 = 找到可发送的 CLI 窗口；空 = detail 含失败原因（launch 失败/窗口未出现）。
+    process_has_rivet_fn(pid)：弱特征标题（终端宿主改写的 Windows
+    PowerShell 等）的进程树验证，默认 _process_has_rivet。
     三级定位，逐级降级：
     1. 配置的 tianshu_window_title（排除桌面端污染值——标题含 tianshu/天枢 的窗口是桌面端）；
        优先在控制台窗口里匹配，控制台枚举不可用时回退全量（用户显式配置是强信号）；
        命中时返回匹配到的实际窗口标题（而非配置子串，避免 find_window_by_title 子串误选）；
     2. CLI 特征控制台窗口（标题含 npm/rivet 且非桌面端——CLI 窗口标题实测为 npm prefix，
        是 cmd/rivet 启动的控制台窗口；Tianshu/天枢 是桌面端特征，不在此列）；
+       弱特征（Windows PowerShell 等终端默认名）须进程树含 rivet 才认；
        只在控制台窗口里匹配——标题含 npm 的浏览器/编辑器等诱饵窗口不是控制台类，
        绝不可选（fail-open 反例）；仅当控制台枚举不可用（None）才回退全量；
     3. 启动 CLI（rivet）后按 CLI 特征窗口名（npm prefix）轮询定位
@@ -433,21 +495,15 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
         纯英文标题（Tianshu）漏判会被第 2 级 CLI 特征误选，首轮提示词发错目标。"""
         return "天枢" in name or "tianshu" in name.lower()
 
-    def _is_cli_feature(name):
-        low = name.lower()
-        # 「npm prefix」精确短语（CLI 实测标题）或 rivet；裸 "npm" 会误判
-        # 用户手动开的 npm 子命令窗口（npm root 等），/yes 打错窗口
-        return "npm prefix" in low or "rivet" in low
-
     def _cli_candidates():
-        """CLI 窗口候选：控制台类窗口标题；控制台枚举不可用（None）时回退全量。
+        """CLI 窗口候选：(title, pid) 列表；控制台枚举不可用（None）时回退全量。
 
         返回 None（枚举不可用）以外的任何值均视为"枚举正常"——空列表表示系统里
         没有控制台窗口，此时不得从全量里挑诱饵（宁缺毋滥，走下一级启动 CLI）。"""
         cons = console_windows_fn()
         if cons is None:
-            return list_windows_fn()
-        return cons
+            return _norm_console_entries(list_windows_fn())
+        return _norm_console_entries(cons)
 
     # 1) 用户手动配置的窗口标题（污染值「天枢 · Tianshu」= 桌面端，忽略）。
     #    优先在控制台窗口里匹配（CLI 是 cmd/rivet 控制台，浏览器等诱饵窗口天然排除）；
@@ -455,7 +511,7 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
     t = (cfg.get("tianshu_window_title") or "").strip()
     if t and not _is_desktop(t):
         try:
-            for name in _cli_candidates():
+            for name, _pid in _cli_candidates():
                 if t.lower() in name.lower() and not _is_desktop(name):
                     return name, ""
         except Exception:
@@ -464,11 +520,12 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
     # 2) CLI 特征窗口（npm/rivet——CLI 窗口标题实测为 npm prefix；Tianshu 是桌面端特征）。
     #    只在控制台窗口里匹配：标题含 npm 的浏览器/编辑器等诱饵窗口不是控制台类，
     #    绝不可选（fail-open 反例 C1）；仅当控制台枚举不可用（None）才回退全量。
+    #    弱特征标题（Windows PowerShell 等）须进程树含 rivet（_is_cli_feature 内处理）。
     try:
-        for name in _cli_candidates():
+        for name, pid in _cli_candidates():
             if _is_desktop(name):
                 continue
-            if _is_cli_feature(name):
+            if _is_cli_feature(name, pid, process_has_rivet_fn):
                 return name, ""
     except Exception:
         pass
@@ -496,10 +553,10 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
             # 无 CLI 特征窗口才会走到这里，启动后出现的 CLI 特征窗口就是刚
             # 启动的 CLI。桌面端（天枢/Tianshu）绝不可选，否则首轮提示词
             # 误发到桌面端窗口（commit c67b995/d0b4ca6 的场景）。
-            for name in _cli_candidates():
+            for name, pid in _cli_candidates():
                 if _is_desktop(name):
                     continue
-                if _is_cli_feature(name):
+                if _is_cli_feature(name, pid, process_has_rivet_fn):
                     return name, ""
             # 全是桌面端/无关窗口 → 不返回，继续轮询（宁缺毋滥，不得误发）
         except Exception:
@@ -654,7 +711,7 @@ def _guide_dialog(parent, dialog_fn, title, text, buttons=None):
     return clicked.text() if clicked is not None else ""
 
 
-def _find_npm_prefix_window(console_windows_fn=None):
+def _find_npm_prefix_window(console_windows_fn=None, process_has_rivet_fn=None):
     """在控制台窗口里找天枢 CLI 窗口（进入会话后标题为「npm prefix」）。
 
     用户实测：CLI 启动后配置模型/API key 阶段窗口标题还不是 npm prefix——
@@ -663,12 +720,15 @@ def _find_npm_prefix_window(console_windows_fn=None):
     匹配用「npm prefix」精确短语而非裸 "npm"——用户手动开的 npm 子命令
     窗口（如「npm root」）标题含 npm 但不是 CLI，误发 /yes 会打错窗口
     （真机日志 14:24:44 向「npm root」发送 /yes 的故障链）。返回标题或 None。
+    弱特征：终端宿主（Windows Terminal）把标题改写为「Windows PowerShell」
+    时，按进程树含 rivet 认（用户实测 CLI 窗口名可能是 npm prefix 也可能是
+    Windows PowerShell——_is_cli_feature 统一处理，防误发用户自己的 PowerShell）。
     """
     try:
-        for name in (console_windows_fn or _console_windows)():
-            low = name.lower()
-            if ("npm prefix" in low or "rivet" in low) \
-                    and not ("tianshu" in low or "天枢" in name):
+        for name, pid in _norm_console_entries(
+                (console_windows_fn or _console_windows)()):
+            if _is_cli_feature(name, pid, process_has_rivet_fn) \
+                    and not ("tianshu" in name.lower() or "天枢" in name):
                 return name
     except Exception:
         pass
