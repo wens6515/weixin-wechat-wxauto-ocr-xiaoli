@@ -770,6 +770,20 @@ class TestFirstRunGuide(unittest.TestCase):
         self.assertEqual(calls, [("send", "npm prefix", "/yes", 2), ("close", "npm prefix")],
                          "必须先发 /yes 再关闭窗口；天枢 agent 首轮对话需两次回车（enter_times=2）")
 
+    def test_close_window_by_title_sets_64bit_argtypes(self):
+        """RED 复现：user32 调用未声明 argtypes 时，64 位 HWND 按 c_int
+        传参截断 → PostMessageW/taskkill 全部无效 → /yes 发完 CLI 窗口
+        一直不关（真机实测）。修复后必须显式声明 64 位句柄签名。"""
+        setup.close_window_by_title("__no_such_window__", sleep_fn=lambda s: None)
+        import ctypes
+        from ctypes import wintypes
+        pt = ctypes.windll.user32.PostMessageW.argtypes
+        self.assertIsNotNone(pt, "PostMessageW 必须声明 argtypes（64 位句柄防截断）")
+        self.assertEqual(pt[0], wintypes.HWND, "hwnd 参数必须是 64 位 HWND")
+        gt = ctypes.windll.user32.GetWindowThreadProcessId.argtypes
+        self.assertIsNotNone(gt, "GetWindowThreadProcessId 必须声明 argtypes")
+        self.assertEqual(gt[0], wintypes.HWND)
+
     def test_close_window_by_title_posts_wm_close_to_matching(self):
         from unittest import mock
         import ctypes
