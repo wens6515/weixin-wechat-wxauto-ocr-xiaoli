@@ -124,7 +124,12 @@ def _process_has_rivet(pid):
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | "
              "ForEach-Object { \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CommandLine)\" }"],
-            capture_output=True, text=True, timeout=8)
+            capture_output=True, text=True, timeout=8,
+            # CREATE_NO_WINDOW：小漓是 windowed GUI（无控制台），子进程
+            # 不隐藏会闪黑窗（用户实测 /yes 后闪过黑窗——每次弱特征验证
+            # 都闪一次）。capture_output 只重定向 stdout/stderr，stdin
+            # 仍继承 → Windows 为子进程新建控制台。
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         rows = []
         for line in (out.stdout or "").splitlines():
             parts = line.split("|", 2)
@@ -205,7 +210,8 @@ def check_environment(cfg):
         detail = f"窗口检测失败: {e}"
     if not wechat_ok:
         try:
-            r = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=10)
+            r = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if "WeChat.exe" in r.stdout:
                 wechat_ok, detail = True, "检测到微信进程 WeChat.exe（窗口未找到）"
         except Exception as e:
@@ -350,7 +356,8 @@ def configure_tianshu_auto_approval(cfg, config_path=None):
         r = subprocess.run(
             [rivet, "config", "set-approval", target],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30)
+            errors="replace", timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if r.returncode == 0:
             return True, "天枢 CLI 已配置为完全自动（YOLO），任务处理不再需要手动确认"
         return False, f"配置天枢 CLI 自动模式失败（{r.returncode}）"
@@ -404,11 +411,13 @@ def launch_tianshu(cfg):
         # RIVET_PLAN_MODE_SUGGEST=0：关闭复杂任务自动进入 Plan Mode——
         # 无人值守场景任务不能卡在 plan 审批（README：默认 auto 命中多模块/
         # 重构/安全任务时自主进入，等 /plan-approve 确认）。
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["cmd", "/k",
              "title npm prefix && set RIVET_PLAN_MODE_SUGGEST=0 && rivet"],
             cwd=workdir,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        global _last_launch_pid
+        _last_launch_pid = proc.pid
         return True, f"天枢 CLI 已启动（{workdir}）"
     except OSError as e:
         return False, f"启动天枢 CLI 失败：{e}"
@@ -491,6 +500,11 @@ def send_prompt_to_tianshu(text, window_title):
 # 只轮询已启动窗口（窗口出现即复用），不重复开窗。
 _LAUNCH_COOLDOWN_SECONDS = 60.0
 _last_launch_mono = None
+# launch_tianshu 启动的 CLI cmd 进程 PID——close_window_by_title 回退链
+# 最后一环用 taskkill /F /T 杀进程树（cmd→node 全杀，窗口必关）。
+# 窗口进程（conhost/WT）与 CLI 进程无父子关系，进程树验证查不到 rivet
+# 时靠它兜底（用户实测：/yes 后标题变 Windows PowerShell，窗口关不掉）。
+_last_launch_pid = None
 
 
 def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
@@ -680,6 +694,20 @@ def close_window_by_title(title, sleep_fn=None):
                     break
         except Exception:
             return False
+    if not found and _last_launch_pid:
+        # 最后一环兜底（用户实测 /yes 后窗口没关的根因）：窗口进程
+        # （conhost/WT）与 CLI 进程无父子关系——弱特征进程树验证从窗口
+        # PID 查不到 rivet，标题又已变化 → 前面全失败。但 CLI 是
+        # launch_tianshu 启动的，cmd PID 已记录——taskkill /F /T 杀
+        # 进程树（cmd→node 全杀），窗口必关（引导场景 CLI 无未完成任务）。
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(_last_launch_pid)],
+                capture_output=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return True
+        except Exception:
+            return False
     if not found:
         return False
     for hwnd in found:
@@ -701,7 +729,8 @@ def close_window_by_title(title, sleep_fn=None):
     for pid in pids:
         try:
             subprocess.run(["taskkill", "/F", "/PID", str(pid)],
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except Exception:
             pass
     return True

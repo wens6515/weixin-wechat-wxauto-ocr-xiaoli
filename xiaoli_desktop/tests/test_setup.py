@@ -281,6 +281,20 @@ class TestLaunchTianshu(unittest.TestCase):
         self.assertNotIn("tianshu", cmd_str.lower(),
                          "标题不得含 tianshu（与 _is_desktop 冲突→CLI 被误判桌面端）")
 
+    def test_launch_records_pid_for_close(self):
+        """RED 复现：close 需要按进程树杀 CLI（cmd→node）——但窗口进程
+        （conhost/WT）与 CLI 进程无父子关系，进程树验证从窗口 PID 查不到
+        rivet → close 回退失败、窗口关不掉。修复：launch_tianshu 记录
+        启动的 cmd PID（_last_launch_pid），close 兜底用 taskkill /T 杀树。"""
+        fake = mock.Mock()
+        fake.pid = 4321
+        with mock.patch("shutil.which", return_value=r"C:\npm\rivet.cmd"), \
+             mock.patch("subprocess.Popen", return_value=fake):
+            setup.launch_tianshu({"tianshu_workdir": self.tmp,
+                                  "tianshu_download_url": setup.DEFAULT_TIANSHU_URL})
+        self.assertEqual(setup._last_launch_pid, 4321,
+                         "launch 后必须记录 CLI cmd 进程 PID（close 进程树兜底用）")
+
     def test_launch_cli_in_workdir(self):
         started = {}
 
@@ -1016,6 +1030,52 @@ class TestFirstRunGuide(unittest.TestCase):
              mock.patch("xiaoli_app.setup._process_has_rivet", return_value=False):
             ok = setup.close_window_by_title("npm prefix", sleep_fn=lambda s: None)
         self.assertFalse(ok, "进程树无 rivet 的窗口不得被误关")
+
+    def test_close_falls_back_to_last_launch_pid_tree_kill(self):
+        """RED 复现（用户实测 /yes 后窗口没关）：标题从 npm prefix 变成
+        Windows PowerShell → 标题匹配失败；弱特征进程树验证也失败（窗口
+        进程 conhost 与 CLI 无父子关系）→ close 返回 False、窗口关不掉。
+        修复：回退链最后一环用 launch 时记录的 cmd PID（_last_launch_pid）
+        taskkill /F /T 杀进程树——cmd→node 全杀，窗口必关。"""
+        from unittest import mock
+        import ctypes
+        killed = []
+        setup._last_launch_pid = 4321  # launch_tianshu 记录的 CLI cmd PID
+
+        class FakeUser32:
+            _titles = {1: "Windows PowerShell", 2: "微信"}  # 标题已变化
+            _pids = {1: 9999, 2: 5678}
+
+            def GetWindowTextW(self, hwnd, buf, n):
+                t = self._titles.get(hwnd, "")
+                buf.value = t[:n]
+                return len(t)
+
+            def EnumWindows(self, proc, _lp):
+                proc(1, 0)
+                proc(2, 0)
+                return True
+
+            def GetWindowThreadProcessId(self, hwnd, pid_out):
+                try:
+                    ptr = ctypes.cast(pid_out, ctypes.POINTER(ctypes.wintypes.DWORD))
+                    ptr.contents.value = self._pids.get(hwnd, 0)
+                except Exception:
+                    pass
+                return 0
+
+        def fake_taskkill(args, **kw):
+            killed.append(args)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(ctypes.windll, "user32", FakeUser32()), \
+             mock.patch("subprocess.run", side_effect=fake_taskkill), \
+             mock.patch("xiaoli_app.setup._process_has_rivet", return_value=False):
+            ok = setup.close_window_by_title("npm prefix", sleep_fn=lambda s: None)
+        self.assertTrue(ok, "标题/弱特征都失败时应用 launch PID 进程树兜底关闭")
+        self.assertIn(["taskkill", "/F", "/T", "/PID", "4321"], killed,
+                      "兜底必须 taskkill /T 杀进程树（cmd→node 全杀）")
+        setup._last_launch_pid = None
 
     def test_find_npm_prefix_window_skips_npm_subcommand_windows(self):
         """RED 复现：用户手动开的 npm 子命令窗口（「npm root」等）标题含
