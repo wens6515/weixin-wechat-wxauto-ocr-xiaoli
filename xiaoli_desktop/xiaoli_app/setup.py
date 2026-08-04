@@ -284,19 +284,23 @@ def _tianshu_config_paths(primary):
 
 
 def launch_tianshu(cfg):
-    """启动天枢 CLI（rivet）：在 tianshu_workdir 下开新 cmd 窗口运行 rivet。
+    """启动天枢 CLI（rivet）：在用户选的工作间（tasks_dir）下开新 cmd 窗口运行 rivet。
 
     返回 (ok, detail)。rivet 命令经 shutil.which 定位（npm 全局安装 tianshu-tui）。
     窗口标题保持 CLI 自然值（实测为 npm prefix，含 npm）——不得用 title 设为
     "Tianshu"：那会与 _is_desktop 的 tianshu 关键词冲突，把 CLI 误判为桌面端，
     首轮提示词发不出去或误发到桌面端窗口。
+    历史缺陷：cwd 用 tianshu_workdir（tasks_dir 父目录）导致 agent 工作文件
+    （.rivet 等）落在程序目录旁而不是用户选的工作间——改为优先 tasks_dir。
     """
     import shutil
     import subprocess
     rivet = shutil.which("rivet") or shutil.which("rivet.cmd")
     if not rivet:
         return False, "未找到 rivet 命令，请先执行：npm install -g tianshu-tui"
-    workdir = (cfg.get("tianshu_workdir") or "").strip() or os.path.expanduser("~")
+    workdir = (cfg.get("tasks_dir") or "").strip() \
+        or (cfg.get("tianshu_workdir") or "").strip() \
+        or os.path.expanduser("~")
     try:
         os.makedirs(workdir, exist_ok=True)
     except OSError:
