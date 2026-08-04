@@ -38,7 +38,7 @@ def make_legacy_config():
         "file_max_tokens": 10000,
         "file_prompt": "",
         "file_storage_path": "",
-        "image_click_offset": [3, -5],
+        "image_click_offset": [-200, -130],
         "task_enabled": True,
         "tasks_dir": r"D:\工作间\wxauto",
         "tianshu_window_title": "天枢",
@@ -71,7 +71,7 @@ class TestMigrate(unittest.TestCase):
         # 任务桥字段保留
         self.assertEqual(out["tasks_dir"], r"D:\工作间\wxauto")
         self.assertEqual(out["tianshu_window_title"], "天枢")
-        self.assertEqual(out["image_click_offset"], [3, -5])
+        self.assertEqual(out["image_click_offset"], [-200, -130])
 
     def test_migrate_writes_default_card_file(self):
         cfg = make_legacy_config()
@@ -220,7 +220,7 @@ class TestRoundTrip(unittest.TestCase):
             self.assertIn(k, cfg1, k)
         # 任务桥字段不丢
         self.assertEqual(cfg1["tasks_dir"], r"D:\工作间\wxauto")
-        self.assertEqual(cfg1["image_click_offset"], [3, -5])
+        self.assertEqual(cfg1["image_click_offset"], [-200, -130])
         # 二次加载幂等（不重复迁移、投影稳定）
         cfg2 = config_store.load_config_store(self.cfg_path, self.cards_dir)
         self.assertEqual(cfg1["providers"], cfg2["providers"])
@@ -358,7 +358,7 @@ class TestDefaultPaths(unittest.TestCase):
 
 
 class TestImageClickOffsetDefault(unittest.TestCase):
-    """新 config 默认携带实测校准偏移 [3, -5]（小白开箱即用，不再显示 0）"""
+    """新 config 默认携带实测校准偏移 [-200, -130]（用户实测 2026-08-04，小白开箱即用）"""
 
     def test_default_offset_present(self):
         import shutil
@@ -367,7 +367,7 @@ class TestImageClickOffsetDefault(unittest.TestCase):
         try:
             cfg = config_store.load_config_store(
                 os.path.join(tmp, "config.json"), os.path.join(tmp, "cards"))
-            self.assertEqual(cfg.get("image_click_offset"), [3, -5])
+            self.assertEqual(cfg.get("image_click_offset"), [-200, -130])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
