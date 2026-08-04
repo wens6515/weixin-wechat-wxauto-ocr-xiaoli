@@ -1102,9 +1102,12 @@ class SettingsPage(QWidget):
         btn_tasks.clicked.connect(self._pick_tasks_dir)
         self.btn_tasks_save = QPushButton("保存")
         self.btn_tasks_save.clicked.connect(self._save_tasks_dir)
+        self.btn_guide = QPushButton("重新引导天枢 CLI")
+        self.btn_guide.clicked.connect(self._run_guide)
         tfl.addWidget(self.ed_tasks, 1)
         tfl.addWidget(btn_tasks)
         tfl.addWidget(self.btn_tasks_save)
+        tfl.addWidget(self.btn_guide)
         lay.addWidget(g_tasks)
 
         # 成果排除登记
