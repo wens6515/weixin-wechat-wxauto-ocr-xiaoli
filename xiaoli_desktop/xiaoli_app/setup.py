@@ -307,15 +307,17 @@ def launch_tianshu(cfg):
         pass
     try:
         # CREATE_NEW_CONSOLE：Windows 原生新开控制台窗口（可靠）；cmd /k 保持窗口。
-        # 窗口标题保持 CLI 自然值（实测为 npm prefix，含 npm）——不设 title Tianshu，
-        # 避免与 _is_desktop 的 tianshu 关键词冲突（CLI 被误判桌面端、提示词误发）。
-        # 实测：Popen(list) 引号二次转义 → "系统找不到文件 \Tianshu\"；
-        #       shell=True 字符串在 python 进程下也不弹窗（仅 Git Bash 手工调用有效）。
+        # title npm prefix：显式设置窗口标题——Win11 默认终端（Windows
+        # Terminal）下 cmd /k 新窗口标题不稳定（用户实测：看起来像 PowerShell
+        # 启动，窗口名变了 → resolve/监控找不到 CLI）。显式 title 后 conhost
+        # 与 WT 标签页标题都稳定为「npm prefix」，且不含 tianshu（不与
+        # _is_desktop 冲突）。
         # RIVET_PLAN_MODE_SUGGEST=0：关闭复杂任务自动进入 Plan Mode——
         # 无人值守场景任务不能卡在 plan 审批（README：默认 auto 命中多模块/
         # 重构/安全任务时自主进入，等 /plan-approve 确认）。
         subprocess.Popen(
-            ["cmd", "/k", "set RIVET_PLAN_MODE_SUGGEST=0 && rivet"],
+            ["cmd", "/k",
+             "title npm prefix && set RIVET_PLAN_MODE_SUGGEST=0 && rivet"],
             cwd=workdir,
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
         return True, f"天枢 CLI 已启动（{workdir}）"
