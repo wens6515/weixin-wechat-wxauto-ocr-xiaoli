@@ -465,6 +465,36 @@ class TestResolveCliWindow(unittest.TestCase):
         self.assertEqual(title, "", "新增窗口全是桌面端时不得把提示词发给桌面端")
         self.assertIn("未出现", detail)
 
+    def test_process_has_rivet_checks_child_process(self):
+        """RED 复现（用户实测）：CLI 是 cmd /k ... rivet 启动的——窗口 PID
+        （conhost/WT/cmd）自身命令行不含 rivet，rivet 在子进程 node 里。
+        旧实现只查窗口进程自身命令行（wmic 单进程）→ 永远 False →
+        弱特征（Windows PowerShell 标题）认不出 CLI → 唤起时新开窗口。
+        修复：进程树验证——自身或任一子进程命令行含 rivet 即命中。"""
+        from unittest import mock
+        # 模拟进程表（WT 场景父子链）：5000(WindowsTerminal) →
+        # 5001(cmd /k rivet，命令行含 rivet) → 5002(node 跑 tianshu-tui)
+        fake_ps = (
+            '5000|0|C:\\\\Windows\\\\System32\\\\WindowsTerminal.exe\n'
+            '5001|5000|cmd /k title npm prefix && set RIVET_PLAN_MODE_SUGGEST=0 && rivet\n'
+            '5002|5001|"C:\\\\node.exe" --expose-gc "C:\\\\...\\\\tianshu-tui\\\\dist\\\\main.js" serve\n'
+        )
+        with mock.patch("subprocess.run") as m:
+            m.return_value = mock.Mock(stdout=fake_ps, returncode=0)
+            got = setup._process_has_rivet(5000)
+        self.assertTrue(got,
+                        "窗口进程自身命令行不含 rivet 时，子进程（node ... rivet）含 rivet 也应命中")
+
+    def test_process_has_rivet_rejects_unrelated(self):
+        """fail-open 反例：窗口进程树完全不含 rivet（用户自己开的 PowerShell）
+        不得命中——提示词误发到无关窗口是 c67b995 场景的延续。"""
+        from unittest import mock
+        fake_ps = '6000|0|powershell.exe -NoLogo\n'
+        with mock.patch("subprocess.run") as m:
+            m.return_value = mock.Mock(stdout=fake_ps, returncode=0)
+            got = setup._process_has_rivet(6000)
+        self.assertFalse(got, "无 rivet 的进程树不得命中弱特征")
+
     def test_finds_cli_with_powershell_title(self):
         """RED 复现（用户实测）：Win11 默认终端（Windows Terminal）下 CLI
         窗口标题可能显示为「Windows PowerShell」（终端宿主接管标题，npm
@@ -897,6 +927,95 @@ class TestFirstRunGuide(unittest.TestCase):
                          "只向标题匹配的窗口发 WM_CLOSE（等效用户点 X），不匹配的窗口不动")
         self.assertEqual(killed, [["taskkill", "/F", "/PID", "1234"]],
                          "WM_CLOSE 后兜底按匹配窗口的进程 PID 强杀（比 WINDOWTITLE 过滤可靠）")
+
+    def test_close_window_after_title_changed_to_powershell(self):
+        """RED 复现（用户实测）：/yes 发送后 CLI 窗口标题可能从「npm prefix」
+        变成「Windows PowerShell」——旧 close_window_by_title 只按发送前的
+        标题枚举窗口，找不到 → 窗口关不掉。
+        修复：标题匹配失败时回退「进程树含 rivet 的控制台窗口」——
+        无论标题变成什么，只要 CLI 进程树在就能定位并关闭。"""
+        from unittest import mock
+        import ctypes
+        posted = []
+        killed = []
+
+        class FakeUser32:
+            _titles = {1: "Windows PowerShell", 2: "微信"}  # 标题已变化
+            _pids = {1: 1234, 2: 5678}
+            _classes = {1: "ConsoleWindowClass", 2: "WeChatMainWndForPC"}
+
+            def GetWindowTextW(self, hwnd, buf, n):
+                t = self._titles.get(hwnd, "")
+                buf.value = t[:n]
+                return len(t)
+
+            def GetClassNameW(self, hwnd, buf, n):
+                c = self._classes.get(hwnd, "")
+                buf.value = c[:n]
+                return len(c)
+
+            def EnumWindows(self, proc, _lp):
+                proc(1, 0)
+                proc(2, 0)
+                return True
+
+            def PostMessageW(self, hwnd, msg, _w, _l):
+                posted.append((hwnd, msg))
+                return True
+
+            def GetWindowThreadProcessId(self, hwnd, pid_out):
+                try:
+                    ptr = ctypes.cast(pid_out, ctypes.POINTER(ctypes.wintypes.DWORD))
+                    ptr.contents.value = self._pids.get(hwnd, 0)
+                except Exception:
+                    pass
+                return 0
+
+        def fake_taskkill(args, **kw):
+            killed.append(args)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.object(ctypes.windll, "user32", FakeUser32()), \
+             mock.patch("subprocess.run", side_effect=fake_taskkill), \
+             mock.patch("xiaoli_app.setup._process_has_rivet", return_value=True):
+            ok = setup.close_window_by_title("npm prefix", sleep_fn=lambda s: None)
+        self.assertTrue(ok, "标题从 npm prefix 变成 Windows PowerShell 后仍应能关闭 CLI 窗口")
+        self.assertEqual(posted, [(1, 0x0010)],
+                         "标题不匹配时按进程树（含 rivet）定位到 CLI 窗口并 WM_CLOSE")
+        self.assertEqual(killed, [["taskkill", "/F", "/PID", "1234"]])
+
+    def test_close_window_title_mismatch_without_rivet_returns_false(self):
+        """fail-open 反例：标题不匹配且进程树无 rivet（用户自己的 PowerShell）
+        ——不得误关，返回 False。"""
+        from unittest import mock
+        import ctypes
+
+        class FakeUser32:
+            _titles = {1: "Windows PowerShell", 2: "微信"}
+            _pids = {1: 9999, 2: 5678}
+
+            def GetWindowTextW(self, hwnd, buf, n):
+                t = self._titles.get(hwnd, "")
+                buf.value = t[:n]
+                return len(t)
+
+            def EnumWindows(self, proc, _lp):
+                proc(1, 0)
+                proc(2, 0)
+                return True
+
+            def GetWindowThreadProcessId(self, hwnd, pid_out):
+                try:
+                    ptr = ctypes.cast(pid_out, ctypes.POINTER(ctypes.wintypes.DWORD))
+                    ptr.contents.value = self._pids.get(hwnd, 0)
+                except Exception:
+                    pass
+                return 0
+
+        with mock.patch.object(ctypes.windll, "user32", FakeUser32()), \
+             mock.patch("xiaoli_app.setup._process_has_rivet", return_value=False):
+            ok = setup.close_window_by_title("npm prefix", sleep_fn=lambda s: None)
+        self.assertFalse(ok, "进程树无 rivet 的窗口不得被误关")
 
     def test_find_npm_prefix_window_skips_npm_subcommand_windows(self):
         """RED 复现：用户手动开的 npm 子命令窗口（「npm root」等）标题含
