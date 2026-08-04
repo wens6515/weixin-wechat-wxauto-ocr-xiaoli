@@ -332,6 +332,28 @@ class TestUiSmoke(unittest.TestCase):
             page._run_prompt_flow(force=True)
             m.assert_called_once()
 
+    def test_main_click_requires_confirm_before_initialize(self):
+        """RED 复现：初始化前必须先弹确认窗（告知用户自动化期间勿操作电脑），
+        用户未点「是」不得 initialize（用户要求：点确定后才开始初始化）。"""
+        from unittest import mock
+        from PySide6.QtWidgets import QMessageBox
+        from xiaoli_app.ui.pages import HomePage
+        ctx = self._make_ctx()
+        eng = mock.Mock()
+        eng.state = "idle"
+        ctx.engine = eng
+        page = HomePage(ctx)
+        # 用户点「否」→ 不初始化
+        with mock.patch("xiaoli_app.ui.pages.QMessageBox.question",
+                        return_value=QMessageBox.StandardButton.No):
+            page._on_main_clicked()
+        eng.initialize.assert_not_called()
+        # 用户点「是」→ 初始化
+        with mock.patch("xiaoli_app.ui.pages.QMessageBox.question",
+                        return_value=QMessageBox.StandardButton.Yes):
+            page._on_main_clicked()
+        eng.initialize.assert_called_once()
+
     def test_save_tasks_dir_moves_clears_old_and_resets_guide(self):
         """RED 复现：更改任务工作目录时，必须清除原目录文件并重置首启引导标记。
 

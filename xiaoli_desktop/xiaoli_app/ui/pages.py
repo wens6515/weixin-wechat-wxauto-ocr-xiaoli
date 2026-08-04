@@ -133,6 +133,17 @@ class HomePage(QWidget):
             return
         s = eng.state
         if s in ("idle", "error"):
+            # 初始化前确认：自动化流程期间用户不得操作电脑（含切换窗口），
+            # 否则按键/剪贴板指令会发到错误窗口（用户要求：点确定才开始初始化）
+            ret = QMessageBox.question(
+                self, "开始初始化",
+                "即将初始化天枢 CLI。\n\n"
+                "⚠ 在 Tianshu 完成程序预设指令之前，请不要操作电脑"
+                "（包括切换窗口、移动鼠标、点击），以免干扰自动化流程。\n\n"
+                "点击「是」开始初始化。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if ret != QMessageBox.StandardButton.Yes:
+                return
             eng.initialize()
         elif s == "initialized":
             eng.start_bot()
