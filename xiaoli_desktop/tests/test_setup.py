@@ -729,6 +729,172 @@ class TestUnattendedMode(unittest.TestCase):
         self.assertIn("不要向用户请求任何确认", prompt)
 
 
+class TestFirstRunGuide(unittest.TestCase):
+    """首次启动一次性引导：/yes 全自动（持久化）+ 关闭 CLI 窗口"""
+
+    def test_send_yes_and_close_sends_yes_then_closes(self):
+        calls = []
+
+        def fake_send(title, command, hold=0.5, enter_times=1):
+            calls.append(("send", title, command, enter_times))
+            return True
+
+        def fake_close(title):
+            calls.append(("close", title))
+            return True
+
+        ok = setup.send_yes_and_close(
+            "npm prefix", sleep_fn=lambda s: None,
+            send_fn=fake_send, close_fn=fake_close)
+        self.assertTrue(ok)
+        self.assertEqual(calls, [("send", "npm prefix", "/yes", 1), ("close", "npm prefix")],
+                         "必须先发 /yes 再关闭窗口（/yes 持久化全自动，重启后仍生效）")
+
+    def test_close_window_by_title_posts_wm_close_to_matching(self):
+        from unittest import mock
+        import ctypes
+        posted = []
+
+        class FakeUser32:
+            _titles = {1: "npm prefix", 2: "微信"}
+
+            def GetWindowTextW(self, hwnd, buf, n):
+                t = self._titles.get(hwnd, "")
+                buf.value = t[:n]
+                return len(t)
+
+            def EnumWindows(self, proc, _lp):
+                proc(1, 0)
+                proc(2, 0)
+                return True
+
+            def PostMessageW(self, hwnd, msg, _w, _l):
+                posted.append((hwnd, msg))
+                return True
+
+        with mock.patch.object(ctypes.windll, "user32", FakeUser32()), \
+             mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)):
+            ok = setup.close_window_by_title("npm", sleep_fn=lambda s: None)
+        self.assertTrue(ok)
+        self.assertEqual(posted, [(1, 0x0010)],
+                         "只向标题匹配的窗口发 WM_CLOSE（等效用户点 X），不匹配的窗口不动")
+
+    def test_run_first_run_guide_marks_guided_on_confirm(self):
+        import tempfile
+        import os
+        tmp = tempfile.mkdtemp(prefix="guide_")
+        cfg_path = os.path.join(tmp, "config.json")
+        try:
+            cfg = {"tasks_dir": r"D:\tasks"}
+            flow = []
+
+            def fake_detect():
+                return r"C:\Users\me\AppData\Roaming\npm\rivet"
+
+            def fake_resolve(c):
+                flow.append(("resolve", c))
+                return "npm prefix", ""
+
+            def fake_send(title, command, hold=0.5, enter_times=1):
+                flow.append(("send", command))
+                return True
+
+            def fake_close(title):
+                flow.append(("close",))
+                return True
+
+            def fake_dialog(title, text, buttons=None):
+                flow.append(("dialog", title))
+                return "确认完成"
+
+            ok = setup.run_first_run_guide(
+                cfg, cfg_path=cfg_path, detect_fn=fake_detect,
+                resolve_fn=fake_resolve, send_fn=fake_send,
+                close_fn=fake_close, sleep_fn=lambda s: None,
+                dialog_fn=fake_dialog)
+            self.assertTrue(ok)
+            self.assertTrue(cfg.get("tianshu_guided"),
+                            "确认完成后必须标记 tianshu_guided（此后初始化不再切 YOLO）")
+            self.assertIn(("send", "/yes"), flow, "确认后必须发送 /yes")
+            self.assertIn(("close",), flow, "发送 /yes 后必须关闭 CLI 窗口")
+            # 顺序：先定位窗口，再弹窗，再 /yes，再关闭
+            self.assertEqual(flow[0], ("resolve", cfg))
+            self.assertEqual(flow[1], ("dialog", "天枢 CLI 首次配置引导"))
+            self.assertEqual(flow[-2], ("send", "/yes"))
+            self.assertEqual(flow[-1], ("close",))
+            # 标记已落盘
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                import json
+                disk = json.load(f)
+            self.assertTrue(disk.get("tianshu_guided"), "tianshu_guided 必须写入 config.json")
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_run_first_run_guide_later_does_not_mark(self):
+        cfg = {}
+
+        def fake_dialog(title, text, buttons=None):
+            return "稍后再说"
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=lambda: "rivet",
+            resolve_fn=lambda c: ("npm prefix", ""),
+            sleep_fn=lambda s: None, dialog_fn=fake_dialog)
+        self.assertFalse(ok)
+        self.assertFalse(cfg.get("tianshu_guided", False),
+                         "「稍后再说」不得标记 guided（设置页可重跑引导）")
+
+    def test_run_first_run_guide_installs_cli_when_missing(self):
+        cfg = {}
+        flow = []
+
+        def fake_detect():
+            return ""  # 未安装 rivet
+
+        def fake_install():
+            flow.append("install")
+            return True
+
+        def fake_resolve(c):
+            flow.append("resolve")
+            return "npm prefix", ""
+
+        def fake_dialog(title, text, buttons=None):
+            flow.append("dialog")
+            return "确认完成"
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=fake_detect, install_fn=fake_install,
+            resolve_fn=fake_resolve, send_fn=lambda *a, **k: True,
+            close_fn=lambda *a, **k: True,
+            sleep_fn=lambda s: None, dialog_fn=fake_dialog)
+        self.assertTrue(ok)
+        self.assertEqual(flow[0], "install", "CLI 缺失时必须先尝试安装")
+        self.assertTrue(cfg.get("tianshu_guided"))
+
+    def test_run_first_run_guide_install_failure_reports(self):
+        cfg = {}
+        shown = []
+
+        def fake_detect():
+            return ""
+
+        def fake_install():
+            return False
+
+        def fake_dialog(title, text, buttons=None):
+            shown.append((title, text))
+            return ""
+
+        ok = setup.run_first_run_guide(
+            cfg, detect_fn=fake_detect, install_fn=fake_install,
+            sleep_fn=lambda s: None, dialog_fn=fake_dialog)
+        self.assertFalse(ok)
+        self.assertEqual(shown[0][0], "未找到天枢 CLI", "安装失败必须弹窗提示手动安装")
+        self.assertIn("npm install -g tianshu-tui", shown[0][1])
+
+
 class TestConfigDefaults(unittest.TestCase):
     def test_new_defaults_present(self):
         from xiaoli_app import config_store

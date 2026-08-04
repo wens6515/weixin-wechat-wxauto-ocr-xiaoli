@@ -506,3 +506,190 @@ def open_first_prompt(path):
         return False
     os.startfile(path)
     return True
+
+
+# ---------- 首次启动一次性引导：/yes 全自动（持久化，重启后仍生效） ----------
+# 用户实测：CLI 输入 /yes 即开全自动，且重启后不用再输——替代旧的
+# 每次初始化发 `/permission yolo confirm`（会话级）与 config 级
+# set-approval 机制。首启引导一次性完成，此后初始化不再切 YOLO。
+
+def close_window_by_title(title, sleep_fn=None):
+    """按标题子串定位顶层窗口 → WM_CLOSE 优雅关闭；1s 后仍在则 taskkill 强杀兜底。
+
+    cmd /k 运行批处理时点 X 可能弹「Terminate batch job (Y/N)?」不退出——
+    WM_CLOSE 后窗口仍在时用 taskkill /F /FI WINDOWTITLE 兜底（引导场景
+    CLI 无未完成任务，强杀不丢数据）。返回是否定位到并尝试关闭。
+    """
+    sleep_fn = sleep_fn or time.sleep
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+    except Exception:
+        return False
+    found = []
+
+    def _cb(hwnd, _lp):
+        try:
+            buf = ctypes.create_unicode_buffer(512)
+            n = user32.GetWindowTextW(hwnd, buf, 512)
+            if n > 0 and title.lower() in buf.value.lower():
+                found.append(hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_cb)
+        user32.EnumWindows(enum_proc, 0)
+    except Exception:
+        return False
+    if not found:
+        return False
+    for hwnd in found:
+        try:
+            user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE（等效用户点 X）
+        except Exception:
+            pass
+    sleep_fn(1.0)
+    # 窗口可能仍存在（cmd 批处理确认框）→ taskkill /F 按窗口标题强杀兜底
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/FI", f"WINDOWTITLE eq {title}"],
+            capture_output=True, timeout=10)
+    except Exception:
+        pass
+    return True
+
+
+def send_yes_and_close(title, sleep_fn=None, send_fn=None, close_fn=None):
+    """向 CLI 窗口发送 /yes（全自动持久化，重启后仍生效），等待后关闭窗口。
+
+    返回 bool。/yes 与 yolo 同发送机制（激活→剪贴板→回车 1 次）。
+    """
+    sleep_fn = sleep_fn or time.sleep
+    send_fn = send_fn or _send_trigger_to_window
+    close_fn = close_fn or close_window_by_title
+    if not title:
+        return False
+    ok = send_fn(title, "/yes")
+    sleep_fn(1.0)  # 等 CLI 完成模式切换
+    close_fn(title)
+    return ok
+
+
+def guide_tianshu_cli(cfg, resolve_fn=None, sleep_fn=None):
+    """首启引导：确保 CLI 窗口打开并定位。返回 (title, detail)。
+
+    复用 resolve_cli_window（第 3 级自动 launch 新 CLI，含 60s 冷却护栏；
+    cwd=tianshu_workdir）。
+    """
+    resolve_fn = resolve_fn or resolve_cli_window
+    return resolve_fn(cfg or {})
+
+
+def _install_tianshu_cli(timeout=180):
+    """自动安装天枢 CLI：npm install -g tianshu-tui。返回 bool。"""
+    import shutil
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if not npm:
+        return False
+    try:
+        r = subprocess.run(
+            [npm, "install", "-g", "tianshu-tui"],
+            capture_output=True, timeout=timeout)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _guide_dialog(parent, dialog_fn, title, text, buttons=None):
+    """模态引导弹窗（PySide6 QMessageBox 自定义按钮）。返回点击按钮文本。
+
+    buttons: [(文本, QMessageBox.ButtonRole), ...]，默认仅「确认完成」。
+    """
+    if dialog_fn is not None:
+        return dialog_fn(title, text, buttons)
+    from PySide6.QtWidgets import QMessageBox
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setText(text)
+    for label, role in (buttons or [("确认完成", QMessageBox.AcceptRole)]):
+        if role is None:  # 调用方不关心角色语义时给 ActionRole 兜底
+            role = QMessageBox.ActionRole
+        box.addButton(label, role)
+    box.exec()
+    clicked = box.clickedButton()
+    return clicked.text() if clicked is not None else ""
+
+
+def run_first_run_guide(cfg, parent=None, cfg_path=None,
+                        detect_fn=None, install_fn=None, resolve_fn=None,
+                        send_fn=None, close_fn=None, sleep_fn=None,
+                        dialog_fn=None):
+    """首启一次性引导完整流程，返回 True = 引导完成（config 已标记）。
+
+    步骤：① CLI 检测（rivet 命令，无则 npm install -g tianshu-tui 自动安装）
+    ② 打开 CLI 窗口并定位（resolve 第 3 级自动 launch）
+    ③ 模态弹窗指导用户在 CLI 内选模型/输 API key（用户自行完成）
+    ④ 用户点「确认完成」→ 发 /yes（全自动持久化）→ 关闭 CLI 窗口
+    ⑤ config 标记 tianshu_guided=True（此后初始化不再切 YOLO）
+
+    用户点「稍后再说」/关闭弹窗 → 不标记，返回 False（设置页可重跑引导）。
+    """
+    from xiaoli_app import config_store
+    sleep_fn = sleep_fn or time.sleep
+    if detect_fn is None:
+        def detect_fn():
+            import shutil
+            return shutil.which("rivet") or shutil.which("rivet.cmd")
+    # ① CLI 检测/安装
+    rivet = detect_fn()
+    if not rivet:
+        ok_install = (install_fn() if install_fn is not None else _install_tianshu_cli())
+        if not ok_install:
+            _guide_dialog(
+                parent, dialog_fn, "未找到天枢 CLI",
+                "未检测到 rivet 命令，自动安装失败。\n"
+                "请手动执行：npm install -g tianshu-tui\n"
+                "安装完成后重新打开本程序。")
+            return False
+    # ② 打开并定位 CLI 窗口
+    title, detail = guide_tianshu_cli(cfg, resolve_fn=resolve_fn, sleep_fn=sleep_fn)
+    if not title:
+        _guide_dialog(
+            parent, dialog_fn, "无法定位天枢 CLI 窗口",
+            detail or "天枢 CLI 窗口未出现，请稍后重试。")
+        return False
+    # ③④ 引导弹窗循环：确认完成 / 重新打开 CLI / 稍后再说
+    while True:
+        choice = _guide_dialog(
+            parent, dialog_fn, "天枢 CLI 首次配置引导",
+            "请在刚打开的「npm prefix」命令行窗口中完成配置：\n"
+            "  ① 选择模型\n"
+            "  ② 输入 API key\n"
+            "  ③ 按回车确认\n\n"
+            "以上操作需在 CLI 窗口内手动完成（小漓只负责打开窗口与提示）。\n"
+            "配置完成后点击「确认完成」，小漓将自动开启全自动模式并关闭 CLI 窗口。",
+            [("确认完成", None), ("重新打开 CLI", None), ("稍后再说", None)])
+        if choice == "重新打开 CLI":
+            title, detail = guide_tianshu_cli(cfg, resolve_fn=resolve_fn, sleep_fn=sleep_fn)
+            if not title:
+                _guide_dialog(
+                    parent, dialog_fn, "无法定位天枢 CLI 窗口",
+                    detail or "天枢 CLI 窗口未出现，请稍后重试。")
+            continue
+        if choice != "确认完成":
+            return False  # 稍后再说：不标记，设置页可重跑引导
+        break
+    # ⑤ 发 /yes → 关窗 → 标记
+    ok = send_yes_and_close(title, sleep_fn=sleep_fn, send_fn=send_fn, close_fn=close_fn)
+    if not ok:
+        _guide_dialog(parent, dialog_fn, "发送失败", "未能向天枢 CLI 发送 /yes，请重试。")
+        return False
+    cfg["tianshu_guided"] = True
+    try:
+        config_store.save_config(cfg, cfg_path or "config.json")
+    except OSError:
+        pass
+    return True
