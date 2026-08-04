@@ -509,6 +509,37 @@ class TestResolveCliWindow(unittest.TestCase):
             got = setup._process_has_rivet(6000)
         self.assertFalse(got, "无 rivet 的进程树不得命中弱特征")
 
+    def test_process_has_rivet_finds_global_rivet_when_window_tree_empty(self):
+        """RED 复现（用户实测 17:16 日志「未定位到 CLI 窗口」）：WT 标签场景下
+        窗口 PID（WindowsTerminal.exe）与 CLI 进程（cmd/node）无父子关系——
+        从窗口 PID 向下查子进程为空 → 弱特征失败 → resolve 找不到已开 CLI →
+        任务处理时未唤起。修复：_process_has_rivet 改为全局扫描系统里
+        是否存在命令行含 rivet 的进程（CLI 必在跑，窗口进程树查不到无所谓）。"""
+        from unittest import mock
+        fake_ps = (
+            '4372|0|"C:\\\\WindowsApps\\\\WindowsTerminal.exe" -Embedding\n'
+            '20488|17464|conhost.exe --headless\n'
+            '13824|20488|cmd /k "title npm prefix && set RIVET_PLAN_MODE_SUGGEST=0 && rivet"\n'
+        )
+        with mock.patch("subprocess.run") as m:
+            m.return_value = mock.Mock(stdout=fake_ps, returncode=0)
+            got = setup._process_has_rivet(4372)
+        self.assertTrue(got,
+                        "窗口进程树为空但系统里有 rivet 进程时（WT 标签场景）也应命中")
+
+    def test_process_has_rivet_rejects_when_no_rivet_anywhere(self):
+        """fail-open 反例：系统里完全无 rivet 进程（用户只开了 PowerShell）→
+        不得命中——提示词误发到无关窗口是 c67b995 场景的延续。"""
+        from unittest import mock
+        fake_ps = (
+            '4372|0|"C:\\\\WindowsApps\\\\WindowsTerminal.exe" -Embedding\n'
+            '6000|4372|powershell.exe -NoLogo\n'
+        )
+        with mock.patch("subprocess.run") as m:
+            m.return_value = mock.Mock(stdout=fake_ps, returncode=0)
+            got = setup._process_has_rivet(4372)
+        self.assertFalse(got, "系统无 rivet 进程时不得命中弱特征")
+
     def test_finds_cli_with_powershell_title(self):
         """RED 复现（用户实测）：Win11 默认终端（Windows Terminal）下 CLI
         窗口标题可能显示为「Windows PowerShell」（终端宿主接管标题，npm
