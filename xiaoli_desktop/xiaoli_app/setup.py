@@ -482,7 +482,7 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
         if not ok_launch:
             return "", f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
         _last_launch_mono = now
-    sleep_fn(8)  # CLI 启动 + 加载工作目录
+    sleep_fn(3)  # CLI 启动 + 加载工作目录（用户要求：等待缩短到 3 秒，防误以为没反应）
     for _ in range(15):
         try:
             # 直接按 CLI 特征窗口名定位：天枢 CLI 窗口标题实测为 npm prefix
