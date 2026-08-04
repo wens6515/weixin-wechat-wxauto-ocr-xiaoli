@@ -634,19 +634,93 @@ def _guide_dialog(parent, dialog_fn, title, text, buttons=None):
     return clicked.text() if clicked is not None else ""
 
 
-def run_first_run_guide(cfg, parent=None, cfg_path=None,
-                        detect_fn=None, install_fn=None, resolve_fn=None,
-                        send_fn=None, close_fn=None, sleep_fn=None,
-                        dialog_fn=None):
-    """首启一次性引导完整流程，返回 True = 引导完成（config 已标记）。
+def _find_npm_prefix_window(console_windows_fn=None):
+    """在控制台窗口里找 npm/rivet 特征窗口（天枢 CLI 进入会话后标题为 npm prefix）。
 
-    步骤：① CLI 检测（rivet 命令，无则 npm install -g tianshu-tui 自动安装）
-    ② 打开 CLI 窗口并定位（resolve 第 3 级自动 launch）
-    ③ 模态弹窗指导用户在 CLI 内选模型/输 API key（用户自行完成）
-    ④ 用户点「确认完成」→ 发 /yes（全自动持久化）→ 关闭 CLI 窗口
+    用户实测：CLI 启动后配置模型/API key 阶段窗口标题还不是 npm prefix——
+    只有配置完成进入会话才变。因此引导流程不在此阶段定位窗口，而是持续
+    监控该标题出现（= 用户配置完成的信号）。返回标题或 None。
+    """
+    try:
+        for name in (console_windows_fn or _console_windows)():
+            low = name.lower()
+            if ("npm" in low or "rivet" in low) and not ("tianshu" in low or "天枢" in name):
+                return name
+    except Exception:
+        pass
+    return None
+
+
+_GUIDE_PROMPT_TEXT = (
+    "已为您打开天枢 CLI（命令行窗口）。\n\n"
+    "请在弹出的窗口中完成配置：\n"
+    "  ① 选择模型\n"
+    "  ② 输入 API key\n"
+    "  ③ 按回车确认\n\n"
+    "以上操作需在 CLI 窗口内手动完成（小漓只负责打开窗口与提示）。\n"
+    "配置完成进入会话后，小漓会自动检测到 CLI 并开启全自动模式（发送 /yes），"
+    "然后关闭 CLI 窗口——无需点击任何确认按钮。\n\n"
+    "若 CLI 窗口未出现，请手动打开命令行窗口并输入 rivet 启动。"
+)
+
+
+def _guide_dialog_with_monitor(parent, found, console_windows_fn,
+                               sleep_fn, poll_interval, timeout):
+    """模态操作提示弹窗 + QTimer 监控 npm prefix 窗口出现。
+
+    弹窗显示指导文案；后台 QTimer 每 poll_interval 秒检查一次窗口列表，
+    出现 npm prefix（用户配置完成）→ 自动 accept 关闭弹窗；超时/用户取消
+    → reject。结果写入 found["title"]（找到的窗口标题，未找到为 None）。
+    """
+    from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout, QPushButton
+    from PySide6.QtCore import QTimer
+    dialog = QDialog(parent)
+    dialog.setWindowTitle("天枢 CLI 配置引导")
+    dialog.setMinimumWidth(460)
+    label = QLabel(_GUIDE_PROMPT_TEXT)
+    label.setWordWrap(True)
+    btn_cancel = QPushButton("取消")
+    lay = QVBoxLayout(dialog)
+    lay.addWidget(label)
+    lay.addWidget(btn_cancel)
+    btn_cancel.clicked.connect(dialog.reject)
+    start = time.monotonic()
+
+    def poll():
+        if found["title"]:
+            dialog.accept()
+            return
+        if time.monotonic() - start > timeout:
+            dialog.reject()  # 超时：不标记，可重跑
+            return
+        t = _find_npm_prefix_window(console_windows_fn)
+        if t:
+            found["title"] = t
+            dialog.accept()
+
+    timer = QTimer()
+    timer.timeout.connect(poll)
+    timer.start(int(poll_interval * 1000))
+    dialog.exec()
+    timer.stop()
+
+
+def run_first_run_guide(cfg, parent=None, cfg_path=None,
+                        detect_fn=None, install_fn=None, launch_fn=None,
+                        send_fn=None, close_fn=None, sleep_fn=None,
+                        console_windows_fn=None, poll_interval=2.0,
+                        timeout=600, dialog_fn=None):
+    """工作文件夹保存后的一次性引导（首次/换目录都触发），返回 True = 完成。
+
+    流程（用户实测修正：CLI 配置阶段窗口标题还不是 npm prefix，不能先定位）：
+    ① CLI 检测（rivet 命令，无则 npm install -g tianshu-tui 自动安装）
+    ② launch_tianshu 打开 CLI（帮助用户打开；不在此阶段定位窗口）
+    ③ 弹操作提示窗（指导用户选模型/输 API key），同时监控 npm prefix 出现
+       ——npm prefix = 用户配置完成进入会话的信号
+    ④ 监控到 → 自动关闭提示窗 → 发 /yes（两次回车，全自动持久化）→ 关 CLI 窗口
     ⑤ config 标记 tianshu_guided=True（此后初始化不再切 YOLO）
 
-    用户点「稍后再说」/关闭弹窗 → 不标记，返回 False（设置页可重跑引导）。
+    超时/取消/未出现 npm prefix → 返回 False（设置页可重跑引导）。
     """
     from xiaoli_app import config_store
     sleep_fn = sleep_fn or time.sleep
@@ -665,39 +739,32 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
                 "请手动执行：npm install -g tianshu-tui\n"
                 "安装完成后重新打开本程序。")
             return False
-    # ② 打开并定位 CLI 窗口
-    title, detail = guide_tianshu_cli(cfg, resolve_fn=resolve_fn, sleep_fn=sleep_fn)
+    # ② 打开 CLI（用户配置模型/API key；窗口标题此时还不是 npm prefix）
+    if launch_fn is None:
+        launch_fn = launch_tianshu
+    ok_launch, detail = launch_fn(cfg)
+    if not ok_launch:
+        _guide_dialog(parent, dialog_fn, "无法打开天枢 CLI",
+                      f"{detail}\n\n请手动打开命令行窗口并输入 rivet 启动，"
+                      "完成配置后程序会自动检测。")
+    # ③ 弹操作提示 + 监控 npm prefix 出现
+    found = {"title": None}
+    if dialog_fn is not None:
+        # 测试注入路径：dialog_fn 模拟弹窗（期间窗口可能出现），随后立即检查
+        dialog_fn("天枢 CLI 配置引导", _GUIDE_PROMPT_TEXT, None)
+        found["title"] = _find_npm_prefix_window(console_windows_fn)
+    else:
+        _guide_dialog_with_monitor(parent, found, console_windows_fn,
+                                   sleep_fn, poll_interval, timeout)
+    # ④ 监控到 npm prefix → 发 /yes → 关窗
+    title = found["title"]
     if not title:
-        _guide_dialog(
-            parent, dialog_fn, "无法定位天枢 CLI 窗口",
-            detail or "天枢 CLI 窗口未出现，请稍后重试。")
-        return False
-    # ③④ 引导弹窗循环：确认完成 / 重新打开 CLI / 稍后再说
-    while True:
-        choice = _guide_dialog(
-            parent, dialog_fn, "天枢 CLI 首次配置引导",
-            "请在刚打开的「npm prefix」命令行窗口中完成配置：\n"
-            "  ① 选择模型\n"
-            "  ② 输入 API key\n"
-            "  ③ 按回车确认\n\n"
-            "以上操作需在 CLI 窗口内手动完成（小漓只负责打开窗口与提示）。\n"
-            "配置完成后点击「确认完成」，小漓将自动开启全自动模式并关闭 CLI 窗口。",
-            [("确认完成", None), ("重新打开 CLI", None), ("稍后再说", None)])
-        if choice == "重新打开 CLI":
-            title, detail = guide_tianshu_cli(cfg, resolve_fn=resolve_fn, sleep_fn=sleep_fn)
-            if not title:
-                _guide_dialog(
-                    parent, dialog_fn, "无法定位天枢 CLI 窗口",
-                    detail or "天枢 CLI 窗口未出现，请稍后重试。")
-            continue
-        if choice != "确认完成":
-            return False  # 稍后再说：不标记，设置页可重跑引导
-        break
-    # ⑤ 发 /yes → 关窗 → 标记
+        return False  # 取消/超时：不标记，设置页可重跑
     ok = send_yes_and_close(title, sleep_fn=sleep_fn, send_fn=send_fn, close_fn=close_fn)
     if not ok:
         _guide_dialog(parent, dialog_fn, "发送失败", "未能向天枢 CLI 发送 /yes，请重试。")
         return False
+    # ⑤ 标记
     cfg["tianshu_guided"] = True
     try:
         config_store.save_config(cfg, cfg_path or "config.json")
