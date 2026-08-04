@@ -259,6 +259,28 @@ class TestLaunchTianshu(unittest.TestCase):
         self.assertEqual(started["cwd"], self.tmp,
                          "CLI 应在用户选的工作间（tasks_dir）打开，而非其父目录")
 
+    def test_launch_cli_sets_stable_title_npm_prefix(self):
+        """RED 复现：Win11 默认终端（Windows Terminal）下 cmd /k 新窗口标题
+        不稳定（用户实测：窗口名变了，看起来像 PowerShell 启动）→ resolve/
+        监控找不到 npm prefix，引导/初始化链路断裂。修复：启动命令显式
+        title npm prefix——任何终端宿主（conhost/WT）下窗口标题都稳定。"""
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen["cmd"] = cmd
+            return mock.Mock()
+
+        with mock.patch("shutil.which", return_value=r"C:\npm\rivet.cmd"), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            setup.launch_tianshu({"tianshu_workdir": self.tmp,
+                                  "tianshu_download_url": setup.DEFAULT_TIANSHU_URL})
+        cmd_str = " ".join(str(x) for x in seen["cmd"])
+        self.assertIn("title npm prefix", cmd_str,
+                      "启动命令必须显式设置窗口标题 npm prefix（防终端宿主差异）")
+        self.assertIn("cmd", cmd_str, "必须用 cmd 启动（不是 PowerShell）")
+        self.assertNotIn("tianshu", cmd_str.lower(),
+                         "标题不得含 tianshu（与 _is_desktop 冲突→CLI 被误判桌面端）")
+
     def test_launch_cli_in_workdir(self):
         started = {}
 
