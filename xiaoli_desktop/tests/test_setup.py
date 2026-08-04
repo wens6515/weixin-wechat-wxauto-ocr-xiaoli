@@ -465,6 +465,52 @@ class TestResolveCliWindow(unittest.TestCase):
         self.assertEqual(title, "", "新增窗口全是桌面端时不得把提示词发给桌面端")
         self.assertIn("未出现", detail)
 
+    def test_finds_cli_with_powershell_title(self):
+        """RED 复现（用户实测）：Win11 默认终端（Windows Terminal）下 CLI
+        窗口标题可能显示为「Windows PowerShell」（终端宿主接管标题，npm
+        prefix 未生效）——修复前 _is_cli_feature 只认 npm prefix/rivet，
+        resolve 找不到 CLI → 首轮提示词发不出去。
+        修复：弱特征标题（Windows PowerShell 等终端默认名）在进程树含
+        rivet 时认作 CLI（CLI 就是 cmd /k rivet 启动的窗口）。"""
+        cfg = {}
+        title, detail = setup.resolve_cli_window(
+            cfg,
+            console_windows_fn=lambda: [("Windows PowerShell", 1234)],
+            process_has_rivet_fn=lambda pid: True,
+            sleep_fn=lambda s: None)
+        self.assertEqual(title, "Windows PowerShell",
+                         "CLI 标题被终端宿主改写为 Windows PowerShell 时也应识别")
+        self.assertEqual(detail, "")
+
+    def test_skips_user_powershell_without_rivet(self):
+        """fail-open 反例：用户自己开的 PowerShell（进程树不含 rivet）
+        不得被当作 CLI——首轮提示词误发到无关窗口是 c67b995 场景的延续。
+        弱特征标题必须进程验证通过才认。"""
+        cfg = {}
+        called = {"launch": False}
+        wins = ["微信"]
+
+        def fake_list():
+            return list(wins)
+
+        def fake_launch(cfg2):
+            called["launch"] = True
+            wins.append("npm prefix")
+            return True, "ok"
+
+        def fake_console():
+            # 用户 PowerShell（9999）始终在；CLI 启动后新增 npm prefix 窗口
+            base = [("Windows PowerShell", 9999)]
+            return base + (["npm prefix"] if called["launch"] else [])
+
+        title, _ = setup.resolve_cli_window(
+            cfg, list_windows_fn=fake_list, launch_fn=fake_launch,
+            sleep_fn=lambda s: None, console_windows_fn=fake_console,
+            process_has_rivet_fn=lambda pid: False)
+        self.assertTrue(called["launch"], "用户 PowerShell 不应被当作 CLI，应走第 3 级启动")
+        self.assertEqual(title, "npm prefix",
+                         "跳过用户 PowerShell 后应找到真正的 CLI 窗口")
+
     def test_skips_decoy_npm_window(self):
         # RED 复现（对抗审查反例 C1，fail-open）：浏览器/编辑器等非控制台窗口
         # 标题含 "npm prefix"（如 "npm docs - Mozilla Firefox"）且枚举先于真实 CLI——
