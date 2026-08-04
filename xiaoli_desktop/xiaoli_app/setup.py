@@ -429,7 +429,9 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
 
     def _is_cli_feature(name):
         low = name.lower()
-        return "npm" in low or "rivet" in low
+        # 「npm prefix」精确短语（CLI 实测标题）或 rivet；裸 "npm" 会误判
+        # 用户手动开的 npm 子命令窗口（npm root 等），/yes 打错窗口
+        return "npm prefix" in low or "rivet" in low
 
     def _cli_candidates():
         """CLI 窗口候选：控制台类窗口标题；控制台枚举不可用（None）时回退全量。
@@ -635,16 +637,20 @@ def _guide_dialog(parent, dialog_fn, title, text, buttons=None):
 
 
 def _find_npm_prefix_window(console_windows_fn=None):
-    """在控制台窗口里找 npm/rivet 特征窗口（天枢 CLI 进入会话后标题为 npm prefix）。
+    """在控制台窗口里找天枢 CLI 窗口（进入会话后标题为「npm prefix」）。
 
     用户实测：CLI 启动后配置模型/API key 阶段窗口标题还不是 npm prefix——
     只有配置完成进入会话才变。因此引导流程不在此阶段定位窗口，而是持续
-    监控该标题出现（= 用户配置完成的信号）。返回标题或 None。
+    监控该标题出现（= 用户配置完成的信号）。
+    匹配用「npm prefix」精确短语而非裸 "npm"——用户手动开的 npm 子命令
+    窗口（如「npm root」）标题含 npm 但不是 CLI，误发 /yes 会打错窗口
+    （真机日志 14:24:44 向「npm root」发送 /yes 的故障链）。返回标题或 None。
     """
     try:
         for name in (console_windows_fn or _console_windows)():
             low = name.lower()
-            if ("npm" in low or "rivet" in low) and not ("tianshu" in low or "天枢" in name):
+            if ("npm prefix" in low or "rivet" in low) \
+                    and not ("tianshu" in low or "天枢" in name):
                 return name
     except Exception:
         pass
@@ -658,69 +664,28 @@ _GUIDE_PROMPT_TEXT = (
     "  ② 输入 API key\n"
     "  ③ 按回车确认\n\n"
     "以上操作需在 CLI 窗口内手动完成（小漓只负责打开窗口与提示）。\n"
-    "配置完成进入会话后，小漓会自动检测到 CLI 并开启全自动模式（发送 /yes），"
-    "然后关闭 CLI 窗口——无需点击任何确认按钮。\n\n"
+    "配置完成后点击「确认完成」，小漓将检测到 CLI 并自动开启全自动模式"
+    "（发送 /yes），然后关闭 CLI 窗口。\n\n"
     "若 CLI 窗口未出现，请手动打开命令行窗口并输入 rivet 启动。"
 )
-
-
-def _guide_dialog_with_monitor(parent, found, console_windows_fn,
-                               sleep_fn, poll_interval, timeout):
-    """模态操作提示弹窗 + QTimer 监控 npm prefix 窗口出现。
-
-    弹窗显示指导文案；后台 QTimer 每 poll_interval 秒检查一次窗口列表，
-    出现 npm prefix（用户配置完成）→ 自动 accept 关闭弹窗；超时/用户取消
-    → reject。结果写入 found["title"]（找到的窗口标题，未找到为 None）。
-    """
-    from PySide6.QtWidgets import QDialog, QLabel, QVBoxLayout, QPushButton
-    from PySide6.QtCore import QTimer
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("天枢 CLI 配置引导")
-    dialog.setMinimumWidth(460)
-    label = QLabel(_GUIDE_PROMPT_TEXT)
-    label.setWordWrap(True)
-    btn_cancel = QPushButton("取消")
-    lay = QVBoxLayout(dialog)
-    lay.addWidget(label)
-    lay.addWidget(btn_cancel)
-    btn_cancel.clicked.connect(dialog.reject)
-    start = time.monotonic()
-
-    def poll():
-        if found["title"]:
-            dialog.accept()
-            return
-        if time.monotonic() - start > timeout:
-            dialog.reject()  # 超时：不标记，可重跑
-            return
-        t = _find_npm_prefix_window(console_windows_fn)
-        if t:
-            found["title"] = t
-            dialog.accept()
-
-    timer = QTimer()
-    timer.timeout.connect(poll)
-    timer.start(int(poll_interval * 1000))
-    dialog.exec()
-    timer.stop()
 
 
 def run_first_run_guide(cfg, parent=None, cfg_path=None,
                         detect_fn=None, install_fn=None, launch_fn=None,
                         send_fn=None, close_fn=None, sleep_fn=None,
-                        console_windows_fn=None, poll_interval=2.0,
-                        timeout=600, dialog_fn=None):
+                        console_windows_fn=None, dialog_fn=None):
     """工作文件夹保存后的一次性引导（首次/换目录都触发），返回 True = 完成。
 
-    流程（用户实测修正：CLI 配置阶段窗口标题还不是 npm prefix，不能先定位）：
+    流程（用户实测确认的正确交互——配置阶段窗口标题还不是 npm prefix，
+    不能在确认前定位窗口；自动监控触发 /yes 是错误设计）：
     ① CLI 检测（rivet 命令，无则 npm install -g tianshu-tui 自动安装）
-    ② launch_tianshu 打开 CLI（帮助用户打开；不在此阶段定位窗口）
-    ③ 弹操作提示窗（指导用户选模型/输 API key），同时监控 npm prefix 出现
-       ——npm prefix = 用户配置完成进入会话的信号
-    ④ 监控到 → 自动关闭提示窗 → 发 /yes（两次回车，全自动持久化）→ 关 CLI 窗口
-    ⑤ config 标记 tianshu_guided=True（此后初始化不再切 YOLO）
+    ② launch_tianshu 打开 CLI（帮助用户打开，不定位窗口）
+    ③ 模态弹窗：指导用户选模型/输 API key/回车确认 → 点「确认完成」
+    ④ 确认后才检查 npm prefix 窗口（此时配置完成，标题已变）→ 无则提示重试
+    ⑤ 找到 → 发 /yes（两次回车，全自动持久化）→ 关闭 CLI 窗口
+    ⑥ config 标记 tianshu_guided=True（此后初始化不再切 YOLO）
 
-    超时/取消/未出现 npm prefix → 返回 False（设置页可重跑引导）。
+    用户取消 / 确认后未检测到窗口 / 发送失败 → 返回 False（设置页可重跑）。
     """
     from xiaoli_app import config_store
     sleep_fn = sleep_fn or time.sleep
@@ -746,25 +711,29 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
     if not ok_launch:
         _guide_dialog(parent, dialog_fn, "无法打开天枢 CLI",
                       f"{detail}\n\n请手动打开命令行窗口并输入 rivet 启动，"
-                      "完成配置后程序会自动检测。")
-    # ③ 弹操作提示 + 监控 npm prefix 出现
-    found = {"title": None}
-    if dialog_fn is not None:
-        # 测试注入路径：dialog_fn 模拟弹窗（期间窗口可能出现），随后立即检查
-        dialog_fn("天枢 CLI 配置引导", _GUIDE_PROMPT_TEXT, None)
-        found["title"] = _find_npm_prefix_window(console_windows_fn)
-    else:
-        _guide_dialog_with_monitor(parent, found, console_windows_fn,
-                                   sleep_fn, poll_interval, timeout)
-    # ④ 监控到 npm prefix → 发 /yes → 关窗
-    title = found["title"]
+                      "完成配置后回到本窗口点击「确认完成」。")
+    # ③ 弹操作提示窗，等用户完成配置后点「确认完成」
+    choice = _guide_dialog(
+        parent, dialog_fn, "天枢 CLI 配置引导",
+        _GUIDE_PROMPT_TEXT,
+        [("确认完成", None), ("取消", None)])
+    if choice != "确认完成":
+        return False  # 取消：不标记，设置页可重跑
+    # ④ 确认后才检查 npm prefix（配置完成窗口标题已变）
+    title = _find_npm_prefix_window(console_windows_fn)
     if not title:
-        return False  # 取消/超时：不标记，设置页可重跑
+        _guide_dialog(
+            parent, dialog_fn, "未检测到天枢 CLI 窗口",
+            "未找到「npm prefix」窗口。\n"
+            "请确认已在 CLI 窗口中完成配置（选择模型、输入 API key、按回车确认），"
+            "然后在设置页点击「重新引导天枢 CLI」重试。")
+        return False
+    # ⑤ 发 /yes → 关窗
     ok = send_yes_and_close(title, sleep_fn=sleep_fn, send_fn=send_fn, close_fn=close_fn)
     if not ok:
         _guide_dialog(parent, dialog_fn, "发送失败", "未能向天枢 CLI 发送 /yes，请重试。")
         return False
-    # ⑤ 标记
+    # ⑥ 标记
     cfg["tianshu_guided"] = True
     try:
         config_store.save_config(cfg, cfg_path or "config.json")

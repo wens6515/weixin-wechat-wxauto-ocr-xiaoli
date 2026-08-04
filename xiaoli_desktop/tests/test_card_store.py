@@ -278,12 +278,12 @@ class TestTaskDispatchWindow(unittest.TestCase):
             return list(wins)
 
         def fake_launch(cfg):
-            wins.append("npm")  # CLI 启动后新增窗口
+            wins.append("npm prefix")  # CLI 启动后新增窗口
             return True, "ok"
 
         def fake_console():
             # 控制台枚举：启动前无 CLI（桌面端/微信不是控制台类），启动后 CLI 进入
-            return ["npm"] if len(wins) > 2 else []
+            return ["npm prefix"] if len(wins) > 2 else []
 
         def fake_trigger(title, command, hold=0.5, enter_times=1):
             sent["title"] = title
@@ -297,7 +297,7 @@ class TestTaskDispatchWindow(unittest.TestCase):
              mock.patch.object(bot, "_send_text", return_value=None), \
              mock.patch.object(xb, "dispatch_task", return_value="T1"):
             bot._dispatch_and_notify("测试群", "老王", "做一个贪吃蛇")
-        self.assertEqual(sent["title"], "npm",
+        self.assertEqual(sent["title"], "npm prefix",
                          "任务唤起必须发给 CLI 窗口（npm），不得激活桌面端「天枢 · Tianshu」")
 
     def test_dispatch_switches_cli_to_yolo_before_trigger(self):
@@ -315,12 +315,12 @@ class TestTaskDispatchWindow(unittest.TestCase):
             return list(wins)
 
         def fake_launch(cfg):
-            wins.append("npm")  # CLI 启动后新增窗口
+            wins.append("npm prefix")  # CLI 启动后新增窗口
             return True, "ok"
 
         def fake_console():
             # 控制台枚举：启动前无 CLI，启动后 CLI（npm）进入
-            return ["npm"] if len(wins) > 2 else []
+            return ["npm prefix"] if len(wins) > 2 else []
 
         def fake_trigger(title, command, hold=0.5, enter_times=1):
             cmds.append(command)
