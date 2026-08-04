@@ -520,12 +520,14 @@ def open_first_prompt(path):
 # set-approval 机制。首启引导一次性完成，此后初始化不再切 YOLO。
 
 def close_window_by_title(title, sleep_fn=None):
-    """按标题子串定位顶层窗口 → WM_CLOSE 优雅关闭；1s 后仍在则 taskkill /PID 强杀兜底。
+    """按标题子串定位顶层窗口 → WM_CLOSE 优雅关闭；0.5s 后仍在则 taskkill /PID 强杀兜底。
 
     cmd /k 运行批处理时点 X 可能弹「Terminate batch job (Y/N)?」不退出——
     WM_CLOSE 后窗口仍在时按窗口进程 PID 强杀兜底（引导场景 CLI 无未完成
-    任务，强杀不丢数据）。PID 方式比 taskkill WINDOWTITLE 过滤可靠（中文/
-    特殊字符标题不受影响）。返回是否定位到并尝试关闭。
+    任务，强杀不丢数据）。PID 方式比 taskkill WINDOWTITLE 过滤可靠。
+    关键：user32 调用的 argtypes 必须显式声明——64 位系统 HWND 是 64 位
+    指针，不声明按 c_int 传参会截断，PostMessageW/taskkill 全部无效
+    （历史缺陷：/yes 发完 CLI 窗口一直不关）。返回是否定位到并尝试关闭。
     """
     sleep_fn = sleep_fn or time.sleep
     try:
@@ -534,6 +536,16 @@ def close_window_by_title(title, sleep_fn=None):
         user32 = ctypes.windll.user32
     except Exception:
         return False
+    # 64 位句柄/指针签名：防 HWND 截断（关窗失效的根因）。
+    # 仅对真实 ctypes 函数对象有效；测试注入的 Fake（普通方法）设置失败无害。
+    try:
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                        wintypes.WPARAM, wintypes.LPARAM]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    except (AttributeError, TypeError):
+        pass
     found = []
 
     def _cb(hwnd, _lp):
@@ -558,7 +570,7 @@ def close_window_by_title(title, sleep_fn=None):
             user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE（等效用户点 X）
         except Exception:
             pass
-    sleep_fn(1.0)
+    sleep_fn(0.5)  # 用户建议：输入 /yes 后等待 0.5s 再关闭
     # 窗口可能仍存在（cmd 批处理确认框）→ 按窗口进程 PID 强杀兜底
     pids = set()
     for hwnd in found:
@@ -670,6 +682,8 @@ _GUIDE_PROMPT_TEXT = (
     "以上操作需在 CLI 窗口内手动完成（小漓只负责打开窗口与提示）。\n"
     "配置完成后点击「确认完成」，小漓将检测到 CLI 并自动开启全自动模式"
     "（发送 /yes），然后关闭 CLI 窗口。\n\n"
+    "⚠ 重要：小漓的聊天/任务功能使用桌面端自己的 API 配置——请同时到"
+    "「模型」页为 DeepSeek 填入相同的 API key，否则桌面端调用会报 401。\n\n"
     "若 CLI 窗口未出现，请手动打开命令行窗口并输入 rivet 启动。"
 )
 
