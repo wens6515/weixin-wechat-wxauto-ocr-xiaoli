@@ -108,21 +108,51 @@ def _console_windows():
 
 
 def _process_has_rivet(pid):
-    """进程树验证：PID 对应的进程命令行（含子进程）是否出现 rivet。
+    """进程树验证：PID 自身或任一子进程（递归）命令行含 rivet。
 
     终端宿主（Windows Terminal）把 CLI 窗口标题改写为「Windows PowerShell」
     时，标题特征失效——但 CLI 是 cmd /k ... rivet 启动的，进程树里必有
-    rivet；用户自己开的 PowerShell 则没有。失败（wmic 不可用等）返回 False
-    = 不认作 CLI（宁缺毋滥，防 fail-open 误发）。"""
+    rivet（窗口 PID 是 conhost/WT/cmd，自身命令行不含 rivet，rivet 在
+    子进程 node 里）；用户自己开的 PowerShell 则没有。失败（PowerShell
+    不可用等）返回 False = 不认作 CLI（宁缺毋滥，防 fail-open 误发）。
+    """
     try:
         import subprocess
+        # 一次拉全进程表（PID|PPID|CommandLine），内存里递归查子进程。
+        # wmic 在新 Windows 上已弃用，用 PowerShell Get-CimInstance。
         out = subprocess.run(
-            ["wmic", "process", "where", f"ProcessId={pid}",
-             "get", "CommandLine", "/format:list"],
-            capture_output=True, text=True, timeout=5)
-        return "rivet" in (out.stdout or "").lower()
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process | "
+             "ForEach-Object { \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CommandLine)\" }"],
+            capture_output=True, text=True, timeout=8)
+        rows = []
+        for line in (out.stdout or "").splitlines():
+            parts = line.split("|", 2)
+            if len(parts) == 3 and parts[0].strip().isdigit():
+                rows.append((int(parts[0]), int(parts[1]),
+                             (parts[2] or "").lower()))
+        children = {}
+        for p, pp, cmd in rows:
+            children.setdefault(pp, []).append((p, cmd))
+        # 从目标 PID 向下递归（含自身）
+        stack = [pid]
+        seen = set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for cpid, cmd in children.get(cur, []):
+                if "rivet" in cmd:
+                    return True
+                stack.append(cpid)
+        # 自身命令行
+        for p, _pp, cmd in rows:
+            if p == pid and "rivet" in cmd:
+                return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def _is_cli_feature(name, pid=None, process_has_rivet_fn=None):
@@ -622,6 +652,34 @@ def close_window_by_title(title, sleep_fn=None):
         user32.EnumWindows(enum_proc, 0)
     except Exception:
         return False
+    if not found:
+        # 标题匹配失败回退（用户实测）：/yes 发送后 CLI 窗口标题可能从
+        # 「npm prefix」变成「Windows PowerShell」——旧逻辑按发送前标题
+        # 枚举找不到 → 窗口关不掉。回退到「进程树含 rivet 的控制台窗口」：
+        # 无论标题变成什么，只要 CLI 进程树在就能定位（_is_cli_feature
+        # 弱特征 = 终端默认标题 + 进程树验证）。用户自己开的 PowerShell
+        # 进程树无 rivet，不会被误关（fail-open 反例）。
+        try:
+            for name, pid in _norm_console_entries(_console_windows() or []):
+                low = name.lower()
+                if "tianshu" in low or "天枢" in name:
+                    continue
+                if _is_cli_feature(name, pid):
+                    def _cb2(hwnd, _lp):
+                        try:
+                            b2 = ctypes.create_unicode_buffer(512)
+                            n2 = user32.GetWindowTextW(hwnd, b2, 512)
+                            if n2 > 0 and name.lower() in b2.value.lower():
+                                found.append(hwnd)
+                        except Exception:
+                            pass
+                        return True
+                    enum2 = ctypes.WINFUNCTYPE(
+                        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_cb2)
+                    user32.EnumWindows(enum2, 0)
+                    break
+        except Exception:
+            return False
     if not found:
         return False
     for hwnd in found:
