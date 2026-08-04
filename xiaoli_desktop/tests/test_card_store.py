@@ -267,6 +267,30 @@ class TestTaskDispatchWindow(unittest.TestCase):
             json.dump({"status": "success"}, f)
         self.assertFalse(xb.has_active_tasks(tmp, stale_after=3600))
 
+    def test_classify_task_uses_chat_model(self):
+        """RED 复现：任务判断必须用文字模型（chat_model）——classify_model
+        常为空导致 payload model="" → API 400 → 异常静默降级 is_task=False，
+        任务消息全被当聊天处理（用户实测：发两次都当聊天）。"""
+        from unittest import mock
+        import xiaoli_bot as xb
+        bot = self._make_bot()
+        bot.task_enabled = True
+        bot.chat_model = "deepseek-chat"
+        bot.file_model = ""  # classify_model 为空的历史场景
+        bot.api_url = "https://api.deepseek.com/v1/chat/completions"
+        bot.api_key = "sk-test"
+        seen = {}
+
+        def fake_classify(api_url, api_key, model, text, timeout=30):
+            seen["model"] = model
+            seen["text"] = text
+            return {"is_task": True, "task": "做个PPT"}
+        with mock.patch.object(xb, "classify_task_with_llm", side_effect=fake_classify):
+            r = bot._classify_task("帮我做个PPT")
+        self.assertTrue(r["is_task"])
+        self.assertEqual(seen["model"], "deepseek-chat",
+                         "任务判断必须用 chat_model（文字模型），而非可能为空的 classify_model")
+
     def test_dispatch_uses_cli_window_not_desktop(self):
         import xiaoli_bot as xb
         bot = self._make_bot()

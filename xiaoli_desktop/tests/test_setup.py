@@ -239,6 +239,26 @@ class TestLaunchTianshu(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_launch_cli_prefers_tasks_dir_as_cwd(self):
+        """RED 复现：CLI 必须在用户选的工作间（tasks_dir）打开——历史用
+        tianshu_workdir（tasks_dir 父目录）导致 agent 工作文件（.rivet 等）
+        落在程序目录旁而不是用户选的工作间（用户实测观察）。"""
+        started = {}
+
+        def fake_popen(cmd, **kw):
+            started["cwd"] = kw.get("cwd")
+            return mock.Mock()
+
+        cfg = {"tasks_dir": self.tmp,
+               "tianshu_workdir": os.path.dirname(self.tmp),  # 历史行为：父目录
+               "tianshu_download_url": setup.DEFAULT_TIANSHU_URL}
+        with mock.patch("shutil.which", return_value=r"C:\npm\rivet.cmd"), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            ok, detail = setup.launch_tianshu(cfg)
+        self.assertTrue(ok, detail)
+        self.assertEqual(started["cwd"], self.tmp,
+                         "CLI 应在用户选的工作间（tasks_dir）打开，而非其父目录")
+
     def test_launch_cli_in_workdir(self):
         started = {}
 

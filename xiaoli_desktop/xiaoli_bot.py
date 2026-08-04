@@ -624,7 +624,10 @@ class AgentBot(WeChatBot):
     def _classify_task(self, text):
         if not self.task_enabled:
             return {"is_task": False, "task": ""}
-        return classify_task_with_llm(self.api_url, self.api_key, self.file_model, text)
+        # 任务判断用文字模型（chat_model）——classify_model 常为空导致
+        # payload model="" → API 400 → 异常静默降级 is_task=False，
+        # 任务消息全被当聊天处理（用户实测：发两次都当聊天）。
+        return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
     def _latest_received_file(self):
         """微信下载目录里最近收到的文件（作为任务附件）"""
@@ -666,6 +669,7 @@ class AgentBot(WeChatBot):
             title, detail = _setup.resolve_cli_window({
                 "tianshu_window_title": self.tianshu_window_title,
                 "tianshu_workdir": getattr(self, "tianshu_workdir", ""),
+                "tasks_dir": getattr(self, "tasks_dir", ""),  # launch cwd 优先用户选的工作间
             })
             if not title:
                 logger.warning(f"[天枢] 未定位到 CLI 窗口（{detail}），任务已投递但未唤起")
