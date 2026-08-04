@@ -44,6 +44,7 @@ class HomePage(QWidget):
         self._prompt_state = None
         self._prompt_done = False
         self._prompt_running = False
+        self._prompt_attempted = False  # 流程发起过即置位：失败后 tick 不再自动重试
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(32, 28, 32, 20)
@@ -179,9 +180,11 @@ class HomePage(QWidget):
         self.lbl_state.setText(labels.get(state, state))
         if state == "error" and getattr(eng, "error", None):
             self.lbl_state.setText(f"初始化失败：{eng.error}")
-        # 初始化完成即自动触发首轮提示词流程（不依赖环境检测报告；幂等由 _prompt_done 守卫）
+        # 初始化完成即自动触发首轮提示词流程（不依赖环境检测报告；
+        # 幂等由 _prompt_done 守卫，失败后由 _prompt_attempted 停止自动重试——
+        # 否则每次 tick 都重新 resolve+launch CLI，窗口无限循环）
         if (state == "initialized" and not self._prompt_done
-                and not self._prompt_running):
+                and not self._prompt_running and not self._prompt_attempted):
             self._run_prompt_flow()
 
     # ---------- 环境检查 ----------
@@ -221,10 +224,12 @@ class HomePage(QWidget):
             det.setText(str(item.get("detail", "")))
         tianshu_ok = bool(report.get("tianshu", {}).get("ok"))
         self.btn_install.setVisible(not tianshu_ok)
-        # 初始化完成后自动触发首轮提示词流程
+        # 初始化完成后自动触发首轮提示词流程（失败后不自动重试——
+        # 见 _refresh_main_button 同款注释：_prompt_attempted 防 tick 循环开 CLI）
         eng = self.ctx.engine
         if (eng is not None and eng.state == "initialized"
-                and not self._prompt_done and not self._prompt_running):
+                and not self._prompt_done and not self._prompt_running
+                and not self._prompt_attempted):
             self._run_prompt_flow()
 
     # ---------- 一键安装天枢 ----------
@@ -280,6 +285,7 @@ class HomePage(QWidget):
             return
         if self._prompt_done and not force:
             return
+        self._prompt_attempted = True  # 发起即记录：失败后 tick 不再自动重试（仅手动 force）
         self._prompt_running = True
         self.lbl_prompt.setText("正在发送首轮提示词…")
         threading.Thread(target=self._prompt_worker, daemon=True).start()
