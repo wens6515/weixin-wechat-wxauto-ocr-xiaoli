@@ -216,6 +216,18 @@ class TestTaskDispatchWindow(unittest.TestCase):
     """任务投递后唤起天枢：tianshu_window_title 被污染为桌面端标题时，
     必须走 resolve_cli_window 定位 CLI（npm 窗口），不得激活桌面端。"""
 
+    def setUp(self):
+        # 隔离天枢 CLI 授权写入：投递任务前 grant_tasks_dir_to_tianshu 会写
+        # %LOCALAPPDATA%\.rivet\config.json——测试不得污染真实 CLI 配置
+        self._grant_tmp = tempfile.mkdtemp(prefix="grant_iso_")
+        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": self._grant_tmp})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # resolve_cli_window 的 launch 冷却护栏是模块级状态，测试间必须重置，
+        # 否则前一个测试的 launch 会让本类测试跳过第 3 级 launch，断言误红
+        from xiaoli_app import setup as _setup
+        _setup._last_launch_mono = None
+
     def _make_bot(self):
         from xiaoli_bot import AgentBot
         bot = AgentBot.__new__(AgentBot)
@@ -226,14 +238,6 @@ class TestTaskDispatchWindow(unittest.TestCase):
         bot._sending_lock = False
         bot._model_lock = threading.RLock()
         return bot
-
-    def setUp(self):
-        # 隔离天枢 CLI 授权写入：投递任务前 grant_tasks_dir_to_tianshu 会写
-        # %LOCALAPPDATA%\.rivet\config.json——测试不得污染真实 CLI 配置
-        self._grant_tmp = tempfile.mkdtemp(prefix="grant_iso_")
-        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": self._grant_tmp})
-        patcher.start()
-        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(getattr(self, "_tmp", ""), ignore_errors=True)

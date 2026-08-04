@@ -390,6 +390,14 @@ def send_prompt_to_tianshu(text, window_title):
     return _send_trigger_to_window(window_title, text, enter_times=2)
 
 
+# resolve_cli_window 第 3 级 launch 幂等护栏：冷却期内不重复 launch。
+# 用户实测：初始化发首轮提示词时 resolve 每次都走到第 3 级 → 每轮都开
+# 新 CLI 窗口，窗口一个接一个地开，循环不止。launch 后记时间戳，冷却期内
+# 只轮询已启动窗口（窗口出现即复用），不重复开窗。
+_LAUNCH_COOLDOWN_SECONDS = 60.0
+_last_launch_mono = None
+
+
 def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
                        console_windows_fn=None):
     """定位天枢 CLI 窗口标题，返回 (title, detail)。
@@ -457,10 +465,17 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
     except Exception:
         pass
 
-    # 3) 启动 CLI + 按 CLI 特征窗口名（npm prefix）轮询定位
-    ok_launch, detail = launch_fn(cfg)
-    if not ok_launch:
-        return "", f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
+    # 3) 启动 CLI + 按 CLI 特征窗口名（npm prefix）轮询定位。
+    #    launch 幂等护栏：冷却期内不重复 launch（用户实测：初始化发首轮
+    #    提示词时每次 resolve 都走到这里 → 每轮都开新 CLI 窗口，循环不止）。
+    #    冷却期内跳过 launch 直接轮询——窗口出现即复用，不重复开窗。
+    global _last_launch_mono
+    now = time.monotonic()
+    if _last_launch_mono is None or now - _last_launch_mono >= _LAUNCH_COOLDOWN_SECONDS:
+        ok_launch, detail = launch_fn(cfg)
+        if not ok_launch:
+            return "", f"首轮提示词准备就绪，但{detail}（点「重试发送」）"
+        _last_launch_mono = now
     sleep_fn(8)  # CLI 启动 + 加载工作目录
     for _ in range(15):
         try:
