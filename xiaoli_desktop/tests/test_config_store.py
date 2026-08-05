@@ -237,8 +237,8 @@ class TestMaskKey(unittest.TestCase):
 
 
 # 隐私关键词：默认人设中绝不允许出现的个人化信息（用户原 config 曾含）
-PRIVACY_KEYWORDS = ("王文生", "郭勇宏", "何镇鸿", "林子杰", "杨冬梅", "王美晨",
-                    "福州", "宿舍", "强盗", "金融", "2024级")
+PRIVACY_KEYWORDS = ("测试用户甲", "测试用户乙", "测试用户丙", "测试用户丁", "测试用户戊",
+                    "测试学校", "测试宿舍", "测试群组", "测试专业", "测试年级")
 
 
 class TestPrivacyPrompt(unittest.TestCase):
@@ -259,15 +259,15 @@ class TestPrivacyPrompt(unittest.TestCase):
         try:
             cards_dir = os.path.join(tmp, "cards")
             legacy = make_legacy_config()
-            legacy["system_prompt"] = "你叫小漓，王文生是你的爹，福州大学学生。"
+            legacy["system_prompt"] = "你叫小漓，测试用户甲是你的爹，测试学校学生。"
             cfg = config_store.migrate_config(legacy, cards_dir)
             self.assertEqual(cfg["active_card_id"], "xiaoli")
             card_path = os.path.join(cards_dir, "xiaoli.json")
             with open(card_path, encoding="utf-8") as f:
                 card = json.load(f)
             sp = card["system_prompt"]
-            self.assertNotIn("王文生", sp)
-            self.assertNotIn("福州", sp)
+            self.assertNotIn("测试用户甲", sp)
+            self.assertNotIn("测试学校", sp)
             self.assertIn("小漓", sp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

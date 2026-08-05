@@ -1459,7 +1459,7 @@ def run_self_test():
         with open(att, "w", encoding="utf-8") as f:
             f.write("document content")
         tasks_dir = os.path.join(tmp, "tasks")
-        tid2 = dispatch_task(tasks_dir, {"msg_id": "m1", "chat_name": "王文生", "sender": "王", "task": "根据文档做网站"}, [att])
+        tid2 = dispatch_task(tasks_dir, {"msg_id": "m1", "chat_name": "小明", "sender": "王", "task": "根据文档做网站"}, [att])
         task_dir = os.path.join(tasks_dir, tid2)
         check("T4 任务目录存在", os.path.isdir(task_dir))
         with open(os.path.join(task_dir, "task.json"), "r", encoding="utf-8") as f:
@@ -1482,7 +1482,7 @@ def run_self_test():
 
         handled = poll_outbox(tasks_dir, deliver)
         check("T7 回传解析并归档", handled == [tid2], str(handled))
-        check("T7 deliver 收到正确数据", delivered and delivered[0][0] == "王文生" and delivered[0][1] == "做好了", str(delivered))
+        check("T7 deliver 收到正确数据", delivered and delivered[0][0] == "小明" and delivered[0][1] == "做好了", str(delivered))
         check("T7 归档到 sent", os.path.isdir(os.path.join(tasks_dir, "sent", tid2)))
 
         # T7b: failed 也回传
@@ -1732,22 +1732,22 @@ def run_self_test():
         mem_dir = os.path.join(tmp, "mem")
         os.makedirs(mem_dir)
         mb = make_mem_bot(mem_dir)
-        mb._remember_task_result("王文生", {"status": "success", "reply_text": "网站做好了，见成果文件", "files": ["site.zip"]})
-        hist = mb.memory_db.get("王文生", [])
+        mb._remember_task_result("小明", {"status": "success", "reply_text": "网站做好了，见成果文件", "files": ["site.zip"]})
+        hist = mb.memory_db.get("小明", [])
         check("T15 成功结果写入记忆",
               len(hist) == 1 and hist[0]["role"] == "assistant"
               and "[任务结果] 网站做好了，见成果文件，成果文件: site.zip" in hist[0]["content"], str(hist))
-        mb._remember_task_result("王文生", {"status": "failed", "reply_text": ""})
+        mb._remember_task_result("小明", {"status": "failed", "reply_text": ""})
         check("T15 失败结果写入记忆（默认文案）",
-              len(mb.memory_db["王文生"]) == 2 and "任务处理失败了" in mb.memory_db["王文生"][1]["content"],
-              str(mb.memory_db["王文生"]))
+              len(mb.memory_db["小明"]) == 2 and "任务处理失败了" in mb.memory_db["小明"][1]["content"],
+              str(mb.memory_db["小明"]))
         mb._remember_task_result("", {"status": "success", "reply_text": "x"})
         check("T15 空 chat 不写记忆", len(mb.memory_db) == 1, str(mb.memory_db))
         check("T15 记忆落盘", os.path.isfile(os.path.join(mem_dir, "mem.json")))
         mb2 = make_mem_bot(mem_dir)
         mb2._load_memory()
         check("T15 重启后任务结果记忆仍在",
-              "王文生" in mb2.memory_db and "[任务结果]" in mb2.memory_db["王文生"][0]["content"],
+              "小明" in mb2.memory_db and "[任务结果]" in mb2.memory_db["小明"][0]["content"],
               str(mb2.memory_db.keys()))
 
     finally:
