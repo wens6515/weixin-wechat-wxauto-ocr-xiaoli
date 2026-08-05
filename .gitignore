@@ -30,3 +30,7 @@ Thumbs.db
 
 # uiautomation 运行时日志
 @AutomationLog.txt
+
+# 本地 agent 工具链文件（不上传）
+AGENTS.md
+.rivet.md
