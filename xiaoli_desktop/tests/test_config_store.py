@@ -494,5 +494,79 @@ class TestGrantTasksDirToTianshu(unittest.TestCase):
                          "无 CLI 时不得擅自创建配置目录")
 
 
+class TestSecretEncryption(unittest.TestCase):
+    """API key 落盘加密（DPAPI）：内存明文 ↔ 落盘密文 round-trip。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cfg_sec_")
+        self.cfg_path = os.path.join(self.tmp, "config.json")
+        self.cards_dir = os.path.join(self.tmp, "cards")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_plain(self, cfg):
+        with open(self.cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=4)
+
+    def test_disk_has_no_plaintext_key(self):
+        """RED 复现：config.json 明文存 API key，误分享/翻目录即泄露。
+        save_config 后落盘 key 必须是密文（dpapi: 前缀），磁盘无明文。"""
+        cfg = {
+            "providers": [{"id": "p1", "name": "P", "base_url": "http://x",
+                           "api_key": "sk-super-secret-42", "models": ["m"]}],
+            "ai_api_key": "sk-super-secret-42",
+        }
+        config_store.save_config(cfg, self.cfg_path)
+        with open(self.cfg_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        self.assertNotIn("sk-super-secret-42", raw,
+                         "落盘文件不得包含明文 key")
+        if config_store._DPAPI_OK:
+            self.assertIn(config_store._DPAPI_PREFIX, raw,
+                          "DPAPI 可用时必须加密落盘")
+
+    def test_roundtrip_key_preserved(self):
+        """load（解密）→ save（加密）→ load（解密）：key 一致。"""
+        cfg = {
+            "providers": [{"id": "p1", "name": "P", "base_url": "http://x",
+                           "api_key": "sk-rt-1", "models": ["m"]}],
+        }
+        config_store.save_config(cfg, self.cfg_path)
+        cfg1 = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        self.assertEqual(cfg1["providers"][0]["api_key"], "sk-rt-1")
+        # 二次加载幂等（密文落盘 → 解密回明文）
+        cfg2 = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        self.assertEqual(cfg1["providers"], cfg2["providers"])
+        self.assertEqual(cfg1["providers"][0]["api_key"], "sk-rt-1")
+
+    def test_plaintext_legacy_still_readable(self):
+        """旧明文 config（无 dpapi: 前缀）读盘兼容，迁移写回后变密文。"""
+        self._write_plain({
+            "ai_api_url": "https://api.deepseek.com/v1/chat/completions",
+            "ai_api_key": "sk-legacy-plain-9",
+            "chat_model": "deepseek-chat",
+        })
+        cfg = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        self.assertEqual(cfg["ai_api_key"], "sk-legacy-plain-9",
+                         "旧明文 key 必须原样可用")
+        if config_store._DPAPI_OK:
+            with open(self.cfg_path, "r", encoding="utf-8") as f:
+                self.assertIn(config_store._DPAPI_PREFIX, f.read(),
+                              "迁移写回后 key 应加密落盘")
+
+    def test_undecryptable_key_becomes_empty(self):
+        """密文解不开（换用户/换机）→ 返回空 key（界面提示重填，不崩溃）。"""
+        if not config_store._DPAPI_OK:
+            self.skipTest("无 DPAPI 环境")
+        self._write_plain({
+            "providers": [{"id": "p1", "name": "P", "base_url": "http://x",
+                           "api_key": "dpapi:not-a-real-blob", "models": ["m"]}],
+        })
+        cfg = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        self.assertEqual(cfg["providers"][0]["api_key"], "",
+                         "解不开的密文应降级为空 key")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

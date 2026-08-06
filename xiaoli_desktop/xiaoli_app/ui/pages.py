@@ -964,35 +964,23 @@ class TasksPage(QWidget):
             self.table.setRowCount(1)
             self.table.setItem(0, 0, QTableWidgetItem("任务目录不存在"))
             return
-        names = sorted(os.listdir(tasks_dir), reverse=True)
-        for name in names:
-            task_dir = os.path.join(tasks_dir, name)
-            if not os.path.isdir(task_dir) or name == "sent":
-                continue
-            tj = os.path.join(task_dir, "task.json")
-            if not os.path.isfile(tj):
-                continue
-            try:
-                with open(tj, "r", encoding="utf-8") as f:
-                    info = json.load(f)
-            except Exception:
-                continue
-            desc = str(info.get("task", ""))[:50]
-            has_result = os.path.isfile(os.path.join(task_dir, "result.json"))
-            state = "✅ 已完成待回传" if has_result else "⏳ 天枢处理中"
-            mtime = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(tj)))
+        # 与 CLI task-status 共用 scan_task_status（历史缺陷：两处各扫一遍任务目录）
+        from xiaoli_bot import scan_task_status
+        entries, waiting, done, archived = scan_task_status(tasks_dir)
+        for name, state, desc, mtime in entries:
             r = self.table.rowCount()
             self.table.insertRow(r)
             self.table.setItem(r, 0, QTableWidgetItem(name))
-            self.table.setItem(r, 1, QTableWidgetItem(state))
+            self.table.setItem(
+                r, 1,
+                QTableWidgetItem("✅ 已完成待回传" if state == "done" else "⏳ 天枢处理中"))
             self.table.setItem(r, 2, QTableWidgetItem(desc))
             self.table.setItem(r, 3, QTableWidgetItem(mtime))
-        sent_dir = os.path.join(tasks_dir, "sent")
-        if os.path.isdir(sent_dir):
-            n = len(os.listdir(sent_dir))
+        if archived:
             self.table.insertRow(self.table.rowCount())
             self.table.setItem(self.table.rowCount() - 1, 0, QTableWidgetItem("—"))
-            self.table.setItem(self.table.rowCount() - 1, 1, QTableWidgetItem(f"已归档 {n} 个任务"))
+            self.table.setItem(self.table.rowCount() - 1, 1,
+                               QTableWidgetItem(f"已归档 {archived} 个任务"))
 
     def _open_dir(self):
         tasks_dir = (self.ctx.cfg or {}).get("tasks_dir", "")

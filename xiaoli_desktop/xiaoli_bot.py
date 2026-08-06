@@ -487,6 +487,43 @@ def release_single_instance():
 # AgentBot：普通聊天 + 天枢任务桥
 # =====================================================================
 
+def scan_task_status(tasks_dir):
+    """扫描任务目录，返回 (entries, waiting, done, archived)。
+    entries: [(name, state, desc, mtime_str)]，state ∈ {"waiting", "done"}。
+    CLI task-status 命令与 GUI 任务页共用（历史缺陷：两处各扫一遍任务目录，
+    逻辑漂移）。sent 归档目录与无 task.json 的非任务目录不进入 entries。"""
+    waiting = done = 0
+    entries = []
+    if not os.path.isdir(tasks_dir):
+        return entries, waiting, done, 0
+    for name in sorted(os.listdir(tasks_dir), reverse=True):
+        task_dir = os.path.join(tasks_dir, name)
+        if not os.path.isdir(task_dir) or name == "sent":
+            continue
+        tj = os.path.join(task_dir, "task.json")
+        if not os.path.isfile(tj):
+            continue
+        try:
+            with open(tj, "r", encoding="utf-8") as f:
+                info = json.load(f)
+        except Exception:
+            continue
+        desc = str(info.get("task", ""))[:50]
+        has_result = os.path.isfile(os.path.join(task_dir, "result.json"))
+        state = "done" if has_result else "waiting"
+        mtime = time.strftime("%m-%d %H:%M", time.localtime(os.path.getmtime(tj)))
+        entries.append((name, state, desc, mtime))
+        if has_result:
+            done += 1
+        else:
+            waiting += 1
+    archived = 0
+    sent_dir = os.path.join(tasks_dir, "sent")
+    if os.path.isdir(sent_dir):
+        archived = len(os.listdir(sent_dir))
+    return entries, waiting, done, archived
+
+
 class AgentBot(WeChatBot):
     """小漓合并版：继承原 WeChatBot（聊天/图片/文件识别），叠加天枢任务桥"""
 
@@ -986,7 +1023,7 @@ class AgentBot(WeChatBot):
             at_tag = f"@{self.nickname}"
             content = content.replace(at_tag, "").strip()
             if not content:
-                content = "Hello"
+                content = "你好呀～"  # 与基类 process_new_messages 群聊空内容文案一致
         question = content.strip()
         logger.info(f"[MSG] [{chat_name}] {sender}: {question[:80]}")
         if self.task_enabled and msg_id not in self.dispatched_msg_ids:
@@ -1167,33 +1204,16 @@ class TianshuController(Controller):
 
 
     def _show_task_status(self):
-        tasks_dir = self.bot.tasks_dir
-        if not os.path.isdir(tasks_dir):
+        """任务状态展示（与 GUI 任务页共用 scan_task_status）。"""
+        entries, waiting, done, archived = scan_task_status(self.bot.tasks_dir)
+        if not os.path.isdir(self.bot.tasks_dir):
             print("任务目录不存在")
             return
-        waiting = done = 0
-        for name in sorted(os.listdir(tasks_dir)):
-            task_dir = os.path.join(tasks_dir, name)
-            if not os.path.isdir(task_dir) or name == "sent":
-                continue
-            has_result = os.path.isfile(os.path.join(task_dir, "result.json"))
-            state = "✅ 天枢已完成" if has_result else "⏳ 天枢处理中"
-            desc = ""
-            tj = os.path.join(task_dir, "task.json")
-            if os.path.isfile(tj):
-                try:
-                    with open(tj, "r", encoding="utf-8") as f:
-                        desc = json.load(f).get("task", "")[:40]
-                except Exception:
-                    pass
-            print(f"  - {name} [{state}] {desc}")
-            if has_result:
-                done += 1
-            else:
-                waiting += 1
-        sent_dir = os.path.join(tasks_dir, "sent")
-        if os.path.isdir(sent_dir):
-            print(f"已归档: {len(os.listdir(sent_dir))} 个任务")
+        for name, state, desc, _mtime in entries:
+            tag = "✅ 天枢已完成" if state == "done" else "⏳ 天枢处理中"
+            print(f"  - {name} [{tag}] {desc}")
+        if archived:
+            print(f"已归档: {archived} 个任务")
         print(f"统计: {waiting} 等待中 / {done} 待回传")
 
 
