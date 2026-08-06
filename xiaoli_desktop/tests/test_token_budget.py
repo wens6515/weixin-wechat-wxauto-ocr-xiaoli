@@ -16,12 +16,13 @@ from wechat_bot import fit_messages_in_budget, estimate_tokens
 
 
 class TestEstimateTokens(unittest.TestCase):
-    def test_ascii_chars_count_as_tokens(self):
-        self.assertEqual(estimate_tokens("hello"), 5)
+    def test_ascii_chars_count_weighted(self):
+        # 英文按 ~0.3 token/字符加权（实际 ~4 字符/token，保守取 0.3）
+        self.assertEqual(estimate_tokens("hello"), 2)  # int(5*0.3)+1
 
-    def test_cjk_chars_count_roughly_one(self):
-        # 中文按 1 字符 ≈ 1 token 保守估算
-        self.assertEqual(estimate_tokens("你好世界"), 4)
+    def test_cjk_chars_count_weighted(self):
+        # 中文按 ~0.8 token/字加权（实际 ~0.6，保守上界）
+        self.assertEqual(estimate_tokens("你好世界"), 4)  # int(4*0.8)+1
 
     def test_empty(self):
         self.assertEqual(estimate_tokens(""), 0)
@@ -36,11 +37,12 @@ class TestFitMessagesInBudget(unittest.TestCase):
 
     def test_drops_oldest_history_over_budget(self):
         # RED 复现：历史过长时从最旧开始丢，保留 system + 最近消息
+        # 消息加长到 2000 字符（加权后 ~600 token/条），确保超出预算触发裁剪
         msgs = [
             {"role": "system", "content": "sys"},
-            {"role": "user", "content": "a" * 500},   # 旧
-            {"role": "assistant", "content": "b" * 500},
-            {"role": "user", "content": "c" * 500},   # 新
+            {"role": "user", "content": "a" * 2000},   # 旧
+            {"role": "assistant", "content": "b" * 2000},
+            {"role": "user", "content": "c" * 2000},   # 新
         ]
         out = fit_messages_in_budget(msgs, budget=600)
         total = sum(estimate_tokens(m["content"]) for m in out)

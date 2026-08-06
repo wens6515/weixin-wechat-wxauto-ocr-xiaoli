@@ -913,7 +913,8 @@ class ModelsPage(QWidget):
             # 只做网络请求；结果经 _probe_done 信号回主线程弹窗（跨线程 GUI 会死锁）
             try:
                 import requests
-                models_url = url.replace("/chat/completions", "/models")
+                from wechat_bot import models_endpoint
+                models_url = models_endpoint(url)
                 resp = requests.get(models_url, headers={"Authorization": f"Bearer {key}"}, timeout=(5, 10))
                 if resp.status_code == 200:
                     names = [m.get("id", "") for m in resp.json().get("data", [])]
