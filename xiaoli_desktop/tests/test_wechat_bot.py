@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""wechat_bot 基础能力测试：群聊判定集中点、去重集合限界、微信连接重试可停止。"""
+"""wechat_bot 基础能力测试：群聊判定集中点、去重集合限界、微信连接重试可停止、
+模型端点拼接、图片发送前压缩。"""
 import os
 import sys
 import threading
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from wechat_bot import WeChatBot, is_group_chat
+from wechat_bot import WeChatBot, is_group_chat, models_endpoint
 
 
 class TestIsGroupChat(unittest.TestCase):
@@ -111,6 +113,79 @@ class TestConnectWx(unittest.TestCase):
             self.assertFalse(t.is_alive(), "停止信号应能终止重试循环")
         finally:
             wb.WeChat = orig
+
+
+class TestModelsEndpoint(unittest.TestCase):
+    def test_standard_url(self):
+        self.assertEqual(
+            models_endpoint("https://api.deepseek.com/v1/chat/completions"),
+            "https://api.deepseek.com/v1/models")
+
+    def test_no_chat_completions_unchanged(self):
+        # 自定义端点不含该子串 → 原样返回（保持旧行为）
+        self.assertEqual(models_endpoint("https://x.example/v1/chat"),
+                         "https://x.example/v1/chat")
+
+    def test_only_last_occurrence_replaced(self):
+        # rsplit 只替换最后一处（str.replace 会替换所有出现处——拼接错误）
+        self.assertEqual(
+            models_endpoint("https://x/chat/completions/chat/completions"),
+            "https://x/chat/completions/models")
+
+    def test_empty(self):
+        self.assertEqual(models_endpoint(""), "")
+        self.assertIsNone(models_endpoint(None))
+
+
+class TestImageCompress(unittest.TestCase):
+    def _make(self):
+        return WeChatBot.__new__(WeChatBot)
+
+    def test_large_screenshot_scaled_and_jpeg(self):
+        """RED 复现：4K 屏幕截图 base64 直发撑爆视觉 API 体积上限。
+        压缩后最长边 ≤ MAX_IMAGE_EDGE 且为 JPEG。"""
+        from PIL import Image
+        bot = self._make()
+        img = Image.new("RGB", (4000, 3000), "red")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "shot.jpg")
+            size = bot._save_screenshot_compressed(img, p)
+            self.assertGreater(size, 0, "压缩产物必须落盘")
+            with Image.open(p) as out:
+                self.assertLessEqual(max(out.size), bot.MAX_IMAGE_EDGE,
+                                     "最长边必须缩放到上限内")
+                self.assertEqual(out.format, "JPEG")
+
+    def test_small_image_kept_size(self):
+        from PIL import Image
+        bot = self._make()
+        img = Image.new("RGB", (800, 600), "blue")
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "small.jpg")
+            bot._save_screenshot_compressed(img, p)
+            with Image.open(p) as out:
+                self.assertEqual(out.size, (800, 600), "小图不应被放大")
+
+    def test_pil_failure_falls_back_png(self):
+        """PIL 不可用时退回原样保存（图片处理链路不中断）。"""
+        bot = self._make()
+
+        class FakeImage:
+            """无 convert/resize 的伪截图对象（模拟 PIL 缺失/异常场景）。"""
+
+            def convert(self, *a):
+                raise ImportError("no PIL")
+
+            def save(self, path, **kw):
+                with open(path, "wb") as f:
+                    f.write(b"png-fallback")
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "shot.jpg")
+            size = bot._save_screenshot_compressed(FakeImage(), p)
+            self.assertGreater(size, 0, "退回保存也必须落盘")
+            with open(p, "rb") as f:
+                self.assertEqual(f.read(), b"png-fallback")
 
 
 if __name__ == "__main__":

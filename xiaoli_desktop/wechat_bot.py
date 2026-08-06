@@ -15,6 +15,16 @@ from wxauto4 import WeChat
 from wxauto4.msgs.mtype import ImageMessage, FileMessage
 
 
+def models_endpoint(chat_url):
+    """由聊天端点推导模型列表端点：把末尾的 /chat/completions 换成 /models。
+    用 rsplit 只替换最后一处（str.replace 会替换所有出现处——自定义端点
+    URL 里同一子串出现多次时拼接错误）；不含该子串时原样返回（保持旧行为，
+    请求是否有效由调用方/API 决定）。"""
+    if not chat_url or "/chat/completions" not in chat_url:
+        return chat_url
+    return chat_url.rsplit("/chat/completions", 1)[0] + "/models"
+
+
 def is_group_chat(chat_name):
     """群聊判定（集中判定点）：按会话名启发式——wxauto4 的 SessionElement
     是 .pyd 编译模块，未暴露群聊标志属性，只能按名称猜测。
@@ -36,12 +46,26 @@ def strip_model_prefix(model):
 
 
 def estimate_tokens(text):
-    """粗略估算 token 数：统一按 1 字符 ≈ 1 token 保守估算。
+    """粗略估算 token 数：中英混合加权，整体偏保守上界。
 
-    混合内容取保守上界（宁可多估不超限）——请求超限会得到
-    API 400 "maximum context length"，低估反而更危险。
+    原实现 1 字符 = 1 token：对英文高估约 4 倍（实际 ~4 字符/token），
+    长英文文档被过度裁剪（100k 预算实际只用 ~25k，上下文利用率低）。
+    加权：CJK 0.8 token/字（实际 ~0.6，保守）、ASCII 0.3（实际 ~0.25）、
+    其余 0.6。混合场景仍略偏保守（宁可多估不超限——请求超限会得到
+    API 400 "maximum context length"，低估反而更危险）。
     """
-    return len(text) if text else 0
+    if not text:
+        return 0
+    cjk = ascii_n = other = 0
+    for ch in text:
+        o = ord(ch)
+        if 0x4E00 <= o <= 0x9FFF:
+            cjk += 1
+        elif o < 128:
+            ascii_n += 1
+        else:
+            other += 1
+    return int(cjk * 0.8 + ascii_n * 0.3 + other * 0.6) + 1
 
 
 def fit_messages_in_budget(messages, budget=100000, reserve=2000):
@@ -439,6 +463,31 @@ class WeChatBot:
             logger.error(f"视觉模型调用失败: {e}")
             return None
 
+    # 视觉模型输入最长边上限：屏幕截图（可能 4K 全窗口）base64 直发体积过大
+    MAX_IMAGE_EDGE = 2048
+
+    def _save_screenshot_compressed(self, image, path):
+        """缩放 + JPEG 压缩保存截图（pillow 已在依赖）。返回文件字节数。
+        最长边超 MAX_IMAGE_EDGE 时等比缩放到上限内；PIL 不可用/失败时
+        退回原样 PNG 保存（保证图片处理链路不因压缩失败中断）。"""
+        try:
+            from PIL import Image
+            img = image.convert("RGB")
+            w, h = img.size
+            longest = max(w, h)
+            if longest > self.MAX_IMAGE_EDGE:
+                scale = self.MAX_IMAGE_EDGE / longest
+                img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                                 Image.LANCZOS)
+            img.save(path, format="JPEG", quality=88, optimize=True)
+        except Exception as e:
+            logger.error(f"[处理] 图片压缩失败，退回原样保存: {e}")
+            try:
+                image.save(path, format="PNG")
+            except Exception as e2:
+                logger.error(f"[处理] 退回保存也失败: {e2}")
+        return os.path.getsize(path) if os.path.isfile(path) else 0
+
     def _process_image(self, chat_name, sender, msg_obj):
         """点击图片消息打开预览 → 截图 → 关预览 → 送视觉模型"""
         msg_class = type(msg_obj).__name__
@@ -488,10 +537,11 @@ class WeChatBot:
                 screenshot = pyautogui.screenshot(region=(wr.left, wr.top, wr.width(), wr.height()))
                 # 不要按 ESC——没有预览窗口，ESC 会关掉微信主窗口
 
-            # 5. 保存截图到临时文件
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-                screenshot.save(tmpfile.name, format='PNG')
+            # 5. 保存截图到临时文件（发送前压缩：屏幕截图可能是 4K 全窗口，
+            #    原样 base64 直发会撑爆视觉 API 的体积上限/浪费流量）
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
                 tmp_path = tmpfile.name
+            self._save_screenshot_compressed(screenshot, tmp_path)
             logger.debug(f"[处理] 截图已保存 ({os.path.getsize(tmp_path)} bytes)")
 
             # 6. 调用视觉模型
@@ -1010,7 +1060,7 @@ class WeChatBot:
             logger.error(f"发送失败: {e}")
 
     def fetch_models(self):
-        url = self.api_url.replace("/chat/completions", "/models")
+        url = models_endpoint(self.api_url)
         headers = {"Authorization": f"Bearer {self.api_key}"}
         try:
             resp = requests.get(url, headers=headers, timeout=10)
