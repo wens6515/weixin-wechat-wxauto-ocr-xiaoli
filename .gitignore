@@ -7,6 +7,7 @@ __pycache__/
 memory.json
 processed_ids.json
 bot.log
+bot.log.*   # 日志轮转产物（RotatingFileHandler: bot.log.1/.2）
 *.log
 
 # 配置（可能包含密钥，请勿提交；需要模板可另存 config.example.json）
