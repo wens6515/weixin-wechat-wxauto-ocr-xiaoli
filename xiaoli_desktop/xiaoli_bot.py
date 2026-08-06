@@ -679,12 +679,6 @@ class AgentBot(WeChatBot):
         # 任务消息全被当聊天处理（用户实测：发两次都当聊天）。
         return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
-    def _latest_received_file(self):
-        """微信下载目录里最近收到的文件（作为任务附件）"""
-        if not self.file_storage_path:
-            return None
-        return self._find_latest_file(self.file_storage_path)
-
     def _dispatch_and_notify(self, chat_name, sender, task_desc, attachment_paths=None, extra=None):
         """投递任务 → 微信告知"处理中" → 唤起天枢窗口。返回是否投递成功"""
         task_info = {
@@ -1016,8 +1010,14 @@ class AgentBot(WeChatBot):
                 logger.error(f"[等待指令] 异常 {chat_name}: {e}")
                 continue
 
-    def _handle_text(self, chat_name, sender, content, msg_id=None, attachment_provider=None):
-        """文本消息统一处理：任务判断 → 天枢投递（任务时才调用附件提供者取文件）或 普通聊天"""
+    def _handle_text(self, chat_name, sender, content, msg_id=None):
+        """文本消息统一处理：任务判断 → 天枢投递 或 普通聊天。
+
+        附件只由文件消息路径投递（_process_file_with_task /
+        _process_file_with_instruction，用户确实发了文件时才带）。
+        纯文字任务不带任何附件——历史缺陷：文本路径无条件找接收目录
+        "最新"文件，用户没发文件时把无关旧文件投给 agent 造成误判。
+        """
         is_group = is_group_chat(chat_name)
         if is_group:
             at_tag = f"@{self.nickname}"
@@ -1032,10 +1032,9 @@ class AgentBot(WeChatBot):
                 logger.info(f"[任务桥] 判定为任务: {cls['task'][:60]}")
                 self._add_history(chat_name, "user", f"[任务] {question}")
                 self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
-                attachment = attachment_provider() if attachment_provider else None
                 self._dispatch_and_notify(
                     chat_name, sender, cls["task"],
-                    attachment_paths=[attachment] if attachment else None,
+                    attachment_paths=None,
                     extra={"msg_id": msg_id, "raw_message": content},
                 )
                 return True
@@ -1156,10 +1155,10 @@ class AgentBot(WeChatBot):
                 if msg_key in self.recent_msg_ids:
                     continue
                 self._remember_recent(msg_key)
-                # 文本统一处理：任务判断（附最近接收文件）/ 普通聊天
+                # 文本统一处理：任务判断（纯文字任务不带附件——附件只由
+                # 文件消息路径投递）/ 普通聊天
                 latest_msg_id = getattr(latest, "id", None)
-                self._handle_text(chat_name, sender, content, latest_msg_id,
-                                  attachment_provider=self._latest_received_file)
+                self._handle_text(chat_name, sender, content, latest_msg_id)
                 self.last_reply_time = time.time()
                 return
         except Exception as e:
