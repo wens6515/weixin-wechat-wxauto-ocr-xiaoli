@@ -74,7 +74,12 @@ class EngineThread(threading.Thread):
     def _do_initialize(self):
         self._set_state("initializing")
         try:
-            self.bot = self._bot_factory()
+            # factory 可接受可选 stop_event 关键字（bot 连接微信时可被引擎
+            # 停止中断）；无参 factory（测试/旧调用方）保持兼容。
+            try:
+                self.bot = self._bot_factory(stop_event=self._stop_evt)
+            except TypeError:
+                self.bot = self._bot_factory()
             self._set_state("initialized")
         except Exception as e:
             self.error = f"初始化失败: {e}"

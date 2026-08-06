@@ -11,7 +11,7 @@
 import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil, uuid, struct
 import requests as req
 import pyautogui
-from wechat_bot import WeChatBot, Controller, load_config, logger
+from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat
 from wxauto4.msgs.mtype import ImageMessage, FileMessage, TimeMessage, SystemMessage
 
 if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
@@ -408,7 +408,7 @@ def has_active_tasks(tasks_dir, stale_after=7200):
             if not os.path.isfile(tj):
                 continue
             if os.path.isfile(os.path.join(task_dir, "result.json")):
-                continue  # 已完成待回传：仍算活跃（成果未发回微信前不恢复监听）
+                return True  # 已完成待回传：仍算活跃（成果未发回微信前不恢复监听）
             try:
                 with open(tj, "r", encoding="utf-8") as f:
                     info = json.load(f)
@@ -445,8 +445,9 @@ def should_resume_listen(has_active, was_active, end_time, now, hold):
 _SINGLE_INSTANCE_MUTEX = None
 
 
-def acquire_single_instance(name="XiaoLiBot_SingleInstance"):
-    """Windows 会话级互斥体：检测是否已有 bot 实例在运行。
+def acquire_single_instance(name="XiaoLi_SingleInstance"):
+    """Windows 会话级互斥体：检测是否已有小漓实例在运行（GUI 与 CLI 共用
+    同一互斥体名——否则双开互不排斥，两个进程会同时抢微信窗口/发消息）。
     返回 True = 获得唯一实例；False = 已有实例，应退出。
     进程退出（含被杀）时内核自动释放句柄，无残留锁问题"""
     global _SINGLE_INSTANCE_MUTEX
@@ -481,8 +482,12 @@ def release_single_instance():
 class AgentBot(WeChatBot):
     """小漓合并版：继承原 WeChatBot（聊天/图片/文件识别），叠加天枢任务桥"""
 
-    def __init__(self, cfg):
-        super().__init__(cfg)
+    def __init__(self, cfg, stop_event=None, max_connect_retries=None):
+        """stop_event/max_connect_retries：透传给 WeChatBot（GUI 引擎停止
+        可中断微信连接重试；重试超限抛异常 → 引擎 error 状态）。CLI 模式
+        不传：保留无限重试（用户开着 bot 等微信启动）。"""
+        super().__init__(cfg, stop_event=stop_event,
+                         max_connect_retries=max_connect_retries)
         self.task_enabled = cfg.get("task_enabled", True)
         self.tasks_dir = cfg.get("tasks_dir", r"D:\工作间\wxauto")
         self.tianshu_window_title = cfg.get("tianshu_window_title", "")
@@ -641,7 +646,7 @@ class AgentBot(WeChatBot):
             "msg_id": (extra or {}).get("msg_id"),
             "sender": sender,
             "chat_name": chat_name,
-            "is_group": bool("群" in chat_name or "集团" in chat_name),
+            "is_group": bool(is_group_chat(chat_name)),
             "raw_message": (extra or {}).get("raw_message", ""),
             "task": task_desc,
         }
@@ -846,7 +851,7 @@ class AgentBot(WeChatBot):
 
     def _process_file_with_instruction(self, chat_name, sender, filepath, filename, text_content, user_instruction):
         """根据用户指令处理文件：LLM 判断指令是否任务 → 天枢投递 或 原文件识别（附带用户指令）"""
-        is_group = "群" in chat_name or "集团" in chat_name
+        is_group = is_group_chat(chat_name)
         instruction = user_instruction
         if is_group:
             at_tag = f"@{self.nickname}"
@@ -1050,7 +1055,7 @@ class AgentBot(WeChatBot):
                     msg_key = f"{chat_name}_{s}_{c}"
                     if msg_key in self.recent_msg_ids:
                         continue
-                    self.recent_msg_ids.add(msg_key)
+                    self._remember_recent(msg_key)
                     pending = self._pending_files.pop(chat_name)
                     got = self._acquire_received_file(msg=pending.get("msg"))
                     if got:
@@ -1068,7 +1073,7 @@ class AgentBot(WeChatBot):
 
     def _handle_text(self, chat_name, sender, content, msg_id=None, attachment_provider=None):
         """文本消息统一处理：任务判断 → 天枢投递（任务时才调用附件提供者取文件）或 普通聊天"""
-        is_group = "群" in chat_name or "集团" in chat_name
+        is_group = is_group_chat(chat_name)
         if is_group:
             at_tag = f"@{self.nickname}"
             content = content.replace(at_tag, "").strip()
@@ -1167,7 +1172,7 @@ class AgentBot(WeChatBot):
                                     if next_content.strip():
                                         user_instruction = next_content.strip()
                                         msg_key = f"{chat_name}_{next_sender}_{next_content}"
-                                        self.recent_msg_ids.add(msg_key)
+                                        self._remember_recent(msg_key)
                                         break
 
                         # 文件下载目录
@@ -1205,7 +1210,7 @@ class AgentBot(WeChatBot):
                 msg_key = f"{chat_name}_{sender}_{content}"
                 if msg_key in self.recent_msg_ids:
                     continue
-                self.recent_msg_ids.add(msg_key)
+                self._remember_recent(msg_key)
                 # 文本统一处理：任务判断（附最近接收文件）/ 普通聊天
                 latest_msg_id = getattr(latest, "id", None)
                 self._handle_text(chat_name, sender, content, latest_msg_id,
