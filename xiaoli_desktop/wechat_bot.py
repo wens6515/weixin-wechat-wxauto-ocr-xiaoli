@@ -13,6 +13,7 @@ import tempfile
 from collections import deque
 from wxauto4 import WeChat
 from wxauto4.msgs.mtype import ImageMessage, FileMessage
+from xiaoli_app.config_store import AI_DEFAULTS
 
 
 def models_endpoint(chat_url):
@@ -199,12 +200,14 @@ class WeChatBot:
         self.vision_model = strip_model_prefix(cfg["vision_model"])
         self.vision_temp = cfg.get("vision_temp", 0.7)
         self.vision_max_tokens = cfg.get("vision_max_tokens", 10000)
-        self.vision_prompt = cfg["vision_prompt"]
-        self.system_prompt = cfg["system_prompt"]
-        self.max_history = cfg["max_history"]
-        self.cooldown = cfg["cooldown"]
-        self.api_retry = cfg["api_retry"]
-        self.api_timeout = cfg["api_timeout"]
+        # cfg.get 兜底：config_store 统一补默认（AI_DEFAULTS），此处防御
+        # 任何调用方缺键（历史缺陷：新结构 config 缺 vision_prompt → KeyError）
+        self.vision_prompt = cfg.get("vision_prompt", AI_DEFAULTS["vision_prompt"])
+        self.system_prompt = cfg.get("system_prompt", AI_DEFAULTS["system_prompt"])
+        self.max_history = cfg.get("max_history", AI_DEFAULTS["max_history"])
+        self.cooldown = cfg.get("cooldown", AI_DEFAULTS["cooldown"])
+        self.api_retry = cfg.get("api_retry", AI_DEFAULTS["api_retry"])
+        self.api_timeout = cfg.get("api_timeout", AI_DEFAULTS["api_timeout"])
         self.paused = cfg.get("start_paused", True)
         self.memory_file = cfg.get("memory_file", "memory.json")
         # 文件处理配置
