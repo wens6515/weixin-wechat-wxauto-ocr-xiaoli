@@ -36,16 +36,24 @@ TASK_DEFAULTS = {
 
 
 def load_merged_config(path="config.json"):
-    """wechat_bot.load_config + 补齐 task_* 默认值；旧 config 自动补默认并写回"""
-    cfg = load_config(path)
+    """CLI 配置入口：委托 config_store（迁移/投影/写回——与 GUI 同一事实源），
+    再补齐 task_* 默认。历史缺陷：CLI 走 wechat_bot.load_config、GUI 走
+    config_store.load_config_store，两套默认值并存（tasks_dir 默认都不一致），
+    字段补全逻辑漂移。统一后 CLI 也支持角色卡/多 provider。
+    """
+    from xiaoli_app import config_store as _cs
+    base = os.path.dirname(os.path.abspath(path)) or "."
+    cfg = _cs.load_config_store(path, os.path.join(base, "cards"))
     changed = False
     for k, v in TASK_DEFAULTS.items():
         if k not in cfg:
             cfg[k] = v
             changed = True
     if changed:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=4)
+        try:
+            _cs.save_config(cfg, path)
+        except OSError as e:
+            logger.error(f"[配置] 写回失败: {e}")
         logger.info("[配置] 已补齐 task_* 配置项")
     return cfg
 
@@ -909,106 +917,6 @@ class AgentBot(WeChatBot):
         except Exception as e:
             logger.error(f"[回传] 持久化成果登记失败: {e}")
 
-    def _find_user_file(self, directory):
-        """与 _find_latest_file 相同的目录扫描，但排除 bot 自己回传的成果文件
-        （记录在 _sent_back_files：路径+mtime 匹配即跳过）。返回用户发送的最新文件或 None"""
-        latest_path = None
-        latest_mtime = 0
-        skip_patterns = ('.tmp', '.crdownload', '~$')
-        stems = self._sent_back_stems
-        try:
-            for root, dirs, files in os.walk(directory):
-                for fname in files:
-                    if any(fname.startswith(p) or fname.endswith(p) for p in skip_patterns):
-                        continue
-                    full_path = os.path.join(root, fname)
-                    try:
-                        mtime = os.path.getmtime(full_path)
-                    except OSError:
-                        continue
-                    # 排除回传成果：同一路径且 mtime 未变 → 是 bot 自己发出去的，不是用户新发的
-                    if full_path in self._sent_back_files and self._sent_back_files[full_path] == mtime:
-                        continue
-                    # 排除微信写入接收目录的成果副本：文件名主干前缀匹配登记成果
-                    #（含 (1)(2) 重名后缀变体与 '-美化版' 等扩展变体），且创建时刻在发送时刻附近
-                    fstem = re.sub(r"\(\d+\)$", "", os.path.splitext(fname)[0])
-                    hit_stem = None
-                    for s in stems:
-                        if fstem.startswith(s) or s in fstem:
-                            hit_stem = s
-                            break
-                    if hit_stem:
-                        try:
-                            ctime = os.path.getctime(full_path)
-                        except OSError:
-                            ctime = 0
-                        if abs(ctime - stems[hit_stem]) <= 300:
-                            logger.debug(f"[文件] 排除成果副本: {fname} (stem={hit_stem})")
-                            continue
-                    if mtime > latest_mtime:
-                        latest_mtime = mtime
-                        latest_path = full_path
-        except Exception as e:
-            logger.error(f"[文件] 遍历目录失败: {e}")
-            return None
-        return latest_path
-
-    def _extract_file_display_name(self, msg):
-        """从 FileMessage 提取显示文件名。
-        wxauto4 的 content 格式：'文件\\n<文件名>\\n[<大小>\\n]微信电脑版'
-        （实测：'文件\\n养生规划表.html\\n微信电脑版' / repattern 可解析）
-        返回文件名或 None"""
-        try:
-            content = getattr(msg, "content", "") or ""
-            m = re.search(r"^文件\n([^\n]+)", content, flags=re.M)
-            if m:
-                return m.group(1).strip()
-            # 兜底：按 repattern 解析
-            rep = getattr(msg, "repattern", None)
-            if rep:
-                m2 = re.search(rep, content)
-                if m2 and m2.group(1):
-                    return m2.group(1).strip()
-        except Exception as e:
-            logger.error(f"[文件] 提取文件名失败: {e}")
-        return None
-
-    def _find_file_by_display_name(self, display_name):
-        """按消息中的显示文件名在接收目录精确定位（微信 4.0 下载命名
-        '<hash>_<msgid>_m_<原名>'，目录文件名包含原名；bot 回传的成果副本
-        是干净原名，不同名时天然不命中）。多个候选（重名 (1)(2)…）取时间戳最新。
-        返回路径或 None"""
-        if not display_name:
-            return None
-        file_dir = self.file_storage_path
-        if not file_dir or not os.path.isdir(file_dir):
-            return None
-        dstem = re.sub(r"\(\d+\)$", "", os.path.splitext(display_name)[0])
-        best = None
-        best_key = (-1, -1)  # (ctime, 微信重名编号)：ctime 相同（微信保留源时间戳）时取编号最大 = 最近下载
-        try:
-            for root, dirs, files in os.walk(file_dir):
-                for fname in files:
-                    fstem = re.sub(r"\(\d+\)$", "", os.path.splitext(fname)[0])
-                    if dstem not in fstem:
-                        continue
-                    full = os.path.join(root, fname)
-                    try:
-                        ts = os.path.getctime(full)
-                    except OSError:
-                        continue
-                    m_dup = re.search(r"\((\d+)\)$", os.path.splitext(fname)[0])
-                    dup = int(m_dup.group(1)) if m_dup else 0
-                    key = (ts, dup)
-                    if key > best_key:
-                        best_key = key
-                        best = full
-        except Exception as e:
-            logger.error(f"[文件] 按文件名定位失败: {e}")
-            return None
-        if best:
-            logger.info(f"[文件] 按消息文件名定位: {os.path.basename(best)}")
-        return best
 
     def _acquire_received_file(self, timeout=3, msg=None):
         """获取用户本次接收的文件：优先按文件消息中的文件名精确定位
@@ -1226,141 +1134,37 @@ class AgentBot(WeChatBot):
 # =====================================================================
 
 class TianshuController(Controller):
-    def _listen(self):
-        while True:
-            try:
-                cmd = input().strip().lower()
-                if not cmd:
-                    continue
-                if cmd == "help":
-                    print("""
-可用命令：
-  pause                     - 暂停自动回复
-  resume                    - 恢复自动回复
-  model                     - 交互式选择聊天模型
-  model <名称>              - 直接切换聊天模型
-  vision-model              - 交互式选择视觉模型
-  vision-model <名称>       - 直接切换视觉模型
-  chat-temp <值>            - 设置聊天模型温度 (0~2)
-  chat-top-p <值>           - 设置聊天模型 top_p (0~1)
-  vision-temp <值>          - 设置视觉模型温度 (0~2)
-  tianshu-window            - 重新选择天枢 CLI 窗口
-  task-status               - 查看任务流转状态（等待/完成/归档）
-  clear                     - 清空全部对话历史
-  clear <聊天ID>            - 清空指定聊天的历史
-  del <聊天ID> <序号1> [序号2] [序号3-5] - 删除指定聊天中的消息
-  memory <聊天ID>           - 查看指定聊天的历史消息（带序号）
-  status                    - 查看当前状态（含模型信息、温度、top_p）
-  quit                      - 退出程序
-  help                      - 显示本帮助
-""")
-                elif cmd == "pause":
-                    self.bot.paused = True
-                    logger.info("⏸️  已暂停自动回复")
-                elif cmd == "resume":
-                    self.bot.paused = False
-                    logger.info("▶️  已恢复自动回复")
-                elif cmd == "model":
-                    self._select_model("chat")
-                elif cmd.startswith("model "):
-                    new_model = cmd.split(" ", 1)[1].strip()
-                    with self.bot._model_lock:
-                        self.bot.chat_model = new_model
-                    logger.info(f"🔄 聊天模型已切换为：{new_model}")
-                elif cmd == "vision-model":
-                    self._select_model("vision")
-                elif cmd.startswith("vision-model "):
-                    new_vision = cmd.split(" ", 1)[1].strip()
-                    with self.bot._model_lock:
-                        self.bot.vision_model = new_vision
-                    logger.info(f"🔄 视觉模型已切换为：{new_vision}")
-                elif cmd.startswith("chat-temp "):
-                    try:
-                        val = float(cmd.split(" ", 1)[1])
-                        if 0 <= val <= 2:
-                            self.bot.set_chat_temperature(val)
-                        else:
-                            logger.warning("温度值应在 0~2 之间")
-                    except ValueError:
-                        logger.warning("请输入有效的数字")
-                elif cmd.startswith("chat-top-p "):
-                    try:
-                        val = float(cmd.split(" ", 1)[1])
-                        if 0 <= val <= 1:
-                            self.bot.set_chat_top_p(val)
-                        else:
-                            logger.warning("top_p 值应在 0~1 之间")
-                    except ValueError:
-                        logger.warning("请输入有效的数字")
-                elif cmd.startswith("vision-temp "):
-                    try:
-                        val = float(cmd.split(" ", 1)[1])
-                        if 0 <= val <= 2:
-                            self.bot.set_vision_temperature(val)
-                        else:
-                            logger.warning("温度值应在 0~2 之间")
-                    except ValueError:
-                        logger.warning("请输入有效的数字")
-                elif cmd == "tianshu-window":
-                    was_paused = self.bot.paused
-                    self.bot.paused = True
-                    logger.info("⏸️  已暂停，正在列出窗口...")
-                    title = self.bot._select_window()
-                    if title:
-                        logger.info(f"🔄 天枢窗口已切换为：{title}")
-                    else:
-                        logger.info("已取消")
-                    self.bot.paused = was_paused
-                    if not self.bot.paused:
-                        logger.info("▶️  已自动恢复回复")
-                elif cmd == "task-status":
-                    self._show_task_status()
-                elif cmd == "clear":
-                    self.bot.clear_history()
-                elif cmd.startswith("clear "):
-                    target = cmd.split(" ", 1)[1].strip()
-                    self.bot.clear_history(target)
-                elif cmd.startswith("del "):
-                    parts = cmd.split()
-                    if len(parts) < 3:
-                        logger.info("用法: del <聊天ID> <序号1> [序号2] ... 或 del <聊天ID> <起始序号-结束序号>")
-                        continue
-                    chat_id = parts[1]
-                    indices = []
-                    for part in parts[2:]:
-                        if "-" in part:
-                            try:
-                                start, end = map(int, part.split("-"))
-                                if start > end:
-                                    start, end = end, start
-                                indices.extend(range(start, end + 1))
-                            except ValueError:
-                                logger.warning(f"无效的范围格式: {part}")
-                        else:
-                            try:
-                                indices.append(int(part))
-                            except ValueError:
-                                logger.warning(f"无效的序号: {part}")
-                    if not indices:
-                        continue
-                    print(f"即将从聊天 '{chat_id}' 中删除序号: {sorted(set(indices))}")
-                    confirm = input("确认删除？(y/n): ").strip().lower()
-                    if confirm == "y":
-                        self.bot.delete_messages(chat_id, indices)
-                    else:
-                        logger.info("已取消删除")
-                elif cmd.startswith("memory "):
-                    target = cmd.split(" ", 1)[1].strip()
-                    self._show_memory(target)
-                elif cmd == "status":
-                    self._show_status()
-                elif cmd == "quit":
-                    logger.info("👋 程序退出")
-                    os._exit(0)
-                else:
-                    logger.info(f"❌ 未知命令: {cmd}")
-            except (EOFError, KeyboardInterrupt):
-                break
+    HELP = {
+        **Controller.HELP,
+        "tianshu-window": "重新选择天枢 CLI 窗口",
+        "task-status": "查看任务流转状态（等待/完成/归档）",
+    }
+
+    def _register_commands(self):
+        """继承基类全部命令，扩展天枢任务桥命令（历史缺陷：整段复制
+        Controller._listen 的 if/elif 链，新增命令全靠复制粘贴）。"""
+        super()._register_commands()
+        self._commands.update({
+            "tianshu-window": self._cmd_tianshu_window,
+            "task-status": self._cmd_task_status,
+        })
+
+    def _cmd_tianshu_window(self, cmd):
+        was_paused = self.bot.paused
+        self.bot.paused = True
+        logger.info("⏸️  已暂停，正在列出窗口...")
+        title = self.bot._select_window()
+        if title:
+            logger.info(f"🔄 天枢窗口已切换为：{title}")
+        else:
+            logger.info("已取消")
+        self.bot.paused = was_paused
+        if not self.bot.paused:
+            logger.info("▶️  已自动恢复回复")
+
+    def _cmd_task_status(self, cmd):
+        self._show_task_status()
+
 
     def _show_task_status(self):
         tasks_dir = self.bot.tasks_dir
@@ -1420,9 +1224,13 @@ def run_self_test():
         with open(test_cfg, "w", encoding="utf-8") as f:
             json.dump({"bot_nickname": "x"}, f)
         cfg = load_merged_config(test_cfg)
+        from xiaoli_app import config_store as _cs
         check("T1 旧 config 补齐 task_* 默认", all(k in cfg for k in TASK_DEFAULTS), str(cfg))
-        check("T1 默认 tasks_dir", cfg["tasks_dir"] == r"D:\工作间\wxauto", str(cfg.get("tasks_dir")))
+        check("T1 默认 tasks_dir 便携默认（与 GUI 同一事实源）",
+              cfg["tasks_dir"] == _cs.default_tasks_dir(), str(cfg.get("tasks_dir")))
         check("T1 默认窗口标题为空", cfg["tianshu_window_title"] == "", str(cfg.get("tianshu_window_title")))
+        check("T1 迁移出 providers + 活跃卡", bool(cfg.get("providers")) and bool(cfg.get("active_card_id")),
+              str({k: cfg.get(k) for k in ("providers", "active_card_id")}))
 
         # ---- T2: task_id ----
         tid = generate_task_id()
@@ -1788,6 +1596,7 @@ if __name__ == "__main__":
             bot._select_window()
         ctrl = TianshuController(bot)
         ctrl.start()
-        bot.run()
+        # quit 命令 → stop_event → bot.run 优雅退出（节流窗口内记忆 flush 落盘）
+        bot.run(stop_event=ctrl.stop_event)
     else:
         print("用法: python xiaoli_bot.py --test | --run")

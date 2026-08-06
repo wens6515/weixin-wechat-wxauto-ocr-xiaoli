@@ -183,6 +183,10 @@ class WeChatBot:
         self.file_max_tokens = cfg.get("file_max_tokens", 10000)
         self.file_prompt = cfg.get("file_prompt", self.system_prompt)
         self.file_storage_path = cfg.get("file_storage_path", "")
+        # 成果排除登记表（_find_user_file 目录扫描时排除 bot 回传的成果文件）：
+        # 基础 bot 默认空表（不过滤）；AgentBot（任务桥）在 __init__ 中初始化并维护
+        self._sent_back_files = {}
+        self._sent_back_stems = {}
         # 图片消息点击偏移校准（竖图点击偏位时手动校正，格式 [dx, dy]，存 config.json）
         self.image_click_offset = cfg.get("image_click_offset", [0, 0])
 
@@ -190,6 +194,9 @@ class WeChatBot:
 
         self.memory_db = {}
         self._load_memory()
+        # 节流写盘状态：高频对话下避免每条消息全量 dump memory.json
+        self._memory_dirty = False
+        self._last_memory_save = 0.0
         self.last_reply_time = 0
         self.recent_msg_ids = set()
         self.wx = None
@@ -342,7 +349,22 @@ class WeChatBot:
         })
         if len(hist) > self.max_history:
             self.memory_db[chat_id] = hist[-self.max_history:]
-        self._save_memory()
+        self._schedule_save_memory()
+
+    def _schedule_save_memory(self):
+        """节流写盘：距上次写盘 ≥1s 立即写，否则只标记脏（下次到期合并写）。
+        高频对话下避免每条消息全量 dump memory.json（丢失窗口 ≤1s，可接受）。"""
+        self._memory_dirty = True
+        now = time.time()
+        if now - getattr(self, "_last_memory_save", 0.0) >= 1.0:
+            self._flush_memory()
+
+    def _flush_memory(self):
+        """有脏数据则写盘。程序退出/引擎停止前调用，保证最近消息不丢。"""
+        if getattr(self, "_memory_dirty", False):
+            self._memory_dirty = False
+            self._last_memory_save = time.time()
+            self._save_memory()
 
     def clear_history(self, chat_id=None):
         if chat_id:
@@ -696,6 +718,53 @@ class WeChatBot:
                             latest_path = full_path
                     except OSError:
                         continue
+        except Exception as e:
+            logger.error(f"[文件] 遍历目录失败: {e}")
+            return None
+        return latest_path
+
+    def _find_user_file(self, directory):
+        """目录扫描找用户发送的最新文件，但排除 bot 自己回传的成果文件：
+        - _sent_back_files（路径 + mtime 匹配即跳过）
+        - _sent_back_stems（文件名主干前缀匹配 + ctime 落在发送时刻附近，
+          覆盖微信写入接收目录的成果副本，如 '(1)' 重名变体、'-美化版' 扩展变体）
+        两个登记表由 AgentBot（任务桥）维护；基础 bot 默认空表 = 不过滤。"""
+        latest_path = None
+        latest_mtime = 0
+        skip_patterns = ('.tmp', '.crdownload', '~$')
+        stems = self._sent_back_stems
+        try:
+            for root, dirs, files in os.walk(directory):
+                for fname in files:
+                    if any(fname.startswith(p) or fname.endswith(p) for p in skip_patterns):
+                        continue
+                    full_path = os.path.join(root, fname)
+                    try:
+                        mtime = os.path.getmtime(full_path)
+                    except OSError:
+                        continue
+                    # 排除回传成果：同一路径且 mtime 未变 → 是 bot 自己发出去的，不是用户新发的
+                    if full_path in self._sent_back_files and self._sent_back_files[full_path] == mtime:
+                        continue
+                    # 排除微信写入接收目录的成果副本：文件名主干前缀匹配登记成果
+                    #（含 (1)(2) 重名后缀变体与 '-美化版' 等扩展变体），且创建时刻在发送时刻附近
+                    fstem = re.sub(r"\(\d+\)$", "", os.path.splitext(fname)[0])
+                    hit_stem = None
+                    for s in stems:
+                        if fstem.startswith(s) or s in fstem:
+                            hit_stem = s
+                            break
+                    if hit_stem:
+                        try:
+                            ctime = os.path.getctime(full_path)
+                        except OSError:
+                            ctime = 0
+                        if abs(ctime - stems[hit_stem]) <= 300:
+                            logger.debug(f"[文件] 排除成果副本: {fname} (stem={hit_stem})")
+                            continue
+                    if mtime > latest_mtime:
+                        latest_mtime = mtime
+                        latest_path = full_path
         except Exception as e:
             logger.error(f"[文件] 遍历目录失败: {e}")
             return None
@@ -1098,6 +1167,7 @@ class WeChatBot:
         while True:
             if stop_event is not None and stop_event.is_set():
                 logger.info("🛑 引擎已停止")
+                self._flush_memory()  # 退出前落盘节流窗口内的记忆
                 return
             try:
                 self.process_new_messages()
@@ -1108,14 +1178,61 @@ class WeChatBot:
             while remain > 1e-9:
                 if stop_event is not None and stop_event.is_set():
                     logger.info("🛑 引擎已停止")
+                    self._flush_memory()
                     return
                 time.sleep(min(0.1, remain))
                 remain -= 0.1
 
 
 class Controller:
+    """命令行控制器：命令注册表分发（子类可扩展命令）。
+
+    设计：命令首词 → handler（接收完整命令串含参数）。新增命令 = 注册
+    dict 加一项 + 实现 handler，不再复制整段 if/elif 链（历史：Tianshu
+    Controller 复制 _listen 150 行只为了加两个命令）。
+    quit 语义：置 stop_event + flush 记忆 → bot.run(stop_event) 退出 →
+    主线程正常收尾（不再 os._exit 硬退，避免丢节流窗口内的记忆）。"""
+
+    # 命令名 → 一行说明（help 命令展示；子类合并扩展）
+    HELP = {
+        "pause": "暂停自动回复",
+        "resume": "恢复自动回复",
+        "model": "切换聊天模型（model 交互选择 / model <名称> 直接切换并持久化）",
+        "vision-model": "切换视觉模型（交互选择 / <名称> 直接切换并持久化）",
+        "chat-temp": "设置聊天模型温度 (0~2)",
+        "chat-top-p": "设置聊天模型 top_p (0~1)",
+        "vision-temp": "设置视觉模型温度 (0~2)",
+        "clear": "清空对话历史（全部 / clear <聊天ID>）",
+        "del": "删除聊天中的消息：del <聊天ID> <序号1> [序号2] [3-5]",
+        "memory": "查看聊天历史消息（带序号）",
+        "status": "查看当前状态（模型信息、温度、top_p）",
+        "quit": "退出程序",
+        "help": "显示本帮助",
+    }
+
     def __init__(self, bot):
         self.bot = bot
+        self.stop_event = threading.Event()  # quit 置位 → bot.run 退出（优雅收尾）
+        self._commands = {}
+        self._register_commands()
+
+    def _register_commands(self):
+        """注册命令处理器（key = 命令首词，handler 接收完整命令串）。"""
+        self._commands.update({
+            "help": self._cmd_help,
+            "pause": self._cmd_pause,
+            "resume": self._cmd_resume,
+            "model": self._cmd_model,
+            "vision-model": self._cmd_vision_model,
+            "chat-temp": self._cmd_chat_temp,
+            "chat-top-p": self._cmd_chat_top_p,
+            "vision-temp": self._cmd_vision_temp,
+            "clear": self._cmd_clear,
+            "del": self._cmd_del,
+            "memory": self._cmd_memory,
+            "status": self._cmd_status,
+            "quit": self._cmd_quit,
+        })
 
     def start(self):
         threading.Thread(target=self._listen, daemon=True).start()
@@ -1126,119 +1243,146 @@ class Controller:
                 cmd = input().strip().lower()
                 if not cmd:
                     continue
-                if cmd == "help":
-                    print("""
-可用命令：
-  pause                     - 暂停自动回复
-  resume                    - 恢复自动回复
-  model                     - 交互式选择聊天模型
-  model <名称>              - 直接切换聊天模型
-  vision-model              - 交互式选择视觉模型
-  vision-model <名称>       - 直接切换视觉模型
-  chat-temp <值>            - 设置聊天模型温度 (0~2)
-  chat-top-p <值>           - 设置聊天模型 top_p (0~1)
-  vision-temp <值>          - 设置视觉模型温度 (0~2)
-  clear                     - 清空全部对话历史
-  clear <聊天ID>            - 清空指定聊天的历史
-  del <聊天ID> <序号1> [序号2] [序号3-5] - 删除指定聊天中的消息
-  memory <聊天ID>           - 查看指定聊天的历史消息（带序号）
-  status                    - 查看当前状态（含模型信息、温度、top_p）
-  quit                      - 退出程序
-  help                      - 显示本帮助
-""")
-                elif cmd == "pause":
-                    self.bot.paused = True
-                    logger.info("⏸️  已暂停自动回复")
-                elif cmd == "resume":
-                    self.bot.paused = False
-                    logger.info("▶️  已恢复自动回复")
-                elif cmd == "model":
-                    self._select_model("chat")
-                elif cmd.startswith("model "):
-                    new_model = cmd.split(" ", 1)[1].strip()
-                    with self.bot._model_lock:
-                        self.bot.chat_model = new_model
-                    logger.info(f"🔄 聊天模型已切换为：{new_model}")
-                elif cmd == "vision-model":
-                    self._select_model("vision")
-                elif cmd.startswith("vision-model "):
-                    new_vision = cmd.split(" ", 1)[1].strip()
-                    with self.bot._model_lock:
-                        self.bot.vision_model = new_vision
-                    logger.info(f"🔄 视觉模型已切换为：{new_vision}")
-                elif cmd.startswith("chat-temp "):
-                    try:
-                        val = float(cmd.split(" ", 1)[1])
-                        if 0 <= val <= 2:
-                            self.bot.set_chat_temperature(val)
-                        else:
-                            logger.warning("温度值应在 0~2 之间")
-                    except ValueError:
-                        logger.warning("请输入有效的数字")
-                elif cmd.startswith("chat-top-p "):
-                    try:
-                        val = float(cmd.split(" ", 1)[1])
-                        if 0 <= val <= 1:
-                            self.bot.set_chat_top_p(val)
-                        else:
-                            logger.warning("top_p 值应在 0~1 之间")
-                    except ValueError:
-                        logger.warning("请输入有效的数字")
-                elif cmd.startswith("vision-temp "):
-                    try:
-                        val = float(cmd.split(" ", 1)[1])
-                        if 0 <= val <= 2:
-                            self.bot.set_vision_temperature(val)
-                        else:
-                            logger.warning("温度值应在 0~2 之间")
-                    except ValueError:
-                        logger.warning("请输入有效的数字")
-                elif cmd == "clear":
-                    self.bot.clear_history()
-                elif cmd.startswith("clear "):
-                    target = cmd.split(" ", 1)[1].strip()
-                    self.bot.clear_history(target)
-                elif cmd.startswith("del "):
-                    parts = cmd.split()
-                    if len(parts) < 3:
-                        logger.info("用法: del <聊天ID> <序号1> [序号2] ... 或 del <聊天ID> <起始序号-结束序号>")
-                        continue
-                    chat_id = parts[1]
-                    indices = []
-                    for part in parts[2:]:
-                        if '-' in part:
-                            try:
-                                start, end = map(int, part.split('-'))
-                                if start > end:
-                                    start, end = end, start
-                                indices.extend(range(start, end+1))
-                            except ValueError:
-                                logger.warning(f"无效的范围格式: {part}")
-                        else:
-                            try:
-                                indices.append(int(part))
-                            except ValueError:
-                                logger.warning(f"无效的序号: {part}")
-                    if not indices:
-                        continue
-                    print(f"即将从聊天 '{chat_id}' 中删除序号: {sorted(set(indices))}")
-                    confirm = input("确认删除？(y/n): ").strip().lower()
-                    if confirm == 'y':
-                        self.bot.delete_messages(chat_id, indices)
-                    else:
-                        logger.info("已取消删除")
-                elif cmd.startswith("memory "):
-                    target = cmd.split(" ", 1)[1].strip()
-                    self._show_memory(target)
-                elif cmd == "status":
-                    self._show_status()
-                elif cmd == "quit":
-                    logger.info("👋 程序退出")
-                    os._exit(0)
-                else:
+                name = cmd.split(" ", 1)[0]
+                handler = self._commands.get(name)
+                if handler is None:
                     logger.info(f"❌ 未知命令: {cmd}")
+                    continue
+                handler(cmd)
             except (EOFError, KeyboardInterrupt):
                 break
+
+    # ---------- 命令处理器 ----------
+
+    def _cmd_help(self, cmd):
+        lines = ["可用命令："]
+        for name, handler in self._commands.items():
+            lines.append(f"  {name:<12} - {self.HELP.get(name, '')}")
+        print("\n".join(lines))
+
+    def _cmd_pause(self, cmd):
+        self.bot.paused = True
+        logger.info("⏸️  已暂停自动回复")
+
+    def _cmd_resume(self, cmd):
+        self.bot.paused = False
+        logger.info("▶️  已恢复自动回复")
+
+    def _cmd_model(self, cmd):
+        rest = cmd[len("model"):].strip()
+        if not rest:
+            self._select_model("chat")
+            return
+        with self.bot._model_lock:
+            self.bot.chat_model = rest
+        logger.info(f"🔄 聊天模型已切换为：{rest}")
+        self._persist_model_setting("chat_model", rest)
+
+    def _cmd_vision_model(self, cmd):
+        rest = cmd[len("vision-model"):].strip()
+        if not rest:
+            self._select_model("vision")
+            return
+        with self.bot._model_lock:
+            self.bot.vision_model = rest
+        logger.info(f"🔄 视觉模型已切换为：{rest}")
+        self._persist_model_setting("vision_model", rest)
+
+    def _persist_model_setting(self, key, value):
+        """CLI 切模型持久化：写回 config.json + 活跃角色卡（GUI 模式下
+        投影字段以卡为准，写卡才能跨重启生效）。失败仅告警不中断。"""
+        try:
+            with open("config.json", "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg[key] = value
+            with open("config.json", "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=4)
+            try:
+                from xiaoli_app import card_store
+                cid = cfg.get("active_card_id")
+                if cid:
+                    cards_dir = os.path.join(
+                        os.path.dirname(os.path.abspath("config.json")), "cards")
+                    card = card_store.get_card(cards_dir, cid)
+                    if card is not None:
+                        card[key] = value
+                        card_store.save_card(cards_dir, card)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"保存配置失败: {e}")
+
+    def _cmd_chat_temp(self, cmd):
+        self._set_numeric(cmd, "chat-temp", 0, 2, "温度", self.bot.set_chat_temperature)
+
+    def _cmd_chat_top_p(self, cmd):
+        self._set_numeric(cmd, "chat-top-p", 0, 1, "top_p", self.bot.set_chat_top_p)
+
+    def _cmd_vision_temp(self, cmd):
+        self._set_numeric(cmd, "vision-temp", 0, 2, "温度", self.bot.set_vision_temperature)
+
+    def _set_numeric(self, cmd, name, lo, hi, label, setter):
+        rest = cmd[len(name):].strip()
+        if not rest:
+            logger.warning(f"用法: {name} <值>（{lo}~{hi}）")
+            return
+        try:
+            val = float(rest)
+            if lo <= val <= hi:
+                setter(val)
+            else:
+                logger.warning(f"{label}值应在 {lo}~{hi} 之间")
+        except ValueError:
+            logger.warning("请输入有效的数字")
+
+    def _cmd_clear(self, cmd):
+        rest = cmd[len("clear"):].strip()
+        if rest:
+            self.bot.clear_history(rest)
+        else:
+            self.bot.clear_history()
+
+    def _cmd_del(self, cmd):
+        parts = cmd.split()
+        if len(parts) < 3:
+            logger.info("用法: del <聊天ID> <序号1> [序号2] ... 或 del <聊天ID> <起始序号-结束序号>")
+            return
+        chat_id = parts[1]
+        indices = []
+        for part in parts[2:]:
+            if '-' in part:
+                try:
+                    start, end = map(int, part.split('-'))
+                    if start > end:
+                        start, end = end, start
+                    indices.extend(range(start, end + 1))
+                except ValueError:
+                    logger.warning(f"无效的范围格式: {part}")
+            else:
+                try:
+                    indices.append(int(part))
+                except ValueError:
+                    logger.warning(f"无效的序号: {part}")
+        if not indices:
+            return
+        print(f"即将从聊天 '{chat_id}' 中删除序号: {sorted(set(indices))}")
+        confirm = input("确认删除？(y/n): ").strip().lower()
+        if confirm == 'y':
+            self.bot.delete_messages(chat_id, indices)
+        else:
+            logger.info("已取消删除")
+
+    def _cmd_memory(self, cmd):
+        target = cmd[len("memory"):].strip()
+        self._show_memory(target)
+
+    def _cmd_status(self, cmd):
+        self._show_status()
+
+    def _cmd_quit(self, cmd):
+        logger.info("👋 程序退出")
+        self.stop_event.set()
+        self.bot._flush_memory()  # 节流窗口内的记忆落盘（run 退出路径也会 flush，双保险）
 
     def _show_status(self):
         total_msgs = sum(len(v) for v in self.bot.memory_db.values())
@@ -1314,4 +1458,4 @@ if __name__ == "__main__":
     bot = WeChatBot(CONFIG)
     controller = Controller(bot)
     controller.start()
-    bot.run()
+    bot.run(stop_event=controller.stop_event)
