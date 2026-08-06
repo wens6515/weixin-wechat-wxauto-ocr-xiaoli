@@ -150,11 +150,14 @@ class FirstRunDialog(QDialog):
 
 
 def build_bot_factory(ctx):
-    """bot 工厂：子线程内创建 AgentBot（连微信可能阻塞）。"""
+    """bot 工厂：子线程内创建 AgentBot（连微信可能阻塞）。
+    stop_event：引擎停止可中断微信连接重试；
+    max_connect_retries=30：微信 5 分钟连不上 → 抛异常 → 引擎 error 状态
+    （可重新初始化；CLI 模式不设上限，保留无限重试）。"""
     from xiaoli_bot import AgentBot
 
-    def factory():
-        return AgentBot(ctx.cfg)
+    def factory(stop_event=None):
+        return AgentBot(ctx.cfg, stop_event=stop_event, max_connect_retries=30)
 
     return factory
 
@@ -162,7 +165,7 @@ def build_bot_factory(ctx):
 def main():
     # 单实例锁：防止双击多开（多实例会并发抢微信窗口/任务冲突）
     from xiaoli_bot import acquire_single_instance
-    if not acquire_single_instance("XiaoLiGui_SingleInstance"):
+    if not acquire_single_instance("XiaoLi_SingleInstance"):
         QMessageBox.warning(None, "小漓", "小漓已在运行（在系统托盘图标处查看）。")
         return
 

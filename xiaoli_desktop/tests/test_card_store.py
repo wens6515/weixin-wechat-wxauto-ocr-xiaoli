@@ -262,10 +262,12 @@ class TestTaskDispatchWindow(unittest.TestCase):
             json.dump({"task": "做一个贪吃蛇", "created_at": time.time() - 99999}, f)
         self.assertFalse(xb.has_active_tasks(tmp, stale_after=3600),
                          "卡死超过阈值的任务不得阻塞消息轮询")
-        # 正常完成的判定不受影响
+        # 已完成待回传（有 result.json 未归档）→ 仍算活跃：成果未发回微信前
+        # 不恢复监听（回传重试需要稳定窗口）；归档进 sent 后才是真正完成。
+        # （历史缺陷：实现 continue 跳过待回传任务，与注释意图/自检 T8 矛盾）
         with open(os.path.join(task_dir, "result.json"), "w", encoding="utf-8") as f:
             json.dump({"status": "success"}, f)
-        self.assertFalse(xb.has_active_tasks(tmp, stale_after=3600))
+        self.assertTrue(xb.has_active_tasks(tmp, stale_after=3600))
 
     def test_classify_task_uses_chat_model(self):
         """RED 复现：任务判断必须用文字模型（chat_model）——classify_model

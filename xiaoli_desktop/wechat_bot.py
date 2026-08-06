@@ -10,8 +10,18 @@ import requests
 import base64
 import pyautogui
 import tempfile
+from collections import deque
 from wxauto4 import WeChat
 from wxauto4.msgs.mtype import ImageMessage, FileMessage
+
+
+def is_group_chat(chat_name):
+    """群聊判定（集中判定点）：按会话名启发式——wxauto4 的 SessionElement
+    是 .pyd 编译模块，未暴露群聊标志属性，只能按名称猜测。
+    含「群」或「集团」视为群聊；群名不含这些字会漏判（已知局限，
+    未来 wxauto4 暴露群聊标志时只改这里）。"""
+    name = chat_name or ""
+    return "群" in name or "集团" in name
 
 
 def strip_model_prefix(model):
@@ -140,7 +150,13 @@ CONFIG = load_config()
 
 
 class WeChatBot:
-    def __init__(self, cfg):
+    def __init__(self, cfg, stop_event=None, max_connect_retries=None):
+        """stop_event：微信连接重试可被外部中断（GUI 引擎停止时用，None=不中断）。
+        max_connect_retries：连接失败重试上限（None=无限重试，CLI 模式保留）；
+        GUI 传入有限值，超限抛异常 → 引擎进入 error 状态（可重新初始化）。"""
+        self._stop_event = stop_event
+        self._max_connect_retries = max_connect_retries
+        self._connect_retry_interval = 10  # 微信连接失败重试间隔（秒）；测试可调小
         self.nickname = cfg["bot_nickname"]
         self.api_url = cfg["ai_api_url"]
         self.api_key = cfg["ai_api_key"]
@@ -210,11 +226,34 @@ class WeChatBot:
 
     def _save_processed_id(self, msg_id):
         self.processed_ids.add(msg_id)
+        # 限界：持久化去重集合只增不减会无限膨胀（每次写盘全量 dump 变慢）。
+        # 超过上限时丢弃约一半（无序集合，丢哪些不重要——重启后
+        # _seed_existing_ids 会把当前所有消息重新种回去，去重不依赖历史）。
+        if len(self.processed_ids) > 10000:
+            self.processed_ids = set(list(self.processed_ids)[len(self.processed_ids) // 2:])
         try:
             with open(self.processed_ids_file, "w", encoding="utf-8") as f:
                 json.dump(list(self.processed_ids), f, ensure_ascii=False)
         except Exception as e:
             logger.error(f"保存去重记录失败: {e}")
+
+    # recent_msg_ids 上限：内存去重集合只增不减会无限增长。
+    # deque 记录插入顺序，超限时丢弃最旧的一半（保持 set 判重语义）。
+    _RECENT_MAX = 5000
+
+    def _remember_recent(self, key):
+        """登记最近处理过的消息 key（set + 顺序队列，超限丢最旧）。"""
+        if key in self.recent_msg_ids:
+            return
+        self.recent_msg_ids.add(key)
+        order = getattr(self, "_recent_order", None)
+        if order is None:
+            order = self._recent_order = deque()
+        order.append(key)
+        if len(order) > self._RECENT_MAX:
+            for _ in range(self._RECENT_MAX // 2):
+                old = order.popleft()
+                self.recent_msg_ids.discard(old)
 
     def _seed_existing_ids(self):
         """启动时把所有已存在消息的 id 加入去重集合，防止重启后重复处理"""
@@ -233,7 +272,7 @@ class WeChatBot:
                     msg_id = getattr(msg, 'id', None)
                     if msg_id:
                         self.processed_ids.add(msg_id)
-                        self.recent_msg_ids.add(f"{chat_name}_{msg_id}")
+                        self._remember_recent(f"{chat_name}_{msg_id}")
             with open(self.processed_ids_file, "w", encoding="utf-8") as f:
                 json.dump(list(self.processed_ids), f, ensure_ascii=False)
             logger.info(f"✅ 已加载 {len(self.processed_ids)} 条历史消息（防重复）")
@@ -262,14 +301,32 @@ class WeChatBot:
             logger.error(f"保存记忆失败: {e}")
 
     def _connect_wx(self):
+        """连接微信。失败按 _connect_retry_interval 间隔重试：
+        - stop_event 已设置 → 立即抛异常（引擎停止/取消初始化）
+        - max_connect_retries 达到 → 抛异常（GUI 初始化超时 → error 状态）
+        睡眠分片（0.5s）保证 stop 响应延迟 ≤0.5s。"""
+        attempts = 0
         while True:
+            if self._stop_event is not None and self._stop_event.is_set():
+                raise RuntimeError("微信连接已取消")
             try:
                 self.wx = WeChat(resize=False, ads=False)
                 logger.info("✅ 微信连接成功")
                 return
             except Exception as e:
-                logger.error(f"微信连接失败：{e}，10秒后重试...")
-                time.sleep(10)
+                attempts += 1
+                if self._max_connect_retries is not None \
+                        and attempts >= self._max_connect_retries:
+                    raise RuntimeError(
+                        f"微信连接失败（已重试 {attempts} 次，超过上限 "
+                        f"{self._max_connect_retries}）：{e}") from e
+                logger.error(f"微信连接失败：{e}，{self._connect_retry_interval}秒后重试...")
+                remain = self._connect_retry_interval
+                while remain > 1e-9:
+                    if self._stop_event is not None and self._stop_event.is_set():
+                        raise RuntimeError("微信连接已取消")
+                    time.sleep(min(0.5, remain))
+                    remain -= 0.5
 
     def _get_history(self, chat_id):
         if chat_id not in self.memory_db:
@@ -446,7 +503,7 @@ class WeChatBot:
         logger.debug(f"[图片处理] 视觉模型返回: {vision_reply[:100]}...")
         self._add_history(chat_name, "assistant", f"[图片描述] {vision_reply}")
         refine_prompt = f"用户发来一张图片，内容描述如下：{vision_reply}\n请根据这个描述，以{self.nickname}的身份回复用户。"
-        is_group = '群' in chat_name or '集团' in chat_name
+        is_group = is_group_chat(chat_name)
         final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group)
         self._send_text(final_reply, chat_name)
         return True
@@ -605,7 +662,7 @@ class WeChatBot:
             f"{file_text}\n\n"
             f"请根据这个文件内容，以{self.nickname}的身份回复用户。"
         )
-        is_group = '群' in chat_name or '集团' in chat_name
+        is_group = is_group_chat(chat_name)
         final_reply = self.call_chat_ai(chat_name, refine_prompt,
                                         sender_name=sender, is_group=is_group)
         self._send_text(final_reply, chat_name)
@@ -958,7 +1015,7 @@ class WeChatBot:
                         logger.info(f"📷 收到 {sender} 的图片，开始识别...")
                         success = self._process_image(chat_name, sender, msg)
                         # 无论成败都标记已处理，防止重复处理
-                        self.recent_msg_ids.add(msg_key)
+                        self._remember_recent(msg_key)
                         if msg_id:
                             self._save_processed_id(msg_id)
                         if not success:
@@ -974,14 +1031,14 @@ class WeChatBot:
                         # 跳过"上传中"的消息，等上传完成后的消息才处理
                         if '上传中' in str(content):
                             logger.debug(f"[文件] 文件上传中，等待完成消息...")
-                            self.recent_msg_ids.add(msg_key)
+                            self._remember_recent(msg_key)
                             if msg_id:
                                 self._save_processed_id(msg_id)
                             continue
 
                         success = self._process_file(chat_name, sender, msg)
                         # 无论成败都标记已处理，防止重复处理
-                        self.recent_msg_ids.add(msg_key)
+                        self._remember_recent(msg_key)
                         if msg_id:
                             self._save_processed_id(msg_id)
                         if not success:
@@ -1011,9 +1068,9 @@ class WeChatBot:
 
                 if msg_key in self.recent_msg_ids:
                     continue
-                self.recent_msg_ids.add(msg_key)
+                self._remember_recent(msg_key)
 
-                is_group = '群' in chat_name or '集团' in chat_name
+                is_group = is_group_chat(chat_name)
 
                 if is_group:
                     at_tag = f"@{self.nickname}"
