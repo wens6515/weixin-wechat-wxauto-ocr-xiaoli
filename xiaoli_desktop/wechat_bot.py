@@ -115,15 +115,18 @@ def fit_messages_in_budget(messages, budget=100000, reserve=2000):
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
 
-# 清空旧日志，确保每次运行都是新的
-with open(LOG_FILE, "w", encoding="utf-8") as _f:
-    _f.write("")
+# 日志轮转：单文件超 2MB 轮转为 bot.log.1（保留 2 份历史）。
+# 历史缺陷：模块级 import 时即清空 bot.log——每次启动丢日志（排障无法
+# 追溯），且 GUI/CLI 并发 import 互清。轮转后 LogPage 的 size<offset 检测
+# 会自动重置增量读取位置，无需改动。
+from logging.handlers import RotatingFileHandler
 
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024,
+                            backupCount=2, encoding="utf-8"),
         logging.StreamHandler()
     ],
     force=True
@@ -170,7 +173,10 @@ def load_config(path="config.json"):
     return cfg
 
 
-CONFIG = load_config()
+CONFIG = None  # 延迟加载：仅 wechat_bot 独立运行模式使用（见 __main__）
+# 历史缺陷：模块级 CONFIG = load_config() 在 import 时即读写 config.json——
+# 任何 import（含测试、GUI）都触发磁盘 IO；GUI 模式实际用 config_store 的
+# cfg（两套加载并存）。改为 __main__ 内加载，import 零副作用。
 
 
 class WeChatBot:
@@ -1505,7 +1511,7 @@ class Controller:
 
 
 if __name__ == "__main__":
-    bot = WeChatBot(CONFIG)
+    bot = WeChatBot(load_config())
     controller = Controller(bot)
     controller.start()
     bot.run(stop_event=controller.stop_event)

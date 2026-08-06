@@ -15,12 +15,90 @@ config.json 主存结构（改造后）：
 chat_model / vision_model / file_model / chat_temperature ...）并写回，
 AgentBot 读到的 cfg 与改造前完全同构 → 引擎零改动风险。
 """
+import base64
 import json
 import logging
 import os
 import sys
 
 logger = logging.getLogger("xiaoli")
+
+# API Key 落盘加密（DPAPI，Windows 用户级）：
+# - 内存态 cfg 保持明文（引擎/UI 使用）；加密只发生在 save_config 的落盘副本上
+# - 读盘时解密回明文（dpapi: 前缀检测，兼容旧明文 config）
+# - 换用户/换机后 CryptUnprotectData 解不开 → 返回空 key（用户重填）
+try:
+    import win32crypt
+    _DPAPI_OK = True
+except ImportError:  # 非 Windows / 未装 pywin32：退回明文（功能不受影响）
+    win32crypt = None
+    _DPAPI_OK = False
+
+_DPAPI_PREFIX = "dpapi:"
+_SECRET_KEYS = ("ai_api_key", "vision_api_key")
+
+
+def _encrypt_secret(plain):
+    """密钥落盘加密。已是密文（dpapi: 前缀）不重复加密；DPAPI 不可用/失败退回明文。"""
+    if not plain or not _DPAPI_OK:
+        return plain
+    s = str(plain)
+    if s.startswith(_DPAPI_PREFIX):
+        return s
+    try:
+        blob = win32crypt.CryptProtectData(
+            s.encode("utf-8"), "xiaoli", None, None, None, 0)
+        return _DPAPI_PREFIX + base64.b64encode(blob).decode("ascii")
+    except Exception:
+        return plain
+
+
+def _decrypt_secret(stored):
+    """读盘解密。无前缀 = 旧明文（兼容，原样返回）；dpapi: 前缀解不开
+    （换用户/换机/损坏）→ 返回空串（key 失效，界面提示重填）。"""
+    if not stored:
+        return stored
+    s = str(stored)
+    if not s.startswith(_DPAPI_PREFIX):
+        return stored
+    if not _DPAPI_OK:
+        return ""
+    try:
+        blob = base64.b64decode(s[len(_DPAPI_PREFIX):])
+        return win32crypt.CryptUnprotectData(
+            blob, None, None, None, 0)[1].decode("utf-8")
+    except Exception:
+        return ""
+
+
+def _encrypt_cfg_keys(cfg):
+    """落盘副本：providers[].api_key + 投影 key 字段加密（不修改原 cfg）。"""
+    out = dict(cfg)
+    if isinstance(out.get("providers"), list):
+        out["providers"] = [
+            dict(p, api_key=_encrypt_secret(p.get("api_key") or ""))
+            if isinstance(p, dict) else p
+            for p in out["providers"]
+        ]
+    for k in _SECRET_KEYS:
+        if k in out:
+            out[k] = _encrypt_secret(out[k] or "")
+    return out
+
+
+def _decrypt_cfg_keys(cfg):
+    """读盘后解密 key 字段到内存明文（不修改原 dict 语义，返回新 dict）。"""
+    out = dict(cfg)
+    if isinstance(out.get("providers"), list):
+        out["providers"] = [
+            dict(p, api_key=_decrypt_secret(p.get("api_key") or ""))
+            if isinstance(p, dict) else p
+            for p in out["providers"]
+        ]
+    for k in _SECRET_KEYS:
+        if k in out:
+            out[k] = _decrypt_secret(out[k] or "")
+    return out
 
 DEFAULT_CARD_ID = "xiaoli"
 
@@ -327,9 +405,10 @@ def project_config(cfg, card):
 
 
 def save_config(cfg, path="config.json"):
-    """写回 config.json（保持与现有代码一致的格式）"""
+    """写回 config.json（API key 落盘加密：providers[].api_key + 投影 key 字段）。
+    内存态 cfg 保持明文（引擎/UI 使用）；加密只发生在落盘副本上。"""
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=4)
+        json.dump(_encrypt_cfg_keys(cfg), f, ensure_ascii=False, indent=4)
 
 
 def load_config_store(path="config.json", cards_dir="cards"):
@@ -344,6 +423,9 @@ def load_config_store(path="config.json", cards_dir="cards"):
                 cfg = json.load(f)
         except (OSError, ValueError) as e:
             logger.error(f"[配置] 读取 config.json 失败: {e}，按空配置处理")
+    # 读盘后解密 key 字段（dpapi: 前缀 → DPAPI 解开；旧明文原样保留），
+    # 内存态 cfg 全为明文，引擎/UI 零改动
+    cfg = _decrypt_cfg_keys(cfg)
 
     cfg = migrate_config(cfg, cards_dir)
     # 二期新增默认：天枢安装/下载/首轮提示词（小白引导用）
