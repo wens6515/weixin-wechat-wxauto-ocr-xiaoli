@@ -47,6 +47,37 @@ python -m venv .venv
 
 > 首次运行会生成 `config.json`（含 `ai_api_key`，已被 .gitignore 排除，不会提交）。天枢 CLI 首次配置：首次启动引导会自动执行 `npm install -g tianshu-tui` 并带你完成模型/API Key 配置。
 
+## 使用说明
+
+### 安装后第一次启动
+
+1. 双击 `xiaoli-setup-v1.0.1.exe` 安装（免管理员权限），完成后从开始菜单/桌面启动小漓
+2. 首次启动会自动检查 Node.js 与天枢 CLI，缺失时自动下载安装（首次约几分钟，日志在 `%TEMP%\xiaoli-install-node.log`）
+3. 按引导配置三样东西：
+   - **任务工作目录**：AI 代理处理任务时的工作文件夹（建议建个专门的文件夹，如 `D:\工作间\wxauto`）
+   - **微信文件接收目录**：微信 PC 版接收文件的文件夹（在微信设置 → 文件管理里可查到）
+   - **模型 API Key**：聊天用 DeepSeek、看图用智谱 GLM，在对应平台官网注册获取后填入
+
+配置完成后，小漓会常驻系统托盘，收到微信消息自动回复。
+
+### 日常怎么用
+
+| 场景 | 做法 |
+|---|---|
+| 聊天/提问 | 直接给小漓发微信消息，AI 自动回复；群聊里 @小漓 并说内容即可 |
+| 识别图片 | 直接发图片，小漓会用视觉模型描述图片内容 |
+| 处理文件 | 先发文件，再发一句指令（如"根据这个文档做一个网站"），任务会自动投递给 AI 代理处理 |
+| 查看结果 | 处理完成后，小漓会把成果文件 + 文字说明发回微信，并归档到任务目录的 `sent/` 文件夹 |
+| 暂停/恢复 | 托盘图标或命令行输入 `pause` / `resume`；默认启动时暂停（防误回），需要时手动恢复 |
+
+### 常见问题
+
+- **发消息没回复？** 小漓默认启动时暂停自动回复——在托盘菜单或命令行输入 `resume` 恢复；另外每条消息后有 3 秒冷却，避免连发刷屏
+- **API Key 填错了/想换模型？** 界面设置里可改；命令行用 `model 模型名` / `vision-model 模型名`
+- **换电脑或重装系统后要重新填 Key？** 是的——API Key 用 Windows 加密存储，换机器解不开，需重新填写（这是安全设计）
+- **为什么纯文字任务不带我上次发的文件？** v1.0.1 起，纯文字消息不再自动附带微信文件，需要 AI 处理文件时请先发文件再发指令
+- **图形界面和命令行能同时开吗？** 不能，小漓同一时间只允许一个实例运行，避免抢微信窗口/重复发消息
+
 ## 架构
 
 ```
@@ -100,30 +131,6 @@ flowchart LR
 | `start_paused` | true | 启动时是否暂停自动回复 |
 
 控制台（命令行模式）可用命令：`pause` / `resume` / `model [名称]` / `vision-model [名称]` / `chat-temp <0~2>` / `chat-top-p <0~1>` / `vision-temp <0~2>` / `tianshu-window` / `task-status` / `clear [聊天ID]` / `del <聊天ID> <序号...>` / `memory <聊天ID>` / `status` / `quit` / `help`
-
-## 测试
-
-```bash
-cd xiaoli_desktop
-.venv\Scripts\python -m unittest discover -s tests -p "test_*.py"   # 168 用例
-.venv\Scripts\python xiaoli_bot.py --test                            # bot 自检（58 项）
-```
-
-## 打包发布
-
-```bash
-# 1. PyInstaller 打包（onedir，产物 dist\小漓\）
-.venv\Scripts\pyinstaller 小漓.spec
-
-# 2. Inno Setup 生成安装包（需要 Inno Setup 6，含 Node.js 自动安装逻辑）
-"C:\...\ISCC.exe" dist\小漓.iss
-# 产物：dist\小漓安装包.exe
-
-# 3. 发布到 GitHub Releases
-gh release create v1.0.1 dist/小漓安装包.exe --title "小漓 v1.0.1" --notes "..."
-```
-
-安装包内置 `tools\install-node.ps1`：检测 `node` 命令，缺失时从 nodejs.org 下载最新 LTS 并 per-user 静默安装（免管理员），随后自动 `npm install -g tianshu-tui`，并持久化 PATH。日志在 `%TEMP%\xiaoli-install-node.log`。
 
 ## 隐私与安全
 
