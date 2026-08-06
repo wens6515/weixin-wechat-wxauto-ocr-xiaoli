@@ -2,7 +2,7 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。自带 PySide6 图形界面（托盘常驻）与一键安装包。
 
-> 版本：v1.0.0「初漓」· 状态：先行测试版（个人工具，按需迭代，欢迎反馈）
+> 版本：v1.0.1「初漓」· 状态：先行测试版（个人工具，按需迭代，欢迎反馈）
 
 ---
 
@@ -20,7 +20,7 @@
 
 ### 方式一：安装包（推荐给普通用户）
 
-1. 从 [Releases](https://github.com/wens6515/xiaoli/releases) 下载 `xiaoli-setup-v1.0.0.exe`
+1. 从 [Releases](https://github.com/wens6515/xiaoli/releases) 下载 `xiaoli-setup-v1.0.1.exe`
 2. 双击安装（无需管理员权限，安装到 `%LOCALAPPDATA%\Programs\小漓`）
 3. 安装程序会自动检查 Node.js——缺失时自动下载官方 LTS 并静默安装（per-user），随后自动安装天枢 CLI（`npm install -g tianshu-tui`）
 4. 首次启动按引导选择三个目录：任务工作目录、微信文件接收目录、天枢 CLI 工作目录，并配置模型 API Key
@@ -120,7 +120,7 @@ cd xiaoli_desktop
 # 产物：dist\小漓安装包.exe
 
 # 3. 发布到 GitHub Releases
-gh release create v1.0.0 dist/小漓安装包.exe --title "小漓 v1.0.0" --notes "..."
+gh release create v1.0.1 dist/小漓安装包.exe --title "小漓 v1.0.1" --notes "..."
 ```
 
 安装包内置 `tools\install-node.ps1`：检测 `node` 命令，缺失时从 nodejs.org 下载最新 LTS 并 per-user 静默安装（免管理员），随后自动 `npm install -g tianshu-tui`，并持久化 PATH。日志在 `%TEMP%\xiaoli-install-node.log`。
