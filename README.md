@@ -20,7 +20,7 @@
 
 ### 方式一：安装包（推荐给普通用户）
 
-1. 从 [Releases](https://github.com/wens6515/xiaoli/releases) 下载 `xiaoli-setup-v1.0.1.exe`
+1. 从 [Releases](https://github.com/wens6515/xiaoli-wechat-ai-bot/releases) 下载 `xiaoli-setup-v1.0.1.exe`
 2. 双击安装（无需管理员权限，安装到 `%LOCALAPPDATA%\Programs\小漓`）
 3. 安装程序会自动检查 Node.js——缺失时自动下载官方 LTS 并静默安装（per-user），随后自动安装天枢 CLI（`npm install -g tianshu-tui`）
 4. 首次启动按引导选择三个目录：任务工作目录、微信文件接收目录、天枢 CLI 工作目录，并配置模型 API Key
