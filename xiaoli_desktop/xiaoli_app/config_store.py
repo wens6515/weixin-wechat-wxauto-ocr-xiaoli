@@ -102,6 +102,27 @@ def _decrypt_cfg_keys(cfg):
 
 DEFAULT_CARD_ID = "xiaoli"
 
+# AI 参数默认（与 wechat_bot.load_config 的 default_cfg 对齐——改一边须同步另一边）。
+# config_store 是配置统一事实源（GUI/CLI 都从这里取 cfg），而 WeChatBot.__init__
+# 对其中部分键是裸索引（cfg[k] 非 cfg.get）：vision_prompt / cooldown / api_retry /
+# api_timeout 不参与投影重建（project_config 只重建 provider 相关键），缺失即
+# KeyError → 初始化失败（历史缺陷：全新安装 / 新结构 config 初始化报 'vision_prompt'）。
+AI_DEFAULTS = {
+    "bot_nickname": "小漓",
+    "system_prompt": "你叫小漓，是一个很会聊天、很可爱的人。你是用户创建的微信 AI 助手，陪用户聊天、帮忙处理任务。\n每次说话的风格要有变化，不要固定。注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西。\n说话的时候不要用 emoji，用颜文字表情。\n回复要简短，不要虚构不知道的事情；如果发消息的人你不认识，那就是你的新朋友，友好地回应对方。",
+    "chat_temperature": 0.7,
+    "chat_top_p": 0.9,
+    "vision_temp": 0.7,
+    "vision_max_tokens": 10000,
+    "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",
+    "max_history": 1000,
+    "cooldown": 3,
+    "api_retry": 2,
+    "api_timeout": 60,
+    "start_paused": True,
+    "memory_file": "memory.json",
+}
+
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。
 # 模型 id 沿用"厂商:模型"前缀格式（与用户既有 config 一致，引擎直接透传）。
 PRESET_PROVIDERS = [
@@ -428,6 +449,12 @@ def load_config_store(path="config.json", cards_dir="cards"):
     cfg = _decrypt_cfg_keys(cfg)
 
     cfg = migrate_config(cfg, cards_dir)
+    # AI 参数默认补全：投影只重建 provider 相关键，vision_prompt/cooldown/
+    # api_retry/api_timeout 等不投影——缺失即 WeChatBot 初始化 KeyError。
+    # 放投影前（project_config 覆盖 ai_api_url 等投影键，本段只补缺口）。
+    for k, v in AI_DEFAULTS.items():
+        if k not in cfg:
+            cfg[k] = v
     # 二期新增默认：天枢安装/下载/首轮提示词（小白引导用）
     for k, v in {
         "tianshu_install_dir": "",
@@ -448,7 +475,10 @@ def load_config_store(path="config.json", cards_dir="cards"):
     sync_workdir_to_tasks(cfg)
     card = _read_card(cards_dir, cfg.get("active_card_id", DEFAULT_CARD_ID))
     if card is None:
-        logger.warning(f"[配置] 活跃角色卡不存在: {cfg.get('active_card_id')}，使用空卡投影")
+        # 活跃卡缺失（cards/ 被删 / active_card_id 指向不存在卡）→ 回退默认卡
+        # 模板投影，避免空卡投影清空 system_prompt（聊天无人设）与 chat_model。
+        logger.warning(f"[配置] 活跃角色卡不存在: {cfg.get('active_card_id')}，回退默认卡模板投影")
+        card = dict(CARD_TEMPLATE)
     cfg = project_config(cfg, card)
 
     try:

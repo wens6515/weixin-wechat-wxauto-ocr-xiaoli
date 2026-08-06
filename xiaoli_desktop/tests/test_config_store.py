@@ -568,5 +568,74 @@ class TestSecretEncryption(unittest.TestCase):
                          "解不开的密文应降级为空 key")
 
 
+class TestLoadCompleteness(unittest.TestCase):
+    """RED 复现：load_config_store 产出必须含 WeChatBot.__init__ 全部裸索引键。
+
+    config_store 是配置统一事实源（#9 统一后 GUI/CLI 都走这里），缺键 →
+    AgentBot(ctx.cfg) 初始化抛 KeyError: 'vision_prompt'（用户实测报错）。
+    两个缺键场景：全新安装（无 config.json）与已有 providers 的新结构 config。
+    """
+
+    # WeChatBot.__init__ 直接索引（cfg[k] 非 cfg.get）的键
+    REQUIRED_KEYS = [
+        "bot_nickname", "ai_api_url", "ai_api_key", "chat_model",
+        "vision_model", "vision_prompt", "system_prompt", "max_history",
+        "cooldown", "api_retry", "api_timeout",
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cfg_cmp_")
+        self.cards_dir = os.path.join(self.tmp, "cards")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_fresh_install_has_all_bot_keys(self):
+        """全新安装（无 config.json）：返回的 cfg 必须能直接构造 WeChatBot。"""
+        cfg = config_store.load_config_store(
+            os.path.join(self.tmp, "config.json"), self.cards_dir)
+        for k in self.REQUIRED_KEYS:
+            self.assertIn(k, cfg, f"全新安装 cfg 缺 {k} → 初始化 KeyError")
+        self.assertTrue(str(cfg["vision_prompt"] or "").strip(),
+                        "vision_prompt 必须有非空默认值")
+
+    def test_modern_config_without_ai_keys(self):
+        """新结构 config（providers 已存在、无旧 AI 字段）：同样必须补齐。"""
+        path = os.path.join(self.tmp, "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "providers": [{
+                    "id": "deepseek", "name": "DeepSeek",
+                    "base_url": "https://api.deepseek.com/v1/chat/completions",
+                    "api_key": "", "models": ["deepseek:deepseek-v4-flash"],
+                }],
+                "active_card_id": config_store.DEFAULT_CARD_ID,
+                "tasks_dir": os.path.join(self.tmp, "tasks"),
+            }, f, ensure_ascii=False)
+        cfg = config_store.load_config_store(path, self.cards_dir)
+        for k in self.REQUIRED_KEYS:
+            self.assertIn(k, cfg, f"新结构 config 缺 {k} → 初始化 KeyError")
+        self.assertTrue(str(cfg["vision_prompt"] or "").strip(),
+                        "vision_prompt 必须有非空默认值")
+
+
+    def test_missing_card_falls_back_template(self):
+        """活跃卡缺失（cards/ 不存在/卡被删）→ 回退默认卡模板投影：
+        system_prompt 非空（否则聊天无人设、初始化后静默异常）。"""
+        path = os.path.join(self.tmp, "config.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({
+                "providers": [{"id": "deepseek", "name": "DeepSeek",
+                               "base_url": "http://x", "api_key": "",
+                               "models": ["m"]}],
+                "active_card_id": "ghost-card",
+            }, f, ensure_ascii=False)
+        cfg = config_store.load_config_store(path, self.cards_dir)
+        self.assertEqual(cfg["system_prompt"],
+                         config_store.CARD_TEMPLATE["system_prompt"],
+                         "卡缺失时 system_prompt 必须回退模板（非空）")
+        self.assertTrue(str(cfg["system_prompt"] or "").strip())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
