@@ -337,5 +337,108 @@ class TestIterUnreadSessions(unittest.TestCase):
         self.assertEqual(list(b.iter_unread_sessions()), [])
 
 
+# ---- 用户圈定区域配置加载 ----
+
+
+def _write_region_config(tmp, data):
+    """把 data 写入临时配置路径并返回该路径（用完由 tmp 清理）。"""
+    import json
+    p = os.path.join(tmp, "wx_ocr_region.json")
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    return p
+
+
+class TestRegionConfig(unittest.TestCase):
+    """_load_region_config：合法生效 / 缺文件回退 / 坏值回退 / 坏结构回退。"""
+
+    def _load(self, config_path):
+        import wx_backend.visual_backend as vb
+        with mock.patch.object(vb, "_REGION_CONFIG_PATH", config_path):
+            return vb._load_region_config()
+
+    def test_valid_config_loaded(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_region_config(tmp, {
+                "session_region": {"l": 0.0, "t": 0.1, "r": 0.35, "b": 1.0},
+                "message_region": {"l": 0.35, "t": 0.1, "r": 1.0, "b": 1.0},
+            })
+            cfg = self._load(p)
+            self.assertIsNotNone(cfg)
+            self.assertEqual(cfg["session"], (0.0, 0.1, 0.35, 1.0))
+            self.assertEqual(cfg["message"], (0.35, 0.1, 1.0, 1.0))
+
+    def test_list_format_config_loaded(self):
+        """工具保存的数组格式 [l,t,r,b] 也能加载（兼容 pick_ocr_region 输出）。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_region_config(tmp, {
+                "session_region": [0.0, 0.1, 0.35, 1.0],
+                "message_region": [0.35, 0.1, 1.0, 1.0],
+            })
+            cfg = self._load(p)
+            self.assertIsNotNone(cfg)
+            self.assertEqual(cfg["session"], (0.0, 0.1, 0.35, 1.0))
+            self.assertEqual(cfg["message"], (0.35, 0.1, 1.0, 1.0))
+
+    def test_missing_file_falls_back(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "nonexistent.json")
+            self.assertIsNone(self._load(p))
+
+    def test_invalid_l_ge_r_falls_back(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_region_config(tmp, {
+                "session_region": {"l": 0.5, "t": 0.1, "r": 0.3, "b": 1.0},  # l>=r
+                "message_region": {"l": 0.3, "t": 0.1, "r": 1.0, "b": 1.0},
+            })
+            self.assertIsNone(self._load(p))
+
+    def test_out_of_range_falls_back(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_region_config(tmp, {
+                "session_region": {"l": -0.1, "t": 0.1, "r": 0.3, "b": 1.0},  # 越界
+                "message_region": {"l": 0.3, "t": 0.1, "r": 1.0, "b": 1.0},
+            })
+            self.assertIsNone(self._load(p))
+
+    def test_malformed_json_falls_back(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "wx_ocr_region.json")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("{ not valid json")
+            self.assertIsNone(self._load(p))
+
+    def test_backend_uses_config_region(self):
+        """VisualBackend 加载配置后，实例区域反映配置（_detect_red_clusters 消费）。"""
+        import tempfile
+        import wx_backend.visual_backend as vb
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_region_config(tmp, {
+                "session_region": {"l": 0.0, "t": 0.1, "r": 0.35, "b": 1.0},
+                "message_region": {"l": 0.35, "t": 0.1, "r": 1.0, "b": 1.0},
+            })
+            with mock.patch.object(vb, "_REGION_CONFIG_PATH", p):
+                b = VisualBackend()
+            self.assertEqual(b._session_region, (0.0, 0.1, 0.35, 1.0))
+            self.assertEqual(b._message_region, (0.35, 0.1, 1.0, 1.0))
+
+    def test_backend_defaults_when_no_config(self):
+        """无配置 → 实例区域用模块默认常量（现行为）。"""
+        import tempfile
+        import wx_backend.visual_backend as vb
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "nonexistent.json")
+            with mock.patch.object(vb, "_REGION_CONFIG_PATH", p):
+                b = VisualBackend()
+            self.assertEqual(b._session_region, vb._SESSION_REGION_RATIO)
+            self.assertEqual(b._message_region, vb._MESSAGE_REGION_RATIO)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

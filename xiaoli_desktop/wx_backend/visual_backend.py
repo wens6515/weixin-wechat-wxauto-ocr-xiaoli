@@ -287,7 +287,9 @@ _BADGE_B_MAX = 130
 
 
 def _detect_red_clusters(shot: Image.Image, grid: int = 20,
-                         min_hits: int = 3) -> list[tuple[int, int, int, int]]:
+                         min_hits: int = 3,
+                         region: tuple | None = None,
+                         ) -> list[tuple[int, int, int, int]]:
     """检测会话列表区的红色角标簇，返回整窗图像坐标 [(l, t, r, b), ...]。
 
     实现：crop 列表区 → 用 PIL point() 生成三通道阈值掩码（C 级，~毫秒级）→
@@ -296,14 +298,16 @@ def _detect_red_clusters(shot: Image.Image, grid: int = 20,
     与 BFS 连通域结果一致（列表区仅角标红为簇，头像/文字红零散不达标）。
 
     shot 为整窗截图；返回坐标以整窗图像像素为基准（列表区 crop 偏移已加回）。
+    region 为列表区相对比例 (l, t, r, b)，缺省用模块默认常量（保持模块级函数可测）。
     """
     if shot is None:
         return []
     w, h = shot.size
-    sl = int(w * _SESSION_REGION_RATIO[0])
-    st = int(h * _SESSION_REGION_RATIO[1])
-    sr = int(w * _SESSION_REGION_RATIO[2])
-    sb = int(h * _SESSION_REGION_RATIO[3])
+    sr_region = _normalize_region(region) or _SESSION_REGION_RATIO
+    sl = int(w * sr_region[0])
+    st = int(h * sr_region[1])
+    sr = int(w * sr_region[2])
+    sb = int(h * sr_region[3])
     region = shot.convert("RGB").crop((sl, st, sr, sb))
     rw, rh = region.size
     if rw <= 0 or rh <= 0:
@@ -364,6 +368,69 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
 _SESSION_REGION_RATIO = (0.0, 0.08, 0.32, 1.0)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.32, 0.08, 1.0, 1.0)
 
+# 用户圈定配置：xiaoli_desktop\wx_ocr_region.json（tools/pick_ocr_region.py 生成）。
+# 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
+_REGION_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "xiaoli_desktop", "wx_ocr_region.json",
+)
+
+
+def _region_dict_to_tuple(region) -> tuple | None:
+    """配置 dict {l,t,r,b} → 有序元组；非 dict/缺键返回 None。"""
+    if not isinstance(region, dict):
+        return None
+    try:
+        return (region["l"], region["t"], region["r"], region["b"])
+    except KeyError:
+        return None
+
+
+def _normalize_region(region: tuple) -> tuple | None:
+    """校验并规范化区域元组：4 值都在 [0,1] 且 l<r、t<b，非法返回 None。"""
+    if not isinstance(region, (tuple, list)) or len(region) != 4:
+        return None
+    try:
+        vals = tuple(float(v) for v in region)
+    except (TypeError, ValueError):
+        return None
+    l, t, r, b = vals
+    if not all(0.0 <= v <= 1.0 for v in vals):
+        return None
+    if l >= r or t >= b:
+        return None
+    return vals
+
+
+def _load_region_config() -> dict | None:
+    """读用户圈定区域配置；无文件/坏值返回 None（调用方回退默认常量）。"""
+    try:
+        if not os.path.isfile(_REGION_CONFIG_PATH):
+            return None
+        with open(_REGION_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            logger.warning("wx_ocr_region.json 非对象，回退默认区域")
+            return None
+        session = _normalize_region(
+            _region_dict_to_tuple(data.get("session_region"))
+            if isinstance(data.get("session_region"), dict)
+            else data.get("session_region"))
+        message = _normalize_region(
+            _region_dict_to_tuple(data.get("message_region"))
+            if isinstance(data.get("message_region"), dict)
+            else data.get("message_region"))
+        if session is None or message is None:
+            logger.warning(
+                "wx_ocr_region.json 区域值非法（须 l<t? 实为 4 值 [0,1] 且 l<r、t<b），回退默认")
+            return None
+        logger.info(
+            f"📐 已加载用户圈定区域：列表{session} 消息{message}")
+        return {"session": session, "message": message}
+    except Exception as e:
+        logger.warning(f"wx_ocr_region.json 读取失败（{e}），回退默认区域")
+        return None
+
 
 class VisualBackend:
     """PrintWindow + 本地 OCR 的微信视觉后端。
@@ -380,6 +447,10 @@ class VisualBackend:
         self._poll_region = poll_region
         self._closed = False
         self._session_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 屏幕中心点
+        # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
+        cfg = _load_region_config()
+        self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
+        self._message_region = cfg["message"] if cfg else _MESSAGE_REGION_RATIO
 
     # ---- 协议：连接 ----
 
@@ -410,8 +481,8 @@ class VisualBackend:
         if not force and self._last_shot is not None:
             w, h = shot.size
             region = (
-                int(w * _SESSION_REGION_RATIO[0]), int(h * _SESSION_REGION_RATIO[1]),
-                int(w * _SESSION_REGION_RATIO[2]), int(h * _SESSION_REGION_RATIO[3]),
+                int(w * self._session_region[0]), int(h * self._session_region[1]),
+                int(w * self._session_region[2]), int(h * self._session_region[3]),
             )
             if not region_changed(self._last_shot, shot, region):
                 return None
@@ -449,7 +520,7 @@ class VisualBackend:
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
-        session_x_max = w * 0.49
+        session_x_max = w * (self._session_region[2] + 0.17)  # 列表区右边界+0.17容差（无配置时 0.32+0.17=0.49，保留原语义）
 
         # 1. 预筛选：会话列表列 + 过滤搜索框/时间戳
         cand = []
@@ -531,7 +602,7 @@ class VisualBackend:
         shot = self._refresh(force=True)
         if shot is None:
             return
-        badges = _detect_red_clusters(shot)
+        badges = _detect_red_clusters(shot, region=self._session_region)
         if not badges:
             return
         # 有红簇才整窗 OCR 提取会话名（复用 iter_sessions 逻辑）
@@ -599,8 +670,8 @@ class VisualBackend:
             return []
         w, h = shot.size
         region = shot.crop((
-            int(w * _MESSAGE_REGION_RATIO[0]), int(h * _MESSAGE_REGION_RATIO[1]),
-            int(w * _MESSAGE_REGION_RATIO[2]), int(h * _MESSAGE_REGION_RATIO[3]),
+            int(w * self._message_region[0]), int(h * self._message_region[1]),
+            int(w * self._message_region[2]), int(h * self._message_region[3]),
         ))
         region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
         items = ocr_image(region)
@@ -705,9 +776,9 @@ class VisualBackend:
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         w = rect.right - rect.left
         h = rect.bottom - rect.top
-        l = rect.left + int(w * _MESSAGE_REGION_RATIO[0]) + 20
+        l = rect.left + int(w * self._message_region[0]) + 20
         t = rect.top + int(h * 0.82)
-        return (l, t, int(w * (_MESSAGE_REGION_RATIO[2] - _MESSAGE_REGION_RATIO[0])) - 40, int(h * 0.12))
+        return (l, t, int(w * (self._message_region[2] - self._message_region[0])) - 40, int(h * 0.12))
 
     def send_file(self, chat: str, file_path: str) -> bool:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""
