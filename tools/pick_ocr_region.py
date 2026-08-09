@@ -2,8 +2,10 @@
 r"""OCR 区域圈定工具：图形框选（PySide6）+ 手填坐标微调。
 
 背景：visual_backend 的 OCR 读取区域（聊天列表区 / 消息区）默认用硬编码
-窗口比例。本工具让用户自行圈定这两个区域，配置写入
+窗口比例。本工具让用户自行圈定：微信窗口位置 + 两个 OCR 区域，配置写入
 xiaoli_desktop\wx_ocr_region.json，bot 启动时加载——窗口布局变了重新圈一次即可。
+
+窗口截图用 PrintWindow（即使微信不在最前/被遮挡也能读到完整内容）。
 
 用法：
   python tools/pick_ocr_region.py                      # 图形框选（PySide6）
@@ -13,8 +15,8 @@ xiaoli_desktop\wx_ocr_region.json，bot 启动时加载——窗口布局变了�
   python tools/pick_ocr_region.py --message 0.32 0.08 1.0 1.0  # 手填消息区比例
   python tools/pick_ocr_region.py --session 0 0.08 0.32 1.0 --message 0.32 0.08 1.0 1.0
 
-坐标一律用相对窗口比例（0~1）：l=左, t=上, r=右, b=下（l<r, t<b）。
-配置：xiaoli_desktop\wx_ocr_region.json
+区域坐标一律用相对窗口比例（0~1）：l=左, t=上, r=右, b=下（l<r, t<b）。
+配置：xiaoli_desktop\wx_ocr_region.json（含 window_rect 记录圈定时窗口屏幕位置）
 """
 from __future__ import annotations
 
@@ -64,6 +66,9 @@ def save_config(cfg):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     print(f"[OK] 配置已保存: {CONFIG_PATH}")
+    if cfg.get("window_rect"):
+        wr = cfg["window_rect"]
+        print(f"     微信窗口: ({wr['x']},{wr['y']}) {wr['width']}x{wr['height']}")
     print(f"     列表区 session_region: {cfg['session_region']}")
     print(f"     消息区 message_region: {cfg['message_region']}")
     print("     提示：重启小漓 bot 后生效（bot 运行中改配置需重启）")
@@ -84,9 +89,11 @@ def _gui_pick() -> int:
               "--message 0.32 0.08 1.0 1.0")
         return 2
 
-    # 截取微信窗口
+    # 截取微信窗口（PrintWindow——即使微信不在最前/被遮挡也能读到完整内容）
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "xiaoli_desktop"))
+    import ctypes
+    from ctypes import wintypes as wt
     from wx_backend.visual_backend import find_wechat_window, capture_window
     hwnd = find_wechat_window()
     if hwnd is None:
@@ -98,6 +105,16 @@ def _gui_pick() -> int:
         return 1
     iw, ih = img.size
     print(f"微信窗口截图: {iw}x{ih}")
+
+    # 当前窗口屏幕 rect（DPI aware 后为物理像素，与截图同坐标系）
+    rect = wt.RECT()
+    if not ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        print("[FAIL] 获取窗口位置失败")
+        return 1
+    win_rect = {"x": rect.left, "y": rect.top,
+                "width": rect.right - rect.left, "height": rect.bottom - rect.top}
+    print(f"微信窗口位置: ({win_rect['x']},{win_rect['y']}) "
+          f"{win_rect['width']}x{win_rect['height']}（将随配置记录）")
 
     app = QApplication(sys.argv[:1])
     win = QMainWindow()
@@ -211,6 +228,7 @@ def _gui_pick() -> int:
         print(f"[FAIL] 圈定区域非法: session={session} message={message}")
         return 1
     save_config({
+        "window_rect": win_rect,
         "session_region": session,
         "message_region": message,
     })
@@ -234,8 +252,11 @@ def main():
     if args.read:
         cfg = load_config()
         if cfg:
-            print(f"已存配置: session={cfg.get('session_region')} "
-                  f"message={cfg.get('message_region')}")
+            out = f"session={cfg.get('session_region')} message={cfg.get('message_region')}"
+            if cfg.get("window_rect"):
+                wr = cfg["window_rect"]
+                out += f" window=({wr['x']},{wr['y']}) {wr['width']}x{wr['height']}"
+            print(f"已存配置: {out}")
         else:
             print(f"（无配置，使用默认）session={DEFAULT['session_region']} "
                   f"message={DEFAULT['message_region']}")
