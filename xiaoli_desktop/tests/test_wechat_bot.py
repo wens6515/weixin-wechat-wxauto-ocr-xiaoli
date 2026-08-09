@@ -78,28 +78,28 @@ class TestConnectWx(unittest.TestCase):
     def test_retry_limit_exhausted(self):
         """重试达上限（GUI 场景）→ 抛异常，不再无限循环。"""
         import wechat_bot as wb
-        orig = wb.WeChat
-        wb.WeChat = lambda **k: (_ for _ in ()).throw(RuntimeError("no wechat"))
+        orig = wb.create_backend
+        wb.create_backend = lambda **k: (_ for _ in ()).throw(RuntimeError("no wechat"))
         try:
             bot = self._make(max_retries=1, interval=0)
             with self.assertRaises(RuntimeError):
                 bot._connect_wx()
         finally:
-            wb.WeChat = orig
+            wb.create_backend = orig
 
     def test_no_limit_keeps_retrying(self):
         """CLI 模式（不传上限）连接失败后继续重试——观察若干次调用确认不退出。"""
         import time
         import wechat_bot as wb
-        orig = wb.WeChat
+        orig = wb.create_backend
         calls = {"n": 0}
         stop = threading.Event()
 
-        def fake_connect(**k):
+        def fake_connect(*a, **k):
             calls["n"] += 1
             raise RuntimeError("no wechat")
 
-        wb.WeChat = fake_connect
+        wb.create_backend = fake_connect
         try:
             bot = self._make(max_retries=None, interval=0)
             bot._stop_event = stop  # 测试用停止信号（业务上 CLI 模式不设）
@@ -112,7 +112,7 @@ class TestConnectWx(unittest.TestCase):
             t.join(2)
             self.assertFalse(t.is_alive(), "停止信号应能终止重试循环")
         finally:
-            wb.WeChat = orig
+            wb.create_backend = orig
 
 
 class TestModelsEndpoint(unittest.TestCase):
@@ -169,7 +169,6 @@ class TestImageCompress(unittest.TestCase):
     def test_pil_failure_falls_back_png(self):
         """PIL 不可用时退回原样保存（图片处理链路不中断）。"""
         bot = self._make()
-
         class FakeImage:
             """无 convert/resize 的伪截图对象（模拟 PIL 缺失/异常场景）。"""
 
@@ -186,6 +185,59 @@ class TestImageCompress(unittest.TestCase):
             self.assertGreater(size, 0, "退回保存也必须落盘")
             with open(p, "rb") as f:
                 self.assertEqual(f.read(), b"png-fallback")
+
+
+class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
+    """process_new_messages 的会话获取分支：visual 后端走 iter_unread_sessions
+    （红圈驱动），旧后端降级走 iter_sessions（行为不变）。"""
+
+    def _make(self, wx):
+        bot = WeChatBot.__new__(WeChatBot)
+        bot.paused = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = wx
+        bot.recent_msg_ids = set()
+        bot.processed_ids = set()
+        bot.nickname = "小漓"
+        return bot
+
+    def test_uses_unread_when_available(self):
+        """后端有 iter_unread_sessions → 只走红圈驱动，不遍历全量会话。"""
+        calls = {"unread": 0, "sessions": 0}
+
+        class FakeWx:
+            def iter_unread_sessions(self):
+                calls["unread"] += 1
+                return iter(["王文生"])
+
+            def iter_sessions(self):
+                calls["sessions"] += 1
+                return iter(["王文生", "杨冬梅"])
+
+            def get_messages(self, chat):
+                return []  # 无消息 → 不触发后续处理
+
+        bot = self._make(FakeWx())
+        bot.process_new_messages()
+        self.assertEqual(calls["unread"], 1, "应调用 iter_unread_sessions")
+        self.assertEqual(calls["sessions"], 0, "有 unread 能力时不应遍历全量")
+
+    def test_falls_back_to_iter_sessions(self):
+        """后端无 iter_unread_sessions（wxauto 等）→ 降级走 iter_sessions。"""
+        calls = {"sessions": 0}
+
+        class FakeWx:
+            def iter_sessions(self):
+                calls["sessions"] += 1
+                return iter(["王文生"])
+
+            def get_messages(self, chat):
+                return []
+
+        bot = self._make(FakeWx())
+        bot.process_new_messages()
+        self.assertEqual(calls["sessions"], 1, "无 unread 能力时应降级 iter_sessions")
 
 
 if __name__ == "__main__":

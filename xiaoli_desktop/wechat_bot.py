@@ -11,8 +11,8 @@ import base64
 import pyautogui
 import tempfile
 from collections import deque
-from wxauto4 import WeChat
-from wxauto4.msgs.mtype import ImageMessage, FileMessage
+from wx_backend import create_backend, BackendUnavailableError
+from wx_backend.models import MessageType
 from xiaoli_app.config_store import AI_DEFAULTS
 
 
@@ -298,14 +298,11 @@ class WeChatBot:
     def _seed_existing_ids(self):
         """启动时把所有已存在消息的 id 加入去重集合，防止重启后重复处理"""
         try:
-            sessions = self.wx.GetSession()
-            for session in sessions:
-                chat_name = session.name if hasattr(session, 'name') else str(session)
+            sessions = list(self.wx.iter_sessions())
+            for chat_name in sessions:
                 if not chat_name:
                     continue
-                self.wx.ChatWith(chat_name)
-                time.sleep(0.1)
-                msgs = self.wx.GetAllMessage()
+                msgs = self.wx.get_messages(chat_name)
                 if not msgs:
                     continue
                 for msg in msgs:
@@ -341,7 +338,7 @@ class WeChatBot:
             logger.error(f"保存记忆失败: {e}")
 
     def _connect_wx(self):
-        """连接微信。失败按 _connect_retry_interval 间隔重试：
+        """连接微信（后端抽象层）。失败按 _connect_retry_interval 间隔重试：
         - stop_event 已设置 → 立即抛异常（引擎停止/取消初始化）
         - max_connect_retries 达到 → 抛异常（GUI 初始化超时 → error 状态）
         睡眠分片（0.5s）保证 stop 响应延迟 ≤0.5s。"""
@@ -350,8 +347,8 @@ class WeChatBot:
             if self._stop_event is not None and self._stop_event.is_set():
                 raise RuntimeError("微信连接已取消")
             try:
-                self.wx = WeChat(resize=False, ads=False)
-                logger.info("✅ 微信连接成功")
+                self.wx = create_backend("auto")
+                logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:
                 attempts += 1
@@ -498,12 +495,22 @@ class WeChatBot:
         return os.path.getsize(path) if os.path.isfile(path) else 0
 
     def _process_image(self, chat_name, sender, msg_obj):
-        """点击图片消息打开预览 → 截图 → 关预览 → 送视觉模型"""
+        """点击图片消息打开预览 → 截图 → 关预览 → 送视觉模型
+
+        兼容两种消息形态：
+        - wxauto 后端：wxauto4 消息对象（有 control/BoundingRectangle/roll_into_view）
+        - visual 后端：统一 WeChatMessage（无控件坐标）→ 整窗截图降级
+        """
         msg_class = type(msg_obj).__name__
         logger.info(f"📷 收到 {sender} 的图片，开始识别...")
         logger.debug(f"[处理] sender={sender} chat={chat_name} msg_class={msg_class}")
         tmp_path = None
         try:
+            # 视觉后端消息：无控件坐标，整窗截图降级（无法精确裁剪单图）
+            if not hasattr(msg_obj, 'roll_into_view') or not hasattr(msg_obj, 'control'):
+                logger.info("[处理] 视觉后端消息：整窗截图降级")
+                return self._process_image_visual_fallback(chat_name, sender)
+
             # 1. 确保消息可见
             msg_obj.roll_into_view()
             time.sleep(0.3)
@@ -578,6 +585,38 @@ class WeChatBot:
                     logger.debug(f"[处理] 已清理临时文件")
                 except Exception as e:
                     logger.warning(f"[处理] 清理临时文件失败: {e}")
+
+    def _process_image_visual_fallback(self, chat_name, sender):
+        """视觉后端图片消息降级：整窗截图 → 送视觉模型（无法精确裁剪单图）。
+
+        视觉通道下消息无控件坐标，退而求其次截取整个微信窗口，
+        视觉模型描述图中所有内容（含用户刚发的图片）。"""
+        try:
+            import pyautogui
+            shot = pyautogui.screenshot()
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
+                tmp_path = tmpfile.name
+            self._save_screenshot_compressed(shot, tmp_path)
+            with open(tmp_path, 'rb') as f:
+                img_bytes = f.read()
+            vision_reply = self.call_vision_api(img_bytes, self.vision_prompt)
+            if vision_reply:
+                logger.info(f"📷 整窗识别完成 ({len(vision_reply)} 字符)")
+                return self._reply_with_vision(chat_name, sender, vision_reply)
+            else:
+                logger.warning("[处理] 视觉模型返回空")
+                self._send_text("图片识别失败了，可能是什么地方出了问题～", chat_name)
+                return False
+        except Exception as e:
+            logger.error(f"[处理] 视觉降级异常: {e}", exc_info=True)
+            self._send_text("图片处理出错，请重试", chat_name)
+            return False
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
     def _reply_with_vision(self, chat_name, sender, vision_reply):
         """根据视觉模型返回的图片描述，生成回复并发送"""
@@ -845,6 +884,12 @@ class WeChatBot:
                 m2 = re.search(rep, content)
                 if m2 and m2.group(1):
                     return m2.group(1).strip()
+            # 视觉后端兼容：content 即显示文件名（无 '文件\n' 前缀）
+            if content and "\\n" not in content and "\n" not in content:
+                # 纯文件名（不含换行/前缀）——视觉后端 file 消息格式
+                name = content.strip()
+                if name:
+                    return name
         except Exception as e:
             logger.error(f"[文件] 提取文件名失败: {e}")
         return None
@@ -1062,7 +1107,7 @@ class WeChatBot:
     def _send_text(self, text, chat_id):
         try:
             cleaned_text = text.strip()
-            self.wx.SendMsg(cleaned_text, chat_id)
+            self.wx.send_text(chat_id, cleaned_text)
             preview = cleaned_text[:50].replace('\n', ' ')
             logger.info(f"🤖 → [{chat_id}]: {preview}")
         except Exception as e:
@@ -1089,24 +1134,22 @@ class WeChatBot:
             return
 
         try:
-            sessions = self.wx.GetSession()
+            # 新链路（visual 后端）：只处理有未读红圈角标的会话——列表区像素
+            # 检测红圈 → 定位点击 → 消息区 OCR，无未读时零 OCR 零点击。
+            # 降级（wxauto 等旧后端）：无 iter_unread_sessions 能力时走全量
+            # 会话遍历，行为与重构前一致。
+            if hasattr(self.wx, "iter_unread_sessions"):
+                sessions = list(self.wx.iter_unread_sessions())
+            else:
+                sessions = list(self.wx.iter_sessions())
             if not sessions:
                 return
 
-            for session in sessions:
-                if hasattr(session, 'name'):
-                    chat_name = session.name
-                elif isinstance(session, str):
-                    chat_name = session
-                else:
-                    continue
+            for chat_name in sessions:
                 if not chat_name:
                     continue
 
-                self.wx.ChatWith(chat_name)
-                time.sleep(0.2)
-
-                msgs = self.wx.GetAllMessage()
+                msgs = self.wx.get_messages(chat_name)
                 if not msgs:
                     continue
 
@@ -1136,7 +1179,8 @@ class WeChatBot:
                                 f"id={msg_id[:12] if msg_id else '无'}")
 
                     # ========== 检测图片消息 ==========
-                    is_image = isinstance(msg, ImageMessage)
+                    # 统一消息模型：type 枚举判断（wxauto 后端已转换，视觉后端原生）
+                    is_image = msg_type == MessageType.IMAGE
                     # ====================================
 
                     if is_image:
@@ -1152,7 +1196,7 @@ class WeChatBot:
                         return
 
                     # ========== 检测文件消息 ==========
-                    is_file = isinstance(msg, FileMessage)
+                    is_file = msg_type == MessageType.FILE
                     # ====================================
 
                     if is_file:
@@ -1184,11 +1228,11 @@ class WeChatBot:
                     continue
 
                 # 防止图片消息掉进文本处理
-                if isinstance(latest, ImageMessage):
+                if msg_type == MessageType.IMAGE:
                     continue
 
                 # 防止文件消息掉进文本处理
-                if isinstance(latest, FileMessage):
+                if msg_type == MessageType.FILE:
                     continue
 
                 msg_id = getattr(latest, 'id', None)
