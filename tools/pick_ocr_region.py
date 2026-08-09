@@ -163,10 +163,20 @@ def _gui_pick() -> int:
     qpix = QPixmap.fromImage(qimage)
 
     picker = Picker()
-    # 等比缩放显示：宽 ≤1000，保持纵横比
-    scale = min(1.0, 1000.0 / iw)
-    disp_w, disp_h = int(iw * scale), int(ih * scale)
-    qpix = qpix.scaled(disp_w, disp_h)
+    # 等比缩放显示，完整适配屏幕可用区（Qt 逻辑像素；DPI 缩放由 Qt 处理）。
+    # 关键：pixmap 物理尺寸 = 逻辑尺寸 × DPR——若不设 devicePixelRatio，
+    # Qt 会把物理像素当逻辑尺寸渲染，导致高 DPI 下窗口远超屏幕、内容只显示一部分。
+    dpr = app.devicePixelRatio()
+    avail = app.primaryScreen().availableGeometry()
+    max_w = avail.width() - 40
+    max_h = avail.height() - 60
+    # 截图物理 iw×ih → 逻辑尺寸 = 物理 / DPR
+    log_w, log_h = iw / dpr, ih / dpr
+    scale = min(1.0, max_w / log_w, max_h / log_h)
+    disp_w, disp_h = int(log_w * scale), int(log_h * scale)
+    # pixmap 物理像素缩放，并标记其物理分辨率（DPR），QLabel 按逻辑尺寸 1:1 显示
+    qpix = qpix.scaled(int(disp_w * dpr), int(disp_h * dpr))
+    qpix.setDevicePixelRatio(dpr)
     picker.setPixmap(qpix)
     picker.setFixedSize(disp_w, disp_h)
     win.setCentralWidget(picker)
