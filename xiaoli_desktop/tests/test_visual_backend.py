@@ -388,6 +388,20 @@ class TestRegionConfig(unittest.TestCase):
             p = os.path.join(tmp, "nonexistent.json")
             self.assertIsNone(self._load(p))
 
+    def test_window_rect_key_tolerated(self):
+        """新格式含 window_rect 键（工具圈定窗口位置）→ 多余键忽略，双区域正常读取。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = _write_region_config(tmp, {
+                "window_rect": {"x": 726, "y": 0, "width": 1300, "height": 1610},
+                "session_region": [0.0, 0.1, 0.35, 1.0],
+                "message_region": [0.35, 0.1, 1.0, 1.0],
+            })
+            cfg = self._load(p)
+            self.assertIsNotNone(cfg)
+            self.assertEqual(cfg["session"], (0.0, 0.1, 0.35, 1.0))
+            self.assertEqual(cfg["message"], (0.35, 0.1, 1.0, 1.0))
+
     def test_invalid_l_ge_r_falls_back(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
