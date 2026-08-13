@@ -863,7 +863,7 @@ class VisualBackend:
         rh = region.shape[0]
         if th <= 0 or tw <= 0:
             return []
-        base_h = max(40, rh // 12)
+        base_h = max(40, rh // 18)  # 头像高度标定：真机实测 ≈ 消息区 1/17.5（crop2x 130px/2270px，旧 1/12 偏大导致匹配脱靶）
         ys = []
         for scale in (0.7, 0.85, 1.0, 1.15, 1.3):
             target_h = int(base_h * scale)
