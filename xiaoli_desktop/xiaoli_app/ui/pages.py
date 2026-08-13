@@ -16,6 +16,13 @@ from PySide6.QtWidgets import (
 
 from xiaoli_app import card_store, config_store
 
+# bot.log 实际位置：wechat_bot.LOG_FILE = <xiaoli_desktop>/bot.log。
+# pages.py 在 <xiaoli_desktop>/xiaoli_app/ui/，需 dirname 三次才到 xiaoli_desktop。
+# 历史缺陷：LogPage 用 dirname 两次 → 指向不存在的 xiaoli_app/bot.log → 日志页永远空。
+_BOT_LOG_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "bot.log")
+
 
 def _key_display(key):
     """显示用 key：遮蔽中间。"""
@@ -115,7 +122,32 @@ class HomePage(QWidget):
         self.btn_retry.clicked.connect(lambda: self._run_prompt_flow(force=True))
         lay.addWidget(self.lbl_prompt)
         lay.addWidget(self.btn_retry)
-        lay.addStretch(1)
+
+        # 运行日志区（填充下方空白）：实时显示 bot.log 增量，
+        # 如「发现新消息」「判断为文件消息」「[任务桥] 判定为任务」等运行日志
+        log_frame = QFrame()
+        log_frame.setObjectName("card")
+        lv = QVBoxLayout(log_frame)
+        lv.setContentsMargins(16, 12, 16, 12)
+        lv.setSpacing(8)
+        lh = QHBoxLayout()
+        lh.addWidget(QLabel("运行日志"))
+        lh.addStretch(1)
+        self.btn_log_clear = QPushButton("清空显示")
+        self.btn_log_clear.clicked.connect(self._clear_log)
+        lh.addWidget(self.btn_log_clear)
+        lv.addLayout(lh)
+        self.log_view = QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(800)  # 防止日志无限增长撑爆内存
+        lv.addWidget(self.log_view)
+        lay.addWidget(log_frame, 1)  # stretch=1 占据下方剩余空间
+
+        # 日志轮询：与 LogPage 同源（bot.log），800ms 拉一次增量
+        self._log_offset = 0
+        self._log_timer = QTimer(self)
+        self._log_timer.timeout.connect(self._poll_log)
+        self._log_timer.start(800)
 
     @staticmethod
     def _row(*widgets):
@@ -347,6 +379,28 @@ class HomePage(QWidget):
             self._apply_env_report()
         self._apply_install_state()
         self._apply_prompt_state()
+
+    # ---------- 运行日志 ----------
+
+    def _poll_log(self):
+        """拉取 bot.log 增量到日志区（与 LogPage 同源，读正确路径）。"""
+        try:
+            size = os.path.getsize(_BOT_LOG_PATH)
+            if size < self._log_offset:
+                self._log_offset = 0  # 日志被轮转/清空（重启）
+            with open(_BOT_LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self._log_offset)
+                chunk = f.read()
+            if chunk:
+                self.log_view.appendPlainText(chunk.rstrip())
+                self.log_view.verticalScrollBar().setValue(
+                    self.log_view.verticalScrollBar().maximum())
+                self._log_offset = size
+        except OSError:
+            pass
+
+    def _clear_log(self):
+        self.log_view.clear()
 
 
 # =====================================================================
@@ -1009,7 +1063,7 @@ class LogPage(QWidget):
         self._timer.start(800)
 
     def _poll(self):
-        log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bot.log")
+        log_path = _BOT_LOG_PATH
         try:
             size = os.path.getsize(log_path)
             if size < self._offset:

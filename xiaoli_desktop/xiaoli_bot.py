@@ -12,7 +12,7 @@ import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil
 import requests as req
 import pyautogui
 from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat
-from wxauto4.msgs.mtype import ImageMessage, FileMessage, TimeMessage, SystemMessage
+from wx_backend.models import MessageType
 
 if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
     try:
@@ -729,6 +729,15 @@ class AgentBot(WeChatBot):
             logger.error(f"[天枢] 唤起异常: {e}，任务已投递")
         return True
 
+    def _switch_to_chat(self, chat):
+        """切到目标会话（发送前必须）。协议无公开切换方法，探测后端能力：
+        visual 后端有 _switch_chat（点击会话列表）；wxauto 后端 send_text/
+        send_file 内部自动 ChatWith，无需显式切。返回是否已切换。"""
+        switcher = getattr(self.wx, "_switch_chat", None)
+        if switcher is not None:
+            return bool(switcher(chat))
+        return True  # wxauto 后端：send 内部自动 ChatWith
+
     def _activate_wechat_window(self):
         """把微信主窗口激活到前台（uiautomation SetActive + SetForegroundWindow）。
         必须在前台才能保证 pyautogui 的 Ctrl+V/回车 发到微信而不是别的窗口"""
@@ -759,7 +768,7 @@ class AgentBot(WeChatBot):
             logger.warning("[回传] 未能激活微信窗口，发送可能发到错误窗口")
         if chat:
             try:
-                self.wx.ChatWith(chat)
+                self._switch_to_chat(chat)
                 time.sleep(0.3)
             except Exception as e:
                 logger.warning(f"[回传] 切换聊天窗口失败 {chat}: {e}")
@@ -791,7 +800,7 @@ class AgentBot(WeChatBot):
                 # 发送前显式切到目标聊天，防止轮询把窗口切走导致发错联系人
                 if chat:
                     try:
-                        self.wx.ChatWith(chat)
+                        self._switch_to_chat(chat)
                         time.sleep(0.3)
                     except Exception as e:
                         logger.error(f"[回传] 切换聊天窗口失败 {chat}: {e}")
@@ -809,13 +818,13 @@ class AgentBot(WeChatBot):
                             except Exception as e:
                                 logger.warning(f"[回传] 剪贴板发送异常: {e}")
                         if not sent:
-                            # wxauto SendFiles 兜底
+                            # 协议 send_file 兜底（wxauto 后端可用；visual 未实现返回 False）
                             try:
-                                self.wx.SendFiles(fpath, chat)
-                                sent = True
-                                logger.info(f"[回传] SendFiles 发送: {fname}")
+                                sent = self.wx.send_file(fpath, chat)
+                                if sent:
+                                    logger.info(f"[回传] send_file 发送: {fname}")
                             except Exception as e:
-                                logger.error(f"[回传] SendFiles 失败: {e}")
+                                logger.error(f"[回传] send_file 失败: {e}")
                         if not sent:
                             logger.error(f"[回传] 文件发送失败，保留在任务目录: {fname}")
                         else:
@@ -976,9 +985,7 @@ class AgentBot(WeChatBot):
         从最新往回找用户文本作为指令（跳过 bot 自己的消息）。收到后获取文件并处理"""
         for chat_name in list(self._pending_files.keys()):
             try:
-                self.wx.ChatWith(chat_name)
-                time.sleep(0.2)
-                msgs = self.wx.GetAllMessage()
+                msgs = self.wx.get_messages(chat_name)
                 if not msgs:
                     continue
                 for i in range(len(msgs) - 1, -1, -1):
@@ -987,7 +994,7 @@ class AgentBot(WeChatBot):
                     c = getattr(m, "content", "")
                     if s is None or s == "self" or s == self.nickname:
                         continue
-                    if isinstance(m, (ImageMessage, FileMessage, TimeMessage, SystemMessage)):
+                    if getattr(m, "type", None) in (MessageType.IMAGE, MessageType.FILE, MessageType.TIME, MessageType.SYSTEM):
                         continue
                     if not c.strip():
                         continue
@@ -1071,16 +1078,20 @@ class AgentBot(WeChatBot):
         if time.time() - self.last_reply_time < self.cooldown:
             return
         try:
-            sessions = self.wx.GetSession()
+            # 新协议：只处理有未读红圈的会话（visual 后端红圈驱动）；
+            # 降级（wxauto 等无 iter_unread_sessions）走全量会话遍历。
+            if hasattr(self.wx, "iter_unread_sessions"):
+                sessions = list(self.wx.iter_unread_sessions())
+            else:
+                sessions = list(self.wx.iter_sessions())
             if not sessions:
                 return
-            for session in sessions:
-                chat_name = session.name if hasattr(session, "name") else (session if isinstance(session, str) else str(session))
+            for chat_name in sessions:
                 if not chat_name:
                     continue
-                self.wx.ChatWith(chat_name)
-                time.sleep(0.2)
-                msgs = self.wx.GetAllMessage()
+                logger.info(f"🔔 发现新消息：{chat_name}")
+                # get_messages 内部会切到目标会话（visual 点击 / wxauto ChatWith）
+                msgs = self.wx.get_messages(chat_name)
                 if not msgs:
                     continue
                 full_msgs = msgs
@@ -1092,13 +1103,15 @@ class AgentBot(WeChatBot):
                         continue
                     if "Self" in str(type(msg)):
                         continue
-                    if isinstance(msg, ImageMessage):
+                    if getattr(msg, "type", None) == MessageType.IMAGE:
+                        logger.info(f"🖼 判断为图片消息：{chat_name}")
                         if self._has_bot_reply_after(full_msgs, i, 5):
                             continue
                         self._process_image(chat_name, sender, msg)
                         self.last_reply_time = time.time()
                         return
-                    if isinstance(msg, FileMessage):
+                    if getattr(msg, "type", None) == MessageType.FILE:
+                        logger.info(f"📁 判断为文件消息：{chat_name}")
                         if "upload" in str(content).lower() or "上传" in str(content):
                             continue
                         if self._has_bot_reply_after(full_msgs, i, 5):
@@ -1112,7 +1125,7 @@ class AgentBot(WeChatBot):
                             next_sender = getattr(next_msg, "sender", None)
                             next_content = getattr(next_msg, "content", "")
                             if next_sender and next_sender != "self" and next_sender != self.nickname:
-                                if not isinstance(next_msg, (ImageMessage, FileMessage, TimeMessage, SystemMessage)):
+                                if getattr(next_msg, "type", None) not in (MessageType.IMAGE, MessageType.FILE, MessageType.TIME, MessageType.SYSTEM):
                                     if next_content.strip():
                                         user_instruction = next_content.strip()
                                         msg_key = f"{chat_name}_{next_sender}_{next_content}"
@@ -1149,7 +1162,7 @@ class AgentBot(WeChatBot):
                 content = getattr(latest, "content", "")
                 if sender is None or sender == "self" or sender == self.nickname:
                     continue
-                if isinstance(latest, (ImageMessage, FileMessage)):
+                if getattr(latest, "type", None) in (MessageType.IMAGE, MessageType.FILE):
                     continue
                 msg_key = f"{chat_name}_{sender}_{content}"
                 if msg_key in self.recent_msg_ids:
