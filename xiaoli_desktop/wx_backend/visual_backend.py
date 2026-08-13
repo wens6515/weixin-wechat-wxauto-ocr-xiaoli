@@ -738,14 +738,15 @@ class VisualBackend:
         logger.warning(f"[锚定] 红圈 ({bcx},{bcy}) 点击后未读到顶部标题")
         return None
 
-    def _switch_chat(self, chat: str) -> bool:
+    def _switch_chat(self, chat: str, force: bool = False) -> bool:
         """点击会话列表中的目标会话切换聊天。返回是否已切换。
 
         微信会话列表是 toggle 行为：点已选中的会话会取消选中、右侧消息区
         变空。因此已选中目标会话时直接返回，不重复点击（用户实测：再点一次
-        就取消选中了）。
+        就取消选中了）。force=True 强制点击，绕过已选中判断——用于
+        get_messages 读到 0 条时的 toggle 兜底重试。
         """
-        if self._current_chat == chat:
+        if not force and self._current_chat == chat:
             return True  # 已选中，再点会取消选中
         if chat not in self._session_coords:
             # 坐标未知：先刷新会话列表
@@ -807,16 +808,25 @@ class VisualBackend:
         """
         # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
         self._switch_chat(chat)
-        shot = self._refresh(force=True)
-        if shot is None:
-            return []
-        w, h = shot.size
-        region = shot.crop((
-            int(w * self._message_region[0]), int(h * self._message_region[1]),
-            int(w * self._message_region[2]), int(h * self._message_region[3]),
-        ))
-        region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
-        items = ocr_image(region)
+        region = None
+        items = []
+        for attempt in range(2):
+            shot = self._refresh(force=True)
+            if shot is None:
+                return []
+            w, h = shot.size
+            region = shot.crop((
+                int(w * self._message_region[0]), int(h * self._message_region[1]),
+                int(w * self._message_region[2]), int(h * self._message_region[3]),
+            ))
+            region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
+            items = ocr_image(region)
+            if items:
+                break
+            # 消息区空白：可能 toggle 取消选中了（微信再点一次恢复选中）
+            if attempt == 0:
+                logger.info(f"[读取] {chat!r} 消息区读到 0 条，可能 toggle 取消选中，再点一次")
+                self._switch_chat(chat, force=True)
         if not items:
             return []
         # 按 y 排序 → 合并相邻行成消息块（时间戳行作为分隔）
