@@ -466,6 +466,7 @@ class VisualBackend:
         self._closed = False
         self._session_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 屏幕中心点
         self._session_types: dict[str, MessageType] = {}  # 会话名 → 预览行判定的消息类型
+        self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
         # 头像模板（首次启动用户上传）：用于消息区识别自己发的消息。
         # 加载失败/未配置 → 降级 x 坐标中线判 sender。
         self._avatar_template: Image.Image | None = None
@@ -731,13 +732,21 @@ class VisualBackend:
             t = (it["text"] or "").strip()
             if 0.35 * w <= it["x"] <= 0.65 * w and it["y"] < 0.12 * h:
                 if len(t) >= 2 and not re.match(r"^[\d:：\s]+$", t):
+                    self._current_chat = t  # 锚定点击已切换会话，同步状态
                     logger.info(f"[锚定] 红圈 ({bcx},{bcy}) → 会话 {t!r}")
                     return t
         logger.warning(f"[锚定] 红圈 ({bcx},{bcy}) 点击后未读到顶部标题")
         return None
 
     def _switch_chat(self, chat: str) -> bool:
-        """点击会话列表中的目标会话切换聊天。返回是否已切换。"""
+        """点击会话列表中的目标会话切换聊天。返回是否已切换。
+
+        微信会话列表是 toggle 行为：点已选中的会话会取消选中、右侧消息区
+        变空。因此已选中目标会话时直接返回，不重复点击（用户实测：再点一次
+        就取消选中了）。
+        """
+        if self._current_chat == chat:
+            return True  # 已选中，再点会取消选中
         if chat not in self._session_coords:
             # 坐标未知：先刷新会话列表
             list(self.iter_sessions())
@@ -749,6 +758,7 @@ class VisualBackend:
             import pyautogui
             self._foreground()  # 点击依赖前台，先置前微信窗口
             pyautogui.click(coord[0], coord[1])
+            self._current_chat = chat
             time.sleep(0.5)  # 等待消息区刷新
             return True
         except Exception as e:

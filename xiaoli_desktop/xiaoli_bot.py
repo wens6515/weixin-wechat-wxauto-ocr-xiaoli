@@ -322,10 +322,10 @@ def send_trigger_to_window(title, command, hold=0.5, enter_times=1):
         return False
     time.sleep(0.1)
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.2)
+    time.sleep(0.3)
     for _ in range(enter_times):
         pyautogui.press("enter")
-        time.sleep(0.15)
+        time.sleep(0.2)
     logger.info(f"[天枢] 已向窗口「{title}」发送指令: {command}（回车 {enter_times} 次）")
     return True
 
