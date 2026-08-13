@@ -357,11 +357,17 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
 # ---------- 后端实现 ----------
 
 # 微信窗口布局（4.1.12.51 默认窗口，相对窗口客户区比例）
-# 会话列表：左侧约 30% 宽；消息区：右侧约 70% 宽
+# 会话列表：左侧约 42% 宽；消息区：右侧约 58% 宽
 # 注意：窗口位置/大小由用户用 tools/fix_window.py 固定，bot 不移动窗口、
 # 不读窗口配置——坐标换算一律基于窗口当前实际 rect（见 _window_rect）。
-_SESSION_REGION_RATIO = (0.0, 0.08, 0.32, 1.0)   # (l, t, r, b) 相对窗口
-_MESSAGE_REGION_RATIO = (0.32, 0.08, 1.0, 1.0)
+#
+# 默认值为真机框选标定（tools/pick_ocr_region.py，微信窗口 1300x1610 实测）：
+# 消息区底部 0.8384 = 聊天记录下缘，刻意不含输入框（输入框"发送"按钮在
+# 窗口 ~0.95 处——若默认区域含输入框，OCR 会把按钮文字当消息且判 self）。
+# 打包 exe（PyInstaller）无 wx_ocr_region.json 时即用此默认；用户窗口尺寸
+# 不同会导致错位，普通用户分发需引导框选或自适应检测。
+_SESSION_REGION_RATIO = (0.0914, 0.089, 0.4165, 0.9918)   # (l, t, r, b) 相对窗口
+_MESSAGE_REGION_RATIO = (0.4165, 0.0878, 0.9898, 0.8384)
 
 # 用户圈定配置：xiaoli_desktop\wx_ocr_region.json（tools/pick_ocr_region.py 生成）。
 # 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
