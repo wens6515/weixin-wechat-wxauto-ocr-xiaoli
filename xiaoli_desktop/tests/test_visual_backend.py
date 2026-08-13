@@ -237,7 +237,7 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(len(msgs), 2)
         # 时间戳行被分隔，不成为消息
         self.assertEqual(msgs[0].content, "你好")
-        self.assertEqual(msgs[0].sender, "未知")   # 左侧 → 对方
+        self.assertEqual(msgs[0].sender, "王文生")   # 左侧 → 对方（私聊发送人=会话名）
         self.assertEqual(msgs[1].content, "我回复的")
         self.assertEqual(msgs[1].sender, "self")   # 右侧 → 自己
         b.close()
@@ -271,21 +271,57 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(msgs[0].content, "你好")
         b.close()
 
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    # 左侧消息（x < 中线）→ 私聊发送人 = 会话名
+                    {"text": "你好", "x": 100, "y": 50, "w": 30, "h": 20},
+                ])
+    def test_get_messages_private_chat_sender_is_chat_name(self, _ocr, _cap,
+                                                           _find, _switch):
+        """私聊（非群聊）时消息区左侧的发送人就是会话名本身。
+
+        RED 复现：真机日志 [最新消息] sender='未知'——私聊王文生会话里
+        左侧消息的 sender 硬编码"未知"，上层拿不到发送人。私聊场景
+        sender 应为 chat（会话名=发送人），群聊才是消息区气泡名。
+        """
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].sender, "王文生",
+                         "私聊左侧消息 sender 应为会话名，而非'未知'")
+        b.close()
+
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
                 return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.VisualBackend._input_box_rect",
                 return_value=(100, 160, 80, 30))
+    @mock.patch("pyperclip.copy")
     @mock.patch("pyautogui.click")
-    @mock.patch("pyautogui.typewrite")
+    @mock.patch("pyautogui.hotkey")
     @mock.patch("pyautogui.press")
-    def test_send_text_clicks_and_types(self, _press, _type, _click, _rect,
-                                        _cap, _find):
+    def test_send_text_uses_clipboard_paste(self, _press, _hotkey, _click,
+                                            _copy, _rect, _cap, _find):
+        """发送中文必须走剪贴板粘贴，不能 typewrite 逐键模拟。
+
+        RED 复现：真机日志 🤖→[王文生] 显示正常回复，但微信输入框实际
+        只出现'（）'——pyautogui.typewrite 逐键模拟对非 ASCII（中文）
+        无法映射键位，按键序列被中文输入法拦截成括号。
+        """
         b = VisualBackend()
         b.connect()
         self.assertTrue(b.send_text("王文生", "你好呀"))
         _click.assert_called_once()
-        _type.assert_called_once_with("你好呀", interval=0.01)
+        _copy.assert_called_once_with("你好呀")
+        _hotkey.assert_called_once_with("ctrl", "v")
+        _press.assert_called_once_with("enter")
         _press.assert_called_once_with("enter")
         b.close()
 
@@ -420,6 +456,20 @@ class TestIterUnreadSessions(unittest.TestCase):
         """截图失败（_refresh 返回 None）→ 直接返回空。"""
         b = self._backend()
         self.assertEqual(list(b.iter_unread_sessions()), [])
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])
+    def test_unread_poll_refresh_without_foreground(self, _ocr, _refresh):
+        """红圈轮询截图不应置前微信——后台静默像素检测，不打断用户。
+
+        RED 复现：用户反馈 bot 一直把微信拉到前台（真机日志每轮轮询
+        _refresh 都 _foreground）。红圈像素检测（iter_unread）是只读
+        轮询，必须在后台进行；只有检测到新消息后的点击/读取/发送才置前。
+        """
+        b = self._backend()
+        list(b.iter_unread_with_type())
+        self.assertEqual(_refresh.call_args, mock.call(force=True, foreground=False))
 
 
 # ---- 用户圈定区域配置加载 ----

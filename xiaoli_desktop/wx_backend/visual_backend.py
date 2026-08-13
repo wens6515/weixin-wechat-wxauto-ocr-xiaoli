@@ -534,15 +534,20 @@ class VisualBackend:
 
     # ---- 协议：会话 ----
 
-    def _refresh(self, force: bool = False) -> Image.Image | None:
+    def _refresh(self, force: bool = False,
+                 foreground: bool = True) -> Image.Image | None:
         """截图并做区域变化检测；无变化且非 force 时返回 None。
 
-        截图前先 _foreground 把微信置前——实测微信被天枢等窗口遮挡时
-        PrintWindow 返回黑图，OCR 读不到消息（根因）。
+        foreground=True（默认）：截图前先 _foreground 置前微信——微信被
+        完全遮挡时 PrintWindow 返回黑图，OCR 读不到消息。
+        foreground=False：后台静默截图（红圈轮询用）——每轮轮询都置前
+        会反复打断用户；用户实测后台像素检测红圈可靠，不置前也能截图。
+        点击/读取/发送前的截图仍置前（那是检测到新消息后的动作）。
         """
         if self._hwnd is None:
             raise BackendUnavailableError("后端未连接")
-        self._foreground()  # 被遮挡时 PrintWindow 返回黑图，先置前
+        if foreground:
+            self._foreground()  # 被遮挡时 PrintWindow 返回黑图，先置前
         shot = capture_window(self._hwnd)
         if shot is None:
             return None
@@ -682,7 +687,7 @@ class VisualBackend:
         4. 红簇与会话名坐标匹配（红圈在联系人名左上角，|dy|<60 且红圈 x<名字 x）
         5. 匹配失败 → 红圈锚定 fallback（点击红圈右下条目，读顶部标题）
         """
-        shot = self._refresh(force=True)
+        shot = self._refresh(force=True, foreground=False)  # 红圈轮询：后台静默截图，不置前打断用户
         if shot is None:
             return
         badges = _detect_red_clusters(shot, region=self._session_region)
@@ -818,7 +823,8 @@ class VisualBackend:
 
         消息块判定：时间戳行（如 '昨天 18:45'、'20:14'）作为块分隔符；块内
         多行合并为一条消息。sender 按 x 坐标与消息区中线比较——右侧=自己
-        （sender="self"，上层跳过），左侧=对方（sender="未知"）。
+        （sender="self"，上层跳过），左侧=对方（私聊时 sender=会话名，
+        即发送人；群聊发送者名读取待真机样本增强）。
         """
         # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
         self._switch_chat(chat)
@@ -902,7 +908,7 @@ class VisualBackend:
                     cur_lines.clear()
                     cur_y.clear()
                     return
-                sender = "self" if _is_self(first_x, first_y) else "未知"
+                sender = "self" if _is_self(first_x, first_y) else chat
                 seq += 1
                 msgs.append(WeChatMessage(
                     id=f"visual_{seq}",
@@ -953,7 +959,12 @@ class VisualBackend:
             self._foreground()  # 点击/键盘输入依赖前台，先置前微信窗口
             pyautogui.click(cx, cy)
             time.sleep(0.3)
-            pyautogui.typewrite(text, interval=0.01)
+            # 中文发送必须走剪贴板粘贴：typewrite 逐键模拟对非 ASCII 字符
+            # 无法映射键位，按键序列被中文输入法拦截成"（）"（真机实测）
+            import pyperclip
+            pyperclip.copy(text)
+            time.sleep(0.1)
+            pyautogui.hotkey("ctrl", "v")
             time.sleep(0.2)
             pyautogui.press("enter")
             logger.info(f"🤖 → [{chat}]: {text[:50]}")
