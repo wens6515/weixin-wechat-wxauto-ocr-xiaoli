@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 r"""OCR 区域圈定工具：图形框选（PySide6）+ 手填坐标微调。
 
-背景：visual_backend 的 OCR 读取区域（聊天列表区 / 消息区）默认用硬编码
-窗口比例。本工具让用户自行圈定：微信窗口位置 + 两个 OCR 区域，配置写入
-xiaoli_desktop\wx_ocr_region.json，bot 启动时加载——窗口布局变了重新圈一次即可。
+背景：visual_backend 的 OCR 读取区域（会话列表区 / 消息区 / 标题区）默认用
+硬编码窗口比例。本工具让用户自行圈定：微信窗口位置 + 三个 OCR 区域，配置
+写入 xiaoli_desktop\wx_ocr_region.json，bot 启动时加载——窗口布局变了重新
+圈一次即可。
+
+三个区域（拖三个框，顺序固定）：
+  1. 列表区（蓝色）：左侧会话列表（红圈角标检测 + 会话名 OCR）
+  2. 消息区（橙色）：右侧消息区（聊天记录 OCR）
+  3. 标题区（绿色）：右侧消息区顶部的当前会话标题（会话名权威来源 +
+     群聊判定——群聊标题带括号人数，如 '强盗"集团(5)'）
 
 窗口截图用 PrintWindow（即使微信不在最前/被遮挡也能读到完整内容）。
 
@@ -13,7 +20,7 @@ xiaoli_desktop\wx_ocr_region.json，bot 启动时加载——窗口布局变了�
   python tools/pick_ocr_region.py --clear              # 清除配置（回退默认）
   python tools/pick_ocr_region.py --session 0 0.08 0.32 1.0    # 手填列表区比例
   python tools/pick_ocr_region.py --message 0.32 0.08 1.0 1.0  # 手填消息区比例
-  python tools/pick_ocr_region.py --session 0 0.08 0.32 1.0 --message 0.32 0.08 1.0 1.0
+  python tools/pick_ocr_region.py --title 0.4 0.03 0.8 0.09    # 手填标题区比例
 
 区域坐标一律用相对窗口比例（0~1）：l=左, t=上, r=右, b=下（l<r, t<b）。
 配置：xiaoli_desktop\wx_ocr_region.json（含 window_rect 记录圈定时窗口屏幕位置）
@@ -31,8 +38,9 @@ CONFIG_PATH = os.path.join(
 )
 
 DEFAULT = {
-    "session_region": [0.0, 0.08, 0.32, 1.0],
-    "message_region": [0.32, 0.08, 1.0, 1.0],
+    "session_region": [0.0914, 0.089, 0.4165, 0.9918],
+    "message_region": [0.4165, 0.0878, 0.9898, 0.8384],
+    "title_region": [0.4151, 0.0351, 0.8113, 0.082],
 }
 
 
@@ -71,6 +79,7 @@ def save_config(cfg):
         print(f"     微信窗口: ({wr['x']},{wr['y']}) {wr['width']}x{wr['height']}")
     print(f"     列表区 session_region: {cfg['session_region']}")
     print(f"     消息区 message_region: {cfg['message_region']}")
+    print(f"     标题区 title_region: {cfg.get('title_region')}")
     print("     提示：重启小漓 bot 后生效（bot 运行中改配置需重启）")
 
 
@@ -118,7 +127,7 @@ def _gui_pick() -> int:
 
     app = QApplication(sys.argv[:1])
     win = QMainWindow()
-    win.setWindowTitle("圈定 OCR 区域（拖两次：先列表区，后消息区；右键取消）")
+    win.setWindowTitle("圈定 OCR 区域（拖三次：列表区→消息区→标题区；右键撤销）")
     win.setWindowFlags(Qt.WindowStaysOnTopHint)
 
     class Picker(QLabel):
@@ -151,17 +160,18 @@ def _gui_pick() -> int:
                 if r.width() > 10 and r.height() > 10:
                     self.boxes.append(r)
                     n = len(self.boxes)
-                    if n == 1:
-                        print("已圈：列表区（第一个框）。再拖第二个框圈消息区；右键撤销。")
-                    else:
-                        print("已圈：消息区（第二个框）。点关闭按钮保存，或继续调整（右键撤销最后一个）。")
+                    hints = {1: "已圈：列表区（蓝）。再拖第二个框圈消息区",
+                             2: "已圈：消息区（橙）。再拖第三个框圈标题区（右上会话名）",
+                             3: "已圈：标题区（绿）。点关闭按钮保存，或继续调整（右键撤销）"}
+                    print(hints.get(n, ""))
                 self.cur = QRect()
                 self.update()
 
         def paintEvent(self, ev):
             super().paintEvent(ev)
             p = QPainter(self)
-            colors = [QColor(0, 160, 255, 120), QColor(255, 120, 0, 120)]
+            colors = [QColor(0, 160, 255, 120), QColor(255, 120, 0, 120),
+                      QColor(0, 200, 80, 120)]
             for i, r in enumerate(self.boxes):
                 p.fillRect(r, colors[i % len(colors)])
                 p.setPen(QPen(colors[i % len(colors)].darker(), 2))
@@ -200,20 +210,20 @@ def _gui_pick() -> int:
     win.resize(disp_w, disp_h + 30)
     win.show()
 
-    # 30s 无交互自动关闭（headless/误启动兜底）
+    # 45s 无交互自动关闭（headless/误启动兜底）
     closed = {"flag": False}
 
     def _timeout():
-        if len(picker.boxes) < 2:
-            print("[WARN] 30 秒未完成圈定，已取消（未保存）")
+        if len(picker.boxes) < 3:
+            print("[WARN] 45 秒未完成圈定，已取消（未保存）")
             closed["flag"] = True
             win.close()
 
-    QTimer.singleShot(30000, _timeout)
+    QTimer.singleShot(45000, _timeout)
     app.exec()
 
-    if closed["flag"] or len(picker.boxes) < 2:
-        print("已取消（需要圈定 2 个区域）")
+    if closed["flag"] or len(picker.boxes) < 3:
+        print("已取消（需要圈定 3 个区域：列表区→消息区→标题区）")
         return 1
 
     # 换算比例：显示坐标 → 原图比例
@@ -224,13 +234,16 @@ def _gui_pick() -> int:
 
     session = to_ratio(picker.boxes[0])
     message = to_ratio(picker.boxes[1])
-    if not (_valid_region(session) and _valid_region(message)):
-        print(f"[FAIL] 圈定区域非法: session={session} message={message}")
+    title = to_ratio(picker.boxes[2])
+    if not (_valid_region(session) and _valid_region(message)
+            and _valid_region(title)):
+        print(f"[FAIL] 圈定区域非法: session={session} message={message} title={title}")
         return 1
     save_config({
         "window_rect": win_rect,
         "session_region": session,
         "message_region": message,
+        "title_region": title,
     })
     return 0
 
@@ -247,19 +260,23 @@ def main():
                     help="手填列表区比例（l t r b，0~1）")
     ap.add_argument("--message", nargs=4, type=float, metavar=("l", "t", "r", "b"),
                     help="手填消息区比例（l t r b，0~1）")
+    ap.add_argument("--title", nargs=4, type=float, metavar=("l", "t", "r", "b"),
+                    help="手填标题区比例（l t r b，0~1）")
     args = ap.parse_args()
 
     if args.read:
         cfg = load_config()
         if cfg:
             out = f"session={cfg.get('session_region')} message={cfg.get('message_region')}"
+            if cfg.get("title_region"):
+                out += f" title={cfg.get('title_region')}"
             if cfg.get("window_rect"):
                 wr = cfg["window_rect"]
                 out += f" window=({wr['x']},{wr['y']}) {wr['width']}x{wr['height']}"
             print(f"已存配置: {out}")
         else:
             print(f"（无配置，使用默认）session={DEFAULT['session_region']} "
-                  f"message={DEFAULT['message_region']}")
+                  f"message={DEFAULT['message_region']} title={DEFAULT['title_region']}")
         return
     if args.clear:
         if os.path.isfile(CONFIG_PATH):
@@ -269,11 +286,12 @@ def main():
             print("无配置可清除")
         return
 
-    # 手填模式：任一区域参数给出即按手填保存（可只填一个，另一个沿用现有/默认）
-    if args.session is not None or args.message is not None:
+    # 手填模式：任一区域参数给出即按手填保存（可只填一个，其余沿用现有/默认）
+    if args.session is not None or args.message is not None or args.title is not None:
         cfg = load_config() or dict(DEFAULT)
         new_session = list(cfg.get("session_region", DEFAULT["session_region"]))
         new_message = list(cfg.get("message_region", DEFAULT["message_region"]))
+        new_title = list(cfg.get("title_region", DEFAULT["title_region"]))
         if args.session is not None:
             if not _valid_region(args.session):
                 print(f"[FAIL] session 非法（须 0~1 且 l<r、t<b）: {args.session}")
@@ -284,7 +302,13 @@ def main():
                 print(f"[FAIL] message 非法（须 0~1 且 l<r、t<b）: {args.message}")
                 sys.exit(1)
             new_message = list(args.message)
-        save_config({"session_region": new_session, "message_region": new_message})
+        if args.title is not None:
+            if not _valid_region(args.title):
+                print(f"[FAIL] title 非法（须 0~1 且 l<r、t<b）: {args.title}")
+                sys.exit(1)
+            new_title = list(args.title)
+        save_config({"session_region": new_session, "message_region": new_message,
+                     "title_region": new_title})
         return
 
     # 无参数 → 图形框选
