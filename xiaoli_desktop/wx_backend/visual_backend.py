@@ -366,10 +366,10 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
 # 窗口 ~0.95 处——若默认区域含输入框，OCR 会把按钮文字当消息且判 self）。
 # 打包 exe（PyInstaller）无 wx_ocr_region.json 时即用此默认；用户窗口尺寸
 # 不同会导致错位，普通用户分发需引导框选或自适应检测。
-_SESSION_REGION_RATIO = (0.0914, 0.089, 0.4165, 0.9918)   # (l, t, r, b) 相对窗口
-_MESSAGE_REGION_RATIO = (0.4165, 0.0878, 0.9898, 0.8384)
+_SESSION_REGION_RATIO = (0.09, 0.0878, 0.418, 0.9895)   # (l, t, r, b) 相对窗口
+_MESSAGE_REGION_RATIO = (0.4165, 0.1288, 0.9913, 0.8337)
 # 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
-_TITLE_REGION_RATIO = (0.4136, 0.0363, 0.807, 0.0785)
+_TITLE_REGION_RATIO = (0.4151, 0.0386, 0.8128, 0.082)
 
 # 用户圈定配置：xiaoli_desktop\wx_ocr_region.json（tools/pick_ocr_region.py 生成）。
 # 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
@@ -590,14 +590,18 @@ class VisualBackend:
         self._last_shot = shot
         return shot
 
-    def read_title(self) -> str | None:
-        """读右侧消息区顶部的当前会话标题（OCR，不置前）。
+    def read_title(self, foreground: bool = False) -> str | None:
+        """读右侧消息区顶部的当前会话标题（OCR）。
 
         标题是当前会话的权威名称：私聊即会话名，群聊形如
         '强盗"集团(5)'（括号内人数）。返回标题原文；区域为空/失败返回 None。
         调用方用 parse_title 解析会话名与群聊标记。
+
+        foreground：默认 False 后台静默截图（只读轮询用）；微信被其他窗口
+        遮挡时 PrintWindow 黑图导致 OCR 空——处理新消息的路径（get_messages）
+        传 True 置前截图保证可靠。
         """
-        shot = self._refresh(force=True, foreground=False)  # 只读，不置前
+        shot = self._refresh(force=True, foreground=foreground)
         if shot is None:
             return None
         w, h = shot.size
@@ -883,8 +887,14 @@ class VisualBackend:
         """
         # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
         self._switch_chat(chat)
-        # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）
-        title = self.read_title()
+        # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）。
+        # 处理新消息的动作路径，置前截图保证微信不被遮挡时也能读到标题。
+        title = self.read_title(foreground=True)
+        if not title:
+            # 标题区空：可能 toggle 取消选中（force 重复点击同一会话会取消），
+            # force 重切恢复选中后再读一次（与读 0 条重试同模式）
+            self._switch_chat(chat, force=True)
+            title = self.read_title(foreground=True)
         if title:
             name, is_group, _ = parse_title(title)
             self._current_title = name or chat

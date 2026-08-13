@@ -332,6 +332,32 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(msgs[0].content, "豆包有学生优惠了")
         b.close()
 
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])
+    def test_get_messages_retries_title_when_deselected(self, _ocr, _cap,
+                                                        _find, _switch):
+        """read_title 返回 None（toggle 取消选中）→ force 重切后再读标题。
+
+        RED 复现（真机探针）：同一会话 force 连续点击第 2 次会 toggle 取消选中，
+        标题区空 read_title 返回 None——旧实现不重试，_current_is_group 保持旧值
+        导致群聊判定错。修复：None 时 force 重切再读一次。
+        """
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        with mock.patch.object(b, "read_title",
+                               side_effect=[None, "王文生"]) as _rt:
+            b.get_messages("王文生")
+        self.assertEqual(_rt.call_count, 2, "read_title None 后应重试一次")
+        force_calls = [c for c in _switch.call_args_list
+                       if c == mock.call("王文生", force=True)]
+        self.assertTrue(force_calls, "None 后应 force 重切会话恢复选中")
+        b.close()
+
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
                 return_value=_solid((200, 200), (255, 255, 255)))
