@@ -239,8 +239,6 @@ class WeChatBot:
         self.processed_ids_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_ids.json")
         self.processed_ids = set()
         self._load_processed_ids()
-        # 启动时把所有已存在的消息 id 加入去重集合，防止重启后重复处理
-        self._seed_existing_ids()
 
     def set_chat_temperature(self, value):
         with self._model_lock:
@@ -267,8 +265,8 @@ class WeChatBot:
     def _save_processed_id(self, msg_id):
         self.processed_ids.add(msg_id)
         # 限界：持久化去重集合只增不减会无限膨胀（每次写盘全量 dump 变慢）。
-        # 超过上限时丢弃约一半（无序集合，丢哪些不重要——重启后
-        # _seed_existing_ids 会把当前所有消息重新种回去，去重不依赖历史）。
+        # 超过上限时丢弃约一半（无序集合，丢哪些不重要——红圈驱动的监听
+        # 只看未读消息，已读历史消息本就不会被处理，去重不依赖历史全集）。
         if len(self.processed_ids) > 10000:
             self.processed_ids = set(list(self.processed_ids)[len(self.processed_ids) // 2:])
         try:
@@ -294,29 +292,6 @@ class WeChatBot:
             for _ in range(self._RECENT_MAX // 2):
                 old = order.popleft()
                 self.recent_msg_ids.discard(old)
-
-    def _seed_existing_ids(self):
-        """启动时把所有已存在消息的 id 加入去重集合，防止重启后重复处理"""
-        try:
-            sessions = list(self.wx.iter_sessions())
-            for chat_name in sessions:
-                if not chat_name:
-                    continue
-                msgs = self.wx.get_messages(chat_name)
-                if not msgs:
-                    continue
-                for msg in msgs:
-                    msg_id = getattr(msg, 'id', None)
-                    if msg_id:
-                        self.processed_ids.add(msg_id)
-                        self._remember_recent(f"{chat_name}_{msg_id}")
-            with open(self.processed_ids_file, "w", encoding="utf-8") as f:
-                json.dump(list(self.processed_ids), f, ensure_ascii=False)
-            logger.info(f"✅ 已加载 {len(self.processed_ids)} 条历史消息（防重复）")
-
-
-        except Exception as e:
-            logger.warning(f"加载历史消息失败: {e}")
 
     def _load_memory(self):
         if os.path.exists(self.memory_file):
