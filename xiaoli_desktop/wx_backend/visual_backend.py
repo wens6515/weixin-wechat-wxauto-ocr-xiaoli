@@ -604,19 +604,23 @@ class VisualBackend:
     def iter_unread_sessions(self) -> Iterator[str]:
         """仅迭代有未读红圈角标的会话（可选能力，wxauto 等后端可不提供）。
 
-        效率路径（重构核心）：
-        1. 截图（force=True——红圈检测走像素级 ~毫秒级，无需 diff 保护；
-           不能用 force=False：region_changed 检测的是相对上一帧的变化，
-           红圈已存在时两帧相同会误判"无变化"而漏读）
-        2. 列表区红色角标簇检测（crop + PIL point 掩码，~毫秒级，无 OCR）
-        3. 无红簇 → 直接结束（无未读时每轮只花截图+像素检测，零 OCR 零点击）
-        4. 有红簇 → 整窗 OCR 提取会话名（crop OCR 实测读不出会话名，必须整窗）
-           → 红簇与名字坐标匹配（用户描述：红圈在联系人名字左上角）
-        5. yield 有未读的会话名（后续 get_messages 会点击切换该会话）
+        内部复用 iter_unread_with_type 的匹配逻辑，只取会话名（兼容旧调用方）。
+        """
+        for name, _type in self.iter_unread_with_type():
+            yield name
 
-        匹配规则（实测校准）：红簇中心在某个会话名中心的左上邻近
-        （|dy| < 60px 且红簇 x < 名字 x，避免跨会话误配）；未匹配的红簇记
-        warning 日志（如 OCR 未读出名字的折叠条目），不阻断。
+    def iter_unread_with_type(self) -> Iterator[tuple[str, MessageType]]:
+        """迭代未读会话，产出 (会话名, 消息类型)。
+
+        类型来自会话列表预览行（_extract_session_names 填充的 _session_types）：
+        [图片]/[视频]/[文件]/[表情] → 对应类型，无 [] → 文字。
+
+        效率路径：
+        1. 截图 force（红圈像素检测毫秒级，无 diff 保护）
+        2. 无红簇 → 直接结束（零 OCR 零点击）
+        3. 有红簇 → OCR 提取会话名 + 预览类型
+        4. 红簇与会话名坐标匹配（红圈在联系人名左上角，|dy|<60 且红圈 x<名字 x）
+        5. 匹配失败 → 红圈锚定 fallback（点击红圈右下条目，读顶部标题）
         """
         shot = self._refresh(force=True)
         if shot is None:
@@ -624,14 +628,12 @@ class VisualBackend:
         badges = _detect_red_clusters(shot, region=self._session_region)
         if not badges:
             return
-        # 有红簇才整窗 OCR 提取会话名（复用 iter_sessions 逻辑）
         self._extract_session_names(shot)
         if not self._session_coords:
             return
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
-        # 红簇中心 → 屏幕坐标；与会话名中心匹配
         seen: set[str] = set()
         for (bl, bt, br, bb) in badges:
             bcx = win_l + (bl + br) // 2
@@ -650,12 +652,43 @@ class VisualBackend:
             if best is not None and best not in seen:
                 seen.add(best)
                 logger.debug(f"[未读] {best!r} 红圈屏幕 ({bcx},{bcy})")
-                yield best
+                yield (best, self._session_types.get(best, MessageType.TEXT))
             elif best is not None:
                 logger.debug(f"[未读] {best!r} 已有红圈（重复角标，跳过）")
             else:
-                logger.warning(
-                    f"[未读] 红圈屏幕 ({bcx},{bcy}) 未匹配到会话名（可能是 OCR 未读出的条目）")
+                # 红圈锚定 fallback：会话名 OCR 漏读时，点击红圈右下条目，
+                # 读顶部标题拿会话名（根治"王文生漏消息"——红圈可靠，别被 OCR 拖垮）
+                anchored = self._anchor_badge(bcx, bcy)
+                if anchored and anchored not in seen:
+                    seen.add(anchored)
+                    yield (anchored, MessageType.TEXT)
+
+    def _anchor_badge(self, bcx: int, bcy: int) -> str | None:
+        """红圈锚定 fallback：点击红圈右下（联系人条目），读顶部标题拿会话名。
+
+        红圈在头像左上角，头像约 40px，条目主体在头像右侧约 45px 处。
+        点击后当前会话切换，顶部标题区（x 居中、y 偏上）即会话名。
+        """
+        try:
+            import pyautogui
+            pyautogui.click(bcx + 45, bcy)
+            time.sleep(0.6)
+        except Exception as e:
+            logger.warning(f"[锚定] 点击失败: {e}")
+            return None
+        shot = self._refresh(force=True)
+        if shot is None:
+            return None
+        w, h = shot.size
+        items = ocr_image(shot)
+        for it in items:
+            t = (it["text"] or "").strip()
+            if 0.35 * w <= it["x"] <= 0.65 * w and it["y"] < 0.12 * h:
+                if len(t) >= 2 and not re.match(r"^[\d:：\s]+$", t):
+                    logger.info(f"[锚定] 红圈 ({bcx},{bcy}) → 会话 {t!r}")
+                    return t
+        logger.warning(f"[锚定] 红圈 ({bcx},{bcy}) 点击后未读到顶部标题")
+        return None
 
     def _switch_chat(self, chat: str) -> bool:
         """点击会话列表中的目标会话切换聊天。返回是否已切换。"""
@@ -762,6 +795,13 @@ class VisualBackend:
 
         if limit:
             msgs = msgs[-limit:]
+        # 类型标注：最新一条消息用会话列表预览类型（[图片]/[文件]/[视频]/[表情]）
+        # 覆盖消息区 OCR 的 TEXT 硬编码——类型信号来自会话列表，比消息区可靠。
+        if msgs:
+            t = self._session_types.get(chat, MessageType.TEXT)
+            if t != MessageType.TEXT:
+                from dataclasses import replace
+                msgs[-1] = replace(msgs[-1], type=t)
         return msgs
 
     # ---- 协议：发送 ----
