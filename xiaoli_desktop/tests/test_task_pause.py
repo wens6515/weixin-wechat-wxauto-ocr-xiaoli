@@ -76,14 +76,56 @@ def polled_append(lst):
 
 
 class _NoScanWx:
-    """最小 wx 桩：GetSession 记一次即返回空（模拟无新会话）。"""
+    """最小 wx 桩：iter_sessions 记一次即返回空（模拟无新会话）。"""
+
+    def __init__(self, log):
+        self._log = log
+
+    def iter_sessions(self):
+        self._log.append("scan")
+        return iter([])
+
+    def get_messages(self, chat):
+        return []
+
+
+class _ProtocolProbeWx:
+    """同时暴露新旧 API 的探针桩：记录 process_new_messages 实际调用的是
+    旧 wxauto API（GetSession）还是新协议（iter_unread_sessions）。"""
 
     def __init__(self, log):
         self._log = log
 
     def GetSession(self):
-        self._log.append("scan")
+        self._log.append("get_session")
         return []
+
+    def iter_unread_sessions(self):
+        self._log.append("unread")
+        return iter([])
+
+    def iter_sessions(self):
+        self._log.append("sessions")
+        return iter([])
+
+    def get_messages(self, chat):
+        return []
+
+
+class TestProcessNewMessagesProtocol(unittest.TestCase):
+    def test_uses_new_protocol_not_old_api(self):
+        """RED 复现：AgentBot.process_new_messages 仍调用旧 wxauto API
+        （GetSession）而非新协议（iter_unread_sessions）——协议化后端
+        （visual/wxauto_backend）没有 GetSession，会 AttributeError 被
+        except 静默吞掉，表现为"启动 bot 后收到新消息毫无反应"。
+        修复后应走 iter_unread_sessions，不再触碰 GetSession。"""
+        log = []
+        bot = make_bot()
+        bot.wx = _ProtocolProbeWx(log)
+        bot._tick_poll_outbox = lambda: None
+        bot.process_new_messages()
+        self.assertNotIn("get_session", log, "不得再调用旧 GetSession API")
+        self.assertIn("unread", log, "应调用新协议 iter_unread_sessions")
 
 
 if __name__ == "__main__":

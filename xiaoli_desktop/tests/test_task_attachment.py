@@ -15,26 +15,24 @@ from types import SimpleNamespace
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xiaoli_bot import AgentBot
+from wx_backend.models import MessageType
 
 
 def _text_msg(sender, content, mid):
-    return SimpleNamespace(sender=sender, content=content, id=mid)
+    return SimpleNamespace(sender=sender, content=content, id=mid,
+                           type=MessageType.TEXT)
 
 
 class _FakeWx:
-    """最小 wx 桩：一个会话、一条文本消息。"""
+    """最小 wx 桩：一个会话、一条文本消息（新协议）。"""
 
     def __init__(self, msgs):
         self._msgs = msgs
-        self.sessions = [SimpleNamespace(name="小明")]
 
-    def GetSession(self):
-        return self.sessions
+    def iter_unread_sessions(self):
+        return iter(["小明"])
 
-    def ChatWith(self, _name):
-        pass
-
-    def GetAllMessage(self):
+    def get_messages(self, chat):
         return self._msgs
 
 
