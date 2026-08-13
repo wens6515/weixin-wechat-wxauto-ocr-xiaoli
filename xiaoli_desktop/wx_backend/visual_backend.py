@@ -499,15 +499,18 @@ class VisualBackend:
         return True
 
     def _foreground(self) -> bool:
-        """把微信窗口强制置前（pyautogui 点击/键盘输入前必须，否则操作发到
-        当前前台窗口）。截图走 PrintWindow 不依赖前台，但点击/输入依赖。
+        """把微信窗口强制置前。截图（PrintWindow）与点击/键盘输入都依赖
+        微信在前台——实测微信被其他窗口（如天枢界面）完全遮挡时，
+        PrintWindow 返回黑图，OCR 读不到消息。因此所有截图/操作前先置前。
 
+        已在前台时快速返回（不 Alt 空击、不 sleep），避免每轮轮询都打断用户。
         Windows 前台锁：非前台进程调用 SetForegroundWindow 会被静默拒绝，
-        先 Alt 空击解除锁定（项目先例 xiaoli_bot._activate_wechat_window）。
-        若窗口最小化先 SW_RESTORE 恢复。"""
+        先 Alt 空击解除锁定；窗口最小化先 SW_RESTORE 恢复。"""
         if self._hwnd is None:
             return False
         try:
+            if u32.GetForegroundWindow() == self._hwnd:
+                return True  # 已在前台，无需操作
             if u32.IsIconic(self._hwnd):
                 u32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
             try:
@@ -526,9 +529,14 @@ class VisualBackend:
     # ---- 协议：会话 ----
 
     def _refresh(self, force: bool = False) -> Image.Image | None:
-        """截图并做区域变化检测；无变化且非 force 时返回 None。"""
+        """截图并做区域变化检测；无变化且非 force 时返回 None。
+
+        截图前先 _foreground 把微信置前——实测微信被天枢等窗口遮挡时
+        PrintWindow 返回黑图，OCR 读不到消息（根因）。
+        """
         if self._hwnd is None:
             raise BackendUnavailableError("后端未连接")
+        self._foreground()  # 被遮挡时 PrintWindow 返回黑图，先置前
         shot = capture_window(self._hwnd)
         if shot is None:
             return None
