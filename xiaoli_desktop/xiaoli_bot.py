@@ -730,13 +730,14 @@ class AgentBot(WeChatBot):
         return True
 
     def _switch_to_chat(self, chat):
-        """切到目标会话（发送前必须）。协议无公开切换方法，探测后端能力：
-        visual 后端有 _switch_chat（点击会话列表）；wxauto 后端 send_text/
-        send_file 内部自动 ChatWith，无需显式切。返回是否已切换。"""
+        """切到目标会话（发送前必须）。visual 后端（当前唯一可用通道）有
+        _switch_chat（点击会话列表）。wxauto4 在微信 4.1.12 结构性失效，
+        不作为可用后端——无切换能力时 fail-closed 返回 False，不假装能切。"""
         switcher = getattr(self.wx, "_switch_chat", None)
         if switcher is not None:
             return bool(switcher(chat))
-        return True  # wxauto 后端：send 内部自动 ChatWith
+        logger.warning(f"[切换] 后端无 _switch_chat 能力，无法切到会话 {chat!r}")
+        return False
 
     def _activate_wechat_window(self):
         """把微信主窗口激活到前台（uiautomation SetActive + SetForegroundWindow）。

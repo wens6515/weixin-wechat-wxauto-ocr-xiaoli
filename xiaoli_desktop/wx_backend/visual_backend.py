@@ -80,6 +80,17 @@ gdi32.PrintWindow = u32.PrintWindow  # 别名（PrintWindow 在 user32）
 u32.PrintWindow.restype = wt.BOOL
 u32.PrintWindow.argtypes = [wt.HWND, _HANDLE, wt.UINT]
 
+# 窗口前置（pyautogui 点击/输入前必须，否则操作发到别的窗口）。
+# 64 位句柄安全同 _HANDLE；keybd_event 的 dwExtraInfo 是 ULONG_PTR。
+u32.SetForegroundWindow.restype = wt.BOOL
+u32.SetForegroundWindow.argtypes = [wt.HWND]
+u32.IsIconic.restype = wt.BOOL
+u32.IsIconic.argtypes = [wt.HWND]
+u32.ShowWindow.restype = wt.BOOL
+u32.ShowWindow.argtypes = [wt.HWND, wt.INT]
+u32.keybd_event.restype = None
+u32.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD, ctypes.c_void_p]
+
 
 class _BITMAPINFOHEADER(ctypes.Structure):
     _fields_ = [
@@ -486,6 +497,31 @@ class VisualBackend:
         logger.info(f"✅ 视觉后端已连接（窗口 0x{hwnd:x} {shot.size[0]}x{shot.size[1]}）")
         return True
 
+    def _foreground(self) -> bool:
+        """把微信窗口强制置前（pyautogui 点击/键盘输入前必须，否则操作发到
+        当前前台窗口）。截图走 PrintWindow 不依赖前台，但点击/输入依赖。
+
+        Windows 前台锁：非前台进程调用 SetForegroundWindow 会被静默拒绝，
+        先 Alt 空击解除锁定（项目先例 xiaoli_bot._activate_wechat_window）。
+        若窗口最小化先 SW_RESTORE 恢复。"""
+        if self._hwnd is None:
+            return False
+        try:
+            if u32.IsIconic(self._hwnd):
+                u32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
+            try:
+                # VK_MENU(Alt) 空击解除前台锁
+                u32.keybd_event(0x12, 0, 0, 0)
+                u32.keybd_event(0x12, 0, 2, 0)  # KEYEVENTF_KEYUP
+            except Exception:
+                pass
+            u32.SetForegroundWindow(self._hwnd)
+            time.sleep(0.2)
+            return True
+        except Exception as e:
+            logger.warning(f"[前置] 微信窗口置前失败: {e}")
+            return False
+
     # ---- 协议：会话 ----
 
     def _refresh(self, force: bool = False) -> Image.Image | None:
@@ -680,6 +716,7 @@ class VisualBackend:
         """
         try:
             import pyautogui
+            self._foreground()  # 点击依赖前台，先置前微信窗口
             pyautogui.click(bcx + 45, bcy)
             time.sleep(0.6)
         except Exception as e:
@@ -710,6 +747,7 @@ class VisualBackend:
             return False
         try:
             import pyautogui
+            self._foreground()  # 点击依赖前台，先置前微信窗口
             pyautogui.click(coord[0], coord[1])
             time.sleep(0.5)  # 等待消息区刷新
             return True
@@ -868,6 +906,7 @@ class VisualBackend:
                 return False
             cx = rect[0] + rect[2] // 2
             cy = rect[1] + rect[3] // 2
+            self._foreground()  # 点击/键盘输入依赖前台，先置前微信窗口
             pyautogui.click(cx, cy)
             time.sleep(0.3)
             pyautogui.typewrite(text, interval=0.01)
@@ -880,16 +919,45 @@ class VisualBackend:
             return False
 
     def _input_box_rect(self):
-        """输入框位于消息区底部（约 85% 高度处，全宽）。返回屏幕坐标 (l,t,w,h)。"""
+        """定位输入框（打字区域），返回屏幕坐标 (l,t,w,h)，中心点供点击聚焦。
+
+        优先读标定值（tools/calibrate_input_box.py 生成，用户点击确认的
+        输入框中心相对窗口比例）；无标定时回退硬编码比例（消息区底部约 82% 高）。
+        """
         if self._hwnd is None:
             return None
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         w = rect.right - rect.left
         h = rect.bottom - rect.top
+        cal = self._load_input_box_calibration()
+        if cal:
+            cx = rect.left + int(w * cal["fx"])
+            cy = rect.top + int(h * cal["fy"])
+            # 以标定点为中心的小矩形（点击聚焦用，宽高只需覆盖输入框即可）
+            return (cx - int(w * 0.15), cy - int(h * 0.03), int(w * 0.30), int(h * 0.06))
+        # 回退：硬编码比例
         l = rect.left + int(w * self._message_region[0]) + 20
         t = rect.top + int(h * 0.82)
         return (l, t, int(w * (self._message_region[2] - self._message_region[0])) - 40, int(h * 0.12))
+
+    def _load_input_box_calibration(self):
+        """读输入框标定值（相对窗口宽高比例）。无标定文件/非法值返回 None。"""
+        try:
+            cal_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "wx_input_box.json")
+            if not os.path.isfile(cal_path):
+                return None
+            with open(cal_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            fx = data.get("fx")
+            fy = data.get("fy")
+            if isinstance(fx, (int, float)) and isinstance(fy, (int, float)):
+                if 0 <= fx <= 1 and 0 <= fy <= 1:
+                    return {"fx": float(fx), "fy": float(fy)}
+        except (OSError, ValueError):
+            pass
+        return None
 
     def send_file(self, chat: str, file_path: str) -> bool:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""
