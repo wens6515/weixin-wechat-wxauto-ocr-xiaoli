@@ -222,6 +222,8 @@ class WeChatBot:
         self._sent_back_stems = {}
         # 图片消息点击偏移校准（竖图点击偏位时手动校正，格式 [dx, dy]，存 config.json）
         self.image_click_offset = cfg.get("image_click_offset", [0, 0])
+        # 头像模板（首次启动用户上传，用于消息区识别自己发的消息）
+        self.avatar_template = cfg.get("avatar_template", "")
 
         self._model_lock = threading.RLock()
 
@@ -322,7 +324,7 @@ class WeChatBot:
             if self._stop_event is not None and self._stop_event.is_set():
                 raise RuntimeError("微信连接已取消")
             try:
-                self.wx = create_backend("auto")
+                self.wx = create_backend("auto", avatar_template=getattr(self, "avatar_template", ""))
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:

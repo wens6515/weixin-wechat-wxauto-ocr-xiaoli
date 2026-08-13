@@ -448,13 +448,22 @@ class VisualBackend:
 
     name = "visual"
 
-    def __init__(self, poll_region: bool = True, **kwargs: Any):
+    def __init__(self, poll_region: bool = True, avatar_template: str = "", **kwargs: Any):
         self._hwnd = None
         self._last_shot: Image.Image | None = None
         self._poll_region = poll_region
         self._closed = False
         self._session_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 屏幕中心点
         self._session_types: dict[str, MessageType] = {}  # 会话名 → 预览行判定的消息类型
+        # 头像模板（首次启动用户上传）：用于消息区识别自己发的消息。
+        # 加载失败/未配置 → 降级 x 坐标中线判 sender。
+        self._avatar_template: Image.Image | None = None
+        if avatar_template and os.path.isfile(avatar_template):
+            try:
+                self._avatar_template = Image.open(avatar_template).convert("RGB")
+            except Exception as e:
+                logger.warning(f"头像模板加载失败（{e}），降级 x 坐标判 sender")
+                self._avatar_template = None
         # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
         cfg = _load_region_config()
         self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
@@ -708,6 +717,39 @@ class VisualBackend:
             logger.warning(f"[切换] 点击会话失败: {e}")
             return False
 
+    def _detect_self_avatar_ys(self, region_img: Image.Image) -> list[int]:
+        """在消息区检测小漓头像的 y 坐标（多尺度模板匹配），返回头像中心 y 列表。
+
+        头像在消息区右侧（自己消息气泡右边）。多尺度匹配覆盖头像缩放差异；
+        未配置头像 / 匹配失败返回空列表 → 调用方降级 x 坐标中线判 sender。
+        """
+        if self._avatar_template is None:
+            return []
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            return []
+        region = np.array(region_img.convert("RGB"))
+        template = np.array(self._avatar_template)
+        th, tw = template.shape[:2]
+        rh = region.shape[0]
+        if th <= 0 or tw <= 0:
+            return []
+        base_h = max(40, rh // 12)
+        ys = []
+        for scale in (0.7, 0.85, 1.0, 1.15, 1.3):
+            target_h = int(base_h * scale)
+            target_w = int(tw * target_h / th)
+            if target_w <= 0 or target_h <= 0 or target_w > region.shape[1] or target_h > rh:
+                continue
+            resized = cv2.resize(template, (target_w, target_h))
+            result = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(result >= 0.6)
+            for pt in zip(*loc[::-1]):
+                ys.append(int(pt[1]) + target_h // 2)
+        return ys
+
     def get_messages(self, chat: str, limit: int | None = None) -> list[WeChatMessage]:
         """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
 
@@ -732,6 +774,15 @@ class VisualBackend:
         # 按 y 排序 → 合并相邻行成消息块（时间戳行作为分隔）
         items.sort(key=lambda it: (it["y"], it["x"]))
         midline_x = region.width // 2  # 消息区中线：右侧=自己发的
+        # 头像锚定：检测小漓头像位置（自己消息气泡右侧），优先于 x 坐标
+        avatar_ys = self._detect_self_avatar_ys(region)
+
+        def _is_self(first_x: int, first_y: int) -> bool:
+            for ay in avatar_ys:
+                if abs(first_y - ay) < 35:  # 消息 y 与头像 y 对齐 → self
+                    return True
+            return first_x > midline_x  # 降级：x 中线
+
         msgs: list[WeChatMessage] = []
         cur_lines: list[dict] = []
         cur_y: list[int] = []
@@ -768,7 +819,8 @@ class VisualBackend:
             if text and not _is_noise(text):
                 # sender 判定：块内首行 x 相对中线（右侧=自己）
                 first_x = cur_lines[0]["x"]
-                sender = "self" if first_x > midline_x else "未知"
+                first_y = cur_lines[0]["y"]
+                sender = "self" if _is_self(first_x, first_y) else "未知"
                 seq += 1
                 msgs.append(WeChatMessage(
                     id=f"visual_{seq}",

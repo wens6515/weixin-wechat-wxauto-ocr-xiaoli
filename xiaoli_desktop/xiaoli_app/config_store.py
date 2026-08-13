@@ -463,6 +463,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "image_click_offset": [-200, -130],  # 图片点击偏移（用户实测校准 2026-08-04：真人点击测 [-199,-131] 取整；位置偏了再到设置页调）
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
+        "avatar_template": "",  # 小漓头像模板图路径（首次启动用户上传，用于消息区识别自己发的消息）
     }.items():
         if k not in cfg:
             cfg[k] = v
