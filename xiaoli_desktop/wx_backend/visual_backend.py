@@ -865,6 +865,11 @@ class VisualBackend:
         cur_lines: list[dict] = []
         cur_y: list[int] = []
         seq = 0
+        # 群聊发送者名识别：气泡上方短文本行（如 '哆拉A萝'）紧贴内容上方。
+        # pending_name = (文本, y)：候选发送者名；被后续内容行消费（y 差<150）
+        # → 成为该块 sender；悬空（后面没紧跟内容）→ 它本身是一条独立短消息。
+        pending_name: tuple[str, int] | None = None
+        block_sender: str | None = None
 
         def _is_timestamp(text: str) -> bool:
             """时间戳/日期行：'昨天 18:45' / '20:14' / '下午 2:30' / '1月1日'。"""
@@ -890,47 +895,87 @@ class VisualBackend:
             return False
 
         def _flush():
-            nonlocal seq
-            if not cur_lines:
-                return
-            # 一条消息：多行文本合并
-            text = " ".join(l["text"] for l in cur_lines).strip()
-            text = re.sub(r"\s+", " ", text)
-            if text and not _is_noise(text):
-                # sender 判定：块内首行 x 相对中线（右侧=自己）
-                first_x = cur_lines[0]["x"]
-                first_y = cur_lines[0]["y"]
-                # 输入框按钮噪声：微信输入框"发送"按钮固定在消息区右下角，
-                # OCR 会把它读成消息且 x 靠右判 self——顶掉真实最新消息导致
-                # 上层跳过整会话（真机日志：latest sender='self' content='发送'）。
-                if (text == "发送" and first_x > 0.85 * region.width
-                        and first_y > 0.8 * region.height):
-                    cur_lines.clear()
-                    cur_y.clear()
-                    return
-                sender = "self" if _is_self(first_x, first_y) else chat
+            nonlocal seq, block_sender, pending_name
+            if cur_lines:
+                # 一条消息：多行文本合并
+                text = " ".join(l["text"] for l in cur_lines).strip()
+                text = re.sub(r"\s+", " ", text)
+                if text and not _is_noise(text):
+                    # sender 判定：块内首行 x 相对中线（右侧=自己）
+                    first_x = cur_lines[0]["x"]
+                    first_y = cur_lines[0]["y"]
+                    # 输入框按钮噪声：微信输入框"发送"按钮固定在消息区右下角，
+                    # OCR 会把它读成消息且 x 靠右判 self——顶掉真实最新消息导致
+                    # 上层跳过整会话（真机日志：latest sender='self' content='发送'）。
+                    is_send_button = (text == "发送" and first_x > 0.85 * region.width
+                                      and first_y > 0.8 * region.height)
+                    if not is_send_button:
+                        # 群聊：气泡上方发送者名（pending_name 被内容行消费时
+                        # 设置 block_sender）；私聊退回会话名。
+                        sender = "self" if _is_self(first_x, first_y) \
+                            else (block_sender or chat)
+                        seq += 1
+                        msgs.append(WeChatMessage(
+                            id=f"visual_{seq}",
+                            chat=chat,
+                            sender=sender,
+                            content=text,
+                            type=MessageType.TEXT,
+                        ))
+                cur_lines.clear()
+                cur_y.clear()
+            block_sender = None
+            # 悬空的候选发送者名（后面没紧跟内容）→ 它本身是一条独立短消息
+            if pending_name is not None:
+                name = pending_name[0]
+                pending_name = None
                 seq += 1
                 msgs.append(WeChatMessage(
-                    id=f"visual_{seq}",
-                    chat=chat,
-                    sender=sender,
-                    content=text,
-                    type=MessageType.TEXT,
+                    id=f"visual_{seq}", chat=chat, sender=chat,
+                    content=name, type=MessageType.TEXT,
                 ))
-            cur_lines.clear()
-            cur_y.clear()
 
         for it in items:
-            # 时间戳行：作为分隔符（flush 前块），本身不入块
-            if _is_timestamp(it["text"]):
+            text = it["text"]
+            # 时间戳行：作为分隔符（flush 前块 + 悬空候选名），本身不入块
+            if _is_timestamp(text):
                 _flush()
+                pending_name = None
                 continue
-            if _is_noise(it["text"]):
+            if _is_noise(text):
                 continue
             if cur_y and abs(it["y"] - sum(cur_y) / len(cur_y)) > 18:
                 _flush()
-            cur_lines.append(it)
-            cur_y.append(it["y"])
+            if not cur_lines:
+                first_x0 = it["x"]
+                first_y0 = it["y"]
+                # 1. self（右侧自己发的）消息无群聊发送者名，直接成内容
+                if _is_self(first_x0, first_y0):
+                    if pending_name is not None:
+                        _flush()  # 悬空候选（如私聊短消息）先成独立消息
+                        pending_name = None
+                    cur_lines.append(it)
+                    cur_y.append(it["y"])
+                    continue
+                # 2. 候选发送者名已存在且本行紧贴（y 差 <150——真机名字-内容
+                #    106px、内容块间最小 186px）→ 消费：本行是内容，候选是发送者
+                if pending_name is not None and abs(first_y0 - pending_name[1]) < 150:
+                    block_sender = pending_name[0]
+                    pending_name = None
+                    cur_lines.append(it)
+                    cur_y.append(it["y"])
+                    continue
+                # 3. 悬空候选（存在但不紧贴）→ 它是独立短消息，先 flush
+                if pending_name is not None:
+                    _flush()
+                    pending_name = None
+                # 4. 对方短文本（≤8 字符）→ 候选群聊发送者名（不立即成消息）
+                if len(text.strip()) <= 8:
+                    pending_name = (text.strip(), first_y0)
+                    continue
+                # 5. 普通内容行
+                cur_lines.append(it)
+                cur_y.append(it["y"])
         _flush()
 
         if limit:

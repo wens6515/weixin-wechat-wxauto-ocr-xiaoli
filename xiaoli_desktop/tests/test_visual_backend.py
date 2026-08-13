@@ -188,7 +188,9 @@ class TestVisualBackend(unittest.TestCase):
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
                     {"text": "你好", "x": 100, "y": 50, "w": 30, "h": 20},
-                    {"text": "今天天气不错", "x": 100, "y": 80, "w": 90, "h": 20},
+                    # 真实微信消息块间距 ≥150px（真机内容-内容最小 186px），
+                    # 短消息不会与下一条消息紧贴——避免被误判为发送者名
+                    {"text": "今天天气不错", "x": 100, "y": 250, "w": 90, "h": 20},
                 ])
     def test_get_messages_merges_adjacent_lines(self, _ocr, _cap, _find, _switch):
         b = VisualBackend()
@@ -296,6 +298,38 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0].sender, "王文生",
                          "私聊左侧消息 sender 应为会话名，而非'未知'")
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    # 群聊发送者名：短文本独立行，紧贴内容上方（y 差 ~100）
+                    {"text": "哆拉A萝", "x": 100, "y": 100, "w": 80, "h": 24},
+                    # 消息内容
+                    {"text": "豆包有学生优惠了", "x": 140, "y": 206,
+                     "w": 150, "h": 24},
+                ])
+    def test_get_messages_group_chat_sender_is_author(self, _ocr, _cap,
+                                                      _find, _switch):
+        """群聊时消息区气泡上方有发送者名（短文本行紧贴内容），
+        sender 应为发送者名，且名字行本身不得成为一条消息。
+
+        RED 复现：真机读「强盗”集团」群聊，OCR 读到 '哆拉A萝'（发送者）
+        与 '豆包有学生优惠了'（内容）两条独立项——当前实现把名字行
+        当成独立消息（sender=群名），上层拿不到发送者。
+        真机 y 差：名字-内容 106px，内容块间最小 186px → 可区分。
+        """
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        msgs = b.get_messages("强盗”集团")
+        self.assertEqual(len(msgs), 1, "发送者名行不应成为独立消息")
+        self.assertEqual(msgs[0].sender, "哆拉A萝", "群聊 sender 应为发送者名")
+        self.assertEqual(msgs[0].content, "豆包有学生优惠了")
         b.close()
 
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
