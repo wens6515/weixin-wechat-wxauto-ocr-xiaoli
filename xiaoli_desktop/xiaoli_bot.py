@@ -1026,7 +1026,9 @@ class AgentBot(WeChatBot):
         纯文字任务不带任何附件——历史缺陷：文本路径无条件找接收目录
         "最新"文件，用户没发文件时把无关旧文件投给 agent 造成误判。
         """
-        is_group = is_group_chat(chat_name)
+        is_group = getattr(self.wx, "_current_is_group", None)
+        if is_group is None:
+            is_group = is_group_chat(chat_name)
         if is_group:
             at_tag = f"@{self.nickname}"
             content = content.replace(at_tag, "").strip()
@@ -1098,6 +1100,12 @@ class AgentBot(WeChatBot):
                     logger.info(f"[跳过] {chat_name} 读到 0 条（toggle 取消选中/屏幕黑/无消息）")
                     continue
                 full_msgs = msgs
+                # 群聊判定：标题（视觉后端 _current_is_group，权威）优先，
+                # 回退名称启发式（无视觉后端/旧路径）
+                is_group = getattr(self.wx, "_current_is_group", None)
+                if is_group is None:
+                    is_group = is_group_chat(chat_name)
+                at_tag = f"@{self.nickname}"
                 last_foreign = None  # 最后一条非 self 消息（防被输入框按钮等 self 噪声顶掉）
                 for i in range(len(full_msgs) - 1, -1, -1):
                     msg = full_msgs[i]
@@ -1106,6 +1114,11 @@ class AgentBot(WeChatBot):
                     if sender is None or sender == "self" or sender == self.nickname:
                         continue
                     if "Self" in str(type(msg)):
+                        continue
+                    # 群聊 @ 过滤：只有 @小漓 的消息才回复（无 @ 消息不打扰）
+                    if is_group and at_tag not in content:
+                        logger.info(
+                            f"[跳过] {chat_name} 群聊消息未 {at_tag}：{content[:30]!r}")
                         continue
                     if last_foreign is None:
                         last_foreign = msg
@@ -1169,6 +1182,10 @@ class AgentBot(WeChatBot):
                 logger.info(f"[最新消息] {chat_name} sender={sender!r} type={getattr(latest, 'type', None)} content={content[:50]!r}")
                 if sender is None or sender == "self" or sender == self.nickname:
                     logger.info(f"[跳过] {chat_name} 最新消息 sender={sender!r} 是自己或空")
+                    continue
+                # 群聊 @ 过滤（latest 兜底路径）
+                if is_group and at_tag not in content:
+                    logger.info(f"[跳过] {chat_name} 群聊最新消息未 {at_tag}，不回复")
                     continue
                 if getattr(latest, "type", None) in (MessageType.IMAGE, MessageType.FILE):
                     continue
