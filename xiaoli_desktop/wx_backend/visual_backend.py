@@ -888,6 +888,14 @@ class VisualBackend:
                 # sender 判定：块内首行 x 相对中线（右侧=自己）
                 first_x = cur_lines[0]["x"]
                 first_y = cur_lines[0]["y"]
+                # 输入框按钮噪声：微信输入框"发送"按钮固定在消息区右下角，
+                # OCR 会把它读成消息且 x 靠右判 self——顶掉真实最新消息导致
+                # 上层跳过整会话（真机日志：latest sender='self' content='发送'）。
+                if (text == "发送" and first_x > 0.85 * region.width
+                        and first_y > 0.8 * region.height):
+                    cur_lines.clear()
+                    cur_y.clear()
+                    return
                 sender = "self" if _is_self(first_x, first_y) else "未知"
                 seq += 1
                 msgs.append(WeChatMessage(

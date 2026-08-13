@@ -1098,6 +1098,7 @@ class AgentBot(WeChatBot):
                     logger.info(f"[跳过] {chat_name} 读到 0 条（toggle 取消选中/屏幕黑/无消息）")
                     continue
                 full_msgs = msgs
+                last_foreign = None  # 最后一条非 self 消息（防被输入框按钮等 self 噪声顶掉）
                 for i in range(len(full_msgs) - 1, -1, -1):
                     msg = full_msgs[i]
                     sender = getattr(msg, "sender", None)
@@ -1106,6 +1107,8 @@ class AgentBot(WeChatBot):
                         continue
                     if "Self" in str(type(msg)):
                         continue
+                    if last_foreign is None:
+                        last_foreign = msg
                     if getattr(msg, "type", None) == MessageType.IMAGE:
                         logger.info(f"🖼 判断为图片消息：{chat_name}")
                         if self._has_bot_reply_after(full_msgs, i, 5):
@@ -1160,7 +1163,7 @@ class AgentBot(WeChatBot):
                                 chat_name)
                         self.last_reply_time = time.time()
                         return
-                latest = msgs[-1]
+                latest = last_foreign if last_foreign is not None else msgs[-1]
                 sender = getattr(latest, "sender", None)
                 content = getattr(latest, "content", "")
                 logger.info(f"[最新消息] {chat_name} sender={sender!r} type={getattr(latest, 'type', None)} content={content[:50]!r}")
