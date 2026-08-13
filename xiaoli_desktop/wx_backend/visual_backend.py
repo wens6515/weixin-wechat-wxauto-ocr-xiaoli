@@ -369,7 +369,7 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
 _SESSION_REGION_RATIO = (0.0914, 0.089, 0.4165, 0.9918)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.4165, 0.0878, 0.9898, 0.8384)
 # 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
-_TITLE_REGION_RATIO = (0.4151, 0.0351, 0.8113, 0.082)
+_TITLE_REGION_RATIO = (0.4136, 0.0363, 0.807, 0.0785)
 
 # 用户圈定配置：xiaoli_desktop\wx_ocr_region.json（tools/pick_ocr_region.py 生成）。
 # 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
