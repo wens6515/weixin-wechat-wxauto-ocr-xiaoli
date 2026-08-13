@@ -847,10 +847,12 @@ class VisualBackend:
                 t))
 
         def _is_noise(text: str) -> bool:
-            """OCR 噪音：过短（<2 字符）或不可打印字符占比高。"""
+            """OCR 噪音：空文本，或全部是标点/符号/异常字符（无 CJK 无字母无数字）。
+
+            单字符（如「1」「好」「在」「嗯」）是合法消息，不得当噪声过滤——
+            用户实测发「1」是真实测试消息，曾被 len<2 规则误杀。
+            """
             if not text:
-                return True
-            if len(text) < 2:
                 return True
             # 全部是标点/符号/异常字符（无 CJK 无字母无数字）
             if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", text):
