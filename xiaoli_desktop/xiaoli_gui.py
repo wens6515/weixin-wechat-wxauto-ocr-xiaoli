@@ -21,6 +21,8 @@ except Exception:
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 
 from xiaoli_app import config_store
 from xiaoli_app.engine import EngineBus, EngineThread
@@ -123,6 +125,17 @@ class FirstRunDialog(QDialog):
         form.addRow("任务工作目录", row_t)
         form.addRow("微信文件目录", row_f)
         form.addRow("记忆存储位置", row_m)
+        self.ed_avatar = QLineEdit(str(cfg.get("avatar_template") or "").strip())
+        self.ed_avatar.setReadOnly(True)
+        btn_avatar = QPushButton("选择头像…")
+        btn_avatar.clicked.connect(self._pick_avatar)
+        row_a = QHBoxLayout()
+        row_a.addWidget(self.ed_avatar, 1)
+        row_a.addWidget(btn_avatar)
+        self.lbl_avatar = QLabel("（可选）上传你的微信头像截图，用于识别你自己发的消息")
+        self.lbl_avatar.setWordWrap(True)
+        form.addRow("头像模板", row_a)
+        form.addRow("", self.lbl_avatar)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("开始使用")
         bb.button(QDialogButtonBox.Cancel).setText("取消")
@@ -141,11 +154,23 @@ class FirstRunDialog(QDialog):
             if p:
                 edit.setText(p)
 
+    def _pick_avatar(self):
+        p, _f = QFileDialog.getOpenFileName(
+            self, "选择你的微信头像截图", self.ed_avatar.text(),
+            "图片 (*.png *.jpg *.jpeg *.bmp)")
+        if p:
+            self.ed_avatar.setText(p)
+            pm = QPixmap(p)
+            if not pm.isNull():
+                self.lbl_avatar.setPixmap(
+                    pm.scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
     def result_cfg(self):
         return {
             "tasks_dir": self.ed_tasks.text().strip() or config_store.default_tasks_dir(),
             "file_storage_path": self.ed_files.text().strip() or default_wechat_files_dir(),
             "memory_file": self.ed_memory.text().strip() or config_store.default_memory_file(),
+            "avatar_template": self.ed_avatar.text().strip(),
         }
 
 
