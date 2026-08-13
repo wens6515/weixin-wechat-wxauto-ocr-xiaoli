@@ -368,6 +368,8 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
 # 不同会导致错位，普通用户分发需引导框选或自适应检测。
 _SESSION_REGION_RATIO = (0.0914, 0.089, 0.4165, 0.9918)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.4165, 0.0878, 0.9898, 0.8384)
+# 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
+_TITLE_REGION_RATIO = (0.4151, 0.0351, 0.8113, 0.082)
 
 # 用户圈定配置：xiaoli_desktop\wx_ocr_region.json（tools/pick_ocr_region.py 生成）。
 # 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
@@ -421,16 +423,39 @@ def _load_region_config() -> dict | None:
             _region_dict_to_tuple(data.get("message_region"))
             if isinstance(data.get("message_region"), dict)
             else data.get("message_region"))
+        title = _normalize_region(
+            _region_dict_to_tuple(data.get("title_region"))
+            if isinstance(data.get("title_region"), dict)
+            else data.get("title_region"))
         if session is None or message is None:
             logger.warning(
                 "wx_ocr_region.json 区域值非法（须 l<t? 实为 4 值 [0,1] 且 l<r、t<b），回退默认")
             return None
         logger.info(
-            f"📐 已加载用户圈定区域：列表{session} 消息{message}")
-        return {"session": session, "message": message}
+            f"📐 已加载用户圈定区域：列表{session} 消息{message}"
+            + (f" 标题{title}" if title else ""))
+        return {"session": session, "message": message, "title": title}
     except Exception as e:
         logger.warning(f"wx_ocr_region.json 读取失败（{e}），回退默认区域")
         return None
+
+
+_TITLE_GROUP_RE = re.compile(r"^(?P<name>.+?)\((?P<count>\d+)\)\s*$")
+
+
+def parse_title(title: str) -> tuple[str, bool, int | None]:
+    """解析会话标题 → (会话名, 是否群聊, 群人数)。
+
+    群聊标题形如 '强盗"集团(5)'（括号内人数，真机标定）；私聊标题即会话名
+    无括号。群聊判定依据标题而非会话名启发式——普通群名（如'哆菈A夢'）
+    不含'群/集团'字，名称启发式会漏判。
+    """
+    if not title:
+        return "", False, None
+    m = _TITLE_GROUP_RE.match(title.strip())
+    if m:
+        return m.group("name"), True, int(m.group("count"))
+    return title.strip(), False, None
 
 
 _PREVIEW_TYPE_PATTERNS = [
@@ -473,6 +498,8 @@ class VisualBackend:
         self._session_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 屏幕中心点
         self._session_types: dict[str, MessageType] = {}  # 会话名 → 预览行判定的消息类型
         self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
+        self._current_title: str | None = None  # 当前会话标题（read_title 权威名称）
+        self._current_is_group: bool = False  # 当前会话是否群聊（标题含括号人数）
         # 头像模板（首次启动用户上传）：用于消息区识别自己发的消息。
         # 加载失败/未配置 → 降级 x 坐标中线判 sender。
         self._avatar_template: Image.Image | None = None
@@ -486,6 +513,7 @@ class VisualBackend:
         cfg = _load_region_config()
         self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
         self._message_region = cfg["message"] if cfg else _MESSAGE_REGION_RATIO
+        self._title_region = (cfg.get("title") if cfg else None) or _TITLE_REGION_RATIO
 
     # ---- 协议：连接 ----
 
@@ -561,6 +589,33 @@ class VisualBackend:
                 return None
         self._last_shot = shot
         return shot
+
+    def read_title(self) -> str | None:
+        """读右侧消息区顶部的当前会话标题（OCR，不置前）。
+
+        标题是当前会话的权威名称：私聊即会话名，群聊形如
+        '强盗"集团(5)'（括号内人数）。返回标题原文；区域为空/失败返回 None。
+        调用方用 parse_title 解析会话名与群聊标记。
+        """
+        shot = self._refresh(force=True, foreground=False)  # 只读，不置前
+        if shot is None:
+            return None
+        w, h = shot.size
+        region = shot.crop((
+            int(w * self._title_region[0]), int(h * self._title_region[1]),
+            int(w * self._title_region[2]), int(h * self._title_region[3]),
+        ))
+        region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
+        items = ocr_image(region)
+        # 标题是区域内最长文本行（排除纯符号/单字符 OCR 杂项）
+        best = ""
+        for it in items:
+            t = (it["text"] or "").strip()
+            if len(t) < 2 or not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", t):
+                continue
+            if len(t) > len(best):
+                best = t
+        return best or None
 
     def iter_sessions(self) -> Iterator[str]:
         """整窗 OCR + 按 y 聚类识别会话项。
@@ -828,6 +883,12 @@ class VisualBackend:
         """
         # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
         self._switch_chat(chat)
+        # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）
+        title = self.read_title()
+        if title:
+            name, is_group, _ = parse_title(title)
+            self._current_title = name or chat
+            self._current_is_group = is_group
         region = None
         items = []
         for attempt in range(2):

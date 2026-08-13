@@ -491,6 +491,27 @@ class TestIterUnreadSessions(unittest.TestCase):
         b = self._backend()
         self.assertEqual(list(b.iter_unread_sessions()), [])
 
+    def test_parse_title_group_has_member_count(self):
+        """标题带括号人数 = 群聊（视觉权威信号，替代名称启发式）。"""
+        from wx_backend.visual_backend import parse_title
+        self.assertEqual(parse_title('强盗"集团(5)'), ("强盗\"集团", True, 5))
+        self.assertEqual(parse_title("王文生"), ("王文生", False, None))
+        self.assertEqual(parse_title(""), ("", False, None))
+        self.assertEqual(parse_title(None), ("", False, None))
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    {"text": "X", "x": 300, "y": 10, "w": 10, "h": 10},
+                    {"text": "强盗”集团(5)", "x": 100, "y": 10, "w": 120, "h": 20},
+                ])
+    def test_read_title_returns_longest_text(self, _ocr, _refresh):
+        """read_title 返回标题区最长文本行（排除单字符按钮噪声）。"""
+        b = self._backend()
+        b._title_region = (0.0, 0.0, 1.0, 1.0)
+        self.assertEqual(b.read_title(), "强盗”集团(5)")
+
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])

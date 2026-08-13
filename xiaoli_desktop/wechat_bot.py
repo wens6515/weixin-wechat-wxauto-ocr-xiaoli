@@ -26,11 +26,17 @@ def models_endpoint(chat_url):
     return chat_url.rsplit("/chat/completions", 1)[0] + "/models"
 
 
-def is_group_chat(chat_name):
-    """群聊判定（集中判定点）：按会话名启发式——wxauto4 的 SessionElement
-    是 .pyd 编译模块，未暴露群聊标志属性，只能按名称猜测。
-    含「群」或「集团」视为群聊；群名不含这些字会漏判（已知局限，
-    未来 wxauto4 暴露群聊标志时只改这里）。"""
+def is_group_chat(chat_name, title=None):
+    """群聊判定（集中判定点）。
+
+    title 优先：右侧会话标题形如 '强盗"集团(5)'（括号内人数，真机标定）——
+    含括号人数 = 群聊。这是权威信号，普通群名（如'哆菈A夢'）不含'群/集团'
+    字，名称启发式会漏判。
+    title 缺省（无视觉后端/旧路径/单测）回退名称启发式：含「群」或「集团」。
+    """
+    if title is not None:
+        t = (title or "").strip()
+        return bool(re.match(r"^.+?\(\d+\)\s*$", t))
     name = chat_name or ""
     return "群" in name or "集团" in name
 

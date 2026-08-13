@@ -25,6 +25,19 @@ class TestIsGroupChat(unittest.TestCase):
         self.assertFalse(is_group_chat(""))
         self.assertFalse(is_group_chat(None))
 
+    def test_group_by_title_with_member_count(self):
+        """标题带括号人数 = 群聊（视觉后端权威信号，替代名称启发式）。
+
+        普通群名（如'哆菈A夢'）不含'群/集团'字，名称启发式会漏判；
+        title 参数来自右侧会话标题（'强盗"集团(5)'），可靠。
+        """
+        self.assertTrue(is_group_chat("任意名", '强盗"集团(5)'))
+        self.assertFalse(is_group_chat("任意名", "王文生"))
+        self.assertFalse(is_group_chat("任意名", ""))
+        # title 缺省时回退名称启发式（兼容旧路径/单测）
+        self.assertTrue(is_group_chat("产品讨论群"))
+        self.assertFalse(is_group_chat("小明"))
+
 
 class TestRememberRecent(unittest.TestCase):
     def _make(self):
@@ -288,6 +301,95 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             bot.process_new_messages()
         self.assertEqual(handled, [("未知", "你好")],
                          "应处理最后一条非 self 消息，而非被 self 噪声跳过")
+
+    def test_group_message_without_at_is_skipped(self):
+        """群聊消息未 @小漓 → 不处理（latest 兜底路径）。
+
+        用户期望：群聊只有 @ 小漓 的消息才回复，无 @ 不打扰。
+        群聊判定走标题（FakeWx._current_is_group），私聊不受限。
+        """
+        from unittest import mock as _mock
+
+        from wx_backend.models import MessageType, WeChatMessage
+        from xiaoli_bot import AgentBot
+
+        handled = []
+
+        class FakeWx:
+            _current_is_group = True  # 标题 '强盗"集团(5)' 判定
+
+            def iter_unread_sessions(self):
+                return iter(["强盗”集团"])
+
+            def get_messages(self, chat):
+                return [
+                    WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
+                                  content="豆包有学生优惠了", type=MessageType.TEXT),
+                ]
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.paused = False
+        bot._sending_lock = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = FakeWx()
+        bot.recent_msg_ids = set()
+        bot.nickname = "小漓"
+        bot._pending_files = {}
+        bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 10
+        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+            handled.append((sender, content))
+        with _mock.patch("xiaoli_bot.should_resume_listen",
+                         return_value=(True, False, None)), \
+             _mock.patch.object(bot, "_tick_poll_outbox"):
+            bot.process_new_messages()
+        self.assertEqual(handled, [], "群聊未 @ 消息不应回复")
+
+    def test_group_message_with_at_is_handled(self):
+        """群聊消息 @小漓 → 正常处理并回复。"""
+        from unittest import mock as _mock
+
+        from wx_backend.models import MessageType, WeChatMessage
+        from xiaoli_bot import AgentBot
+
+        handled = []
+
+        class FakeWx:
+            _current_is_group = True
+
+            def iter_unread_sessions(self):
+                return iter(["强盗”集团"])
+
+            def get_messages(self, chat):
+                return [
+                    WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
+                                  content="@小漓 在吗", type=MessageType.TEXT),
+                ]
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.paused = False
+        bot._sending_lock = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = FakeWx()
+        bot.recent_msg_ids = set()
+        bot.nickname = "小漓"
+        bot._pending_files = {}
+        bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 10
+        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+            handled.append((sender, content))
+        with _mock.patch("xiaoli_bot.should_resume_listen",
+                         return_value=(True, False, None)), \
+             _mock.patch.object(bot, "_tick_poll_outbox"):
+            bot.process_new_messages()
+        self.assertEqual(handled, [("哆拉A萝", "@小漓 在吗")],
+                         "群聊 @ 消息应正常处理")
 
 
 if __name__ == "__main__":
