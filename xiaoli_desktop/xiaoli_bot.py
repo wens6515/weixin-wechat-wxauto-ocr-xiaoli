@@ -1093,7 +1093,9 @@ class AgentBot(WeChatBot):
                 logger.info(f"🔔 发现新消息：{chat_name}")
                 # get_messages 内部会切到目标会话（visual 点击 / wxauto ChatWith）
                 msgs = self.wx.get_messages(chat_name)
+                logger.info(f"[读取] {chat_name} 读到 {len(msgs)} 条消息")
                 if not msgs:
+                    logger.info(f"[跳过] {chat_name} 读到 0 条（toggle 取消选中/屏幕黑/无消息）")
                     continue
                 full_msgs = msgs
                 for i in range(len(full_msgs) - 1, -1, -1):
@@ -1161,12 +1163,15 @@ class AgentBot(WeChatBot):
                 latest = msgs[-1]
                 sender = getattr(latest, "sender", None)
                 content = getattr(latest, "content", "")
+                logger.info(f"[最新消息] {chat_name} sender={sender!r} type={getattr(latest, 'type', None)} content={content[:50]!r}")
                 if sender is None or sender == "self" or sender == self.nickname:
+                    logger.info(f"[跳过] {chat_name} 最新消息 sender={sender!r} 是自己或空")
                     continue
                 if getattr(latest, "type", None) in (MessageType.IMAGE, MessageType.FILE):
                     continue
                 msg_key = f"{chat_name}_{sender}_{content}"
                 if msg_key in self.recent_msg_ids:
+                    logger.info(f"[跳过] {chat_name} 消息已处理过（去重命中）")
                     continue
                 self._remember_recent(msg_key)
                 # 文本统一处理：任务判断（纯文字任务不带附件——附件只由
