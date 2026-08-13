@@ -98,6 +98,23 @@ class TestOcrImageMocked(unittest.TestCase):
         img = _solid((50, 50), (255, 255, 255))
         self.assertEqual(ocr_image(img), [])
 
+    @mock.patch("wx_backend.visual_backend._get_ocr_engine")
+    def test_rapidocr_maps_to_dict_contract(self, _m):
+        """RapidOCR 返回 [box, text, score] → ocr_image 输出 {text,x,y,w,h}。"""
+        class _FakeEngine:
+            def __call__(self, img):
+                return [
+                    ([[10, 20], [100, 20], [100, 50], [10, 50]], "王文生", 0.99),
+                    ([[5, 80], [60, 80], [60, 100], [5, 100]], "[图片]", 0.95),
+                ], [0.1, 0.1, 0.1]
+        _m.return_value = _FakeEngine()
+        img = _solid((200, 200), (255, 255, 255))
+        items = ocr_image(img)
+        self.assertEqual(items, [
+            {"text": "王文生", "x": 10, "y": 20, "w": 90, "h": 30},
+            {"text": "[图片]", "x": 5, "y": 80, "w": 55, "h": 20},
+        ])
+
 
 # ---- 后端行为（mock 窗口与 OCR） ----
 
@@ -252,6 +269,45 @@ class TestVisualBackend(unittest.TestCase):
         # 无真实微信窗口 → connect 抛 BackendUnavailableError → auto 聚合后抛出
         with self.assertRaises(BackendUnavailableError):
             create_backend("auto")
+
+    def test_extract_session_names_excludes_top_title(self):
+        """顶部标题（x 落在 [region[2]*w, (region[2]+0.17)*w) 区间，如置顶会话
+        在窗口顶部的标题）不应被误当会话列表条目——真机实测：置顶王文生时
+        顶部标题 x=543（0.418w）被 +0.17 容差纳入，导致红圈 y 差 66>60 匹配失败。"""
+        b = VisualBackend()
+        b._hwnd = 0x1234
+        b._session_region = (0.09, 0.0855, 0.4165, 0.993)  # 固定 region[2]=0.4165
+        shot = _solid((1300, 1610), (255, 255, 255))
+        with mock.patch("wx_backend.visual_backend.ocr_image", return_value=[
+            # 顶部标题：x=543 = 0.4177w，在 region[2]=0.4165w 之外、+0.17 之内
+            {"text": "干立牛", "x": 543, "y": 85, "w": 71, "h": 20},
+            # 列表条目：x=217 = 0.167w，正常会话名
+            {"text": "强盗集团", "x": 217, "y": 293, "w": 131, "h": 20},
+        ]):
+            coords = b._extract_session_names(shot)
+        self.assertNotIn("干立牛", coords)
+        self.assertIn("强盗集团", coords)
+
+    def test_extract_session_names_extracts_preview_types(self):
+        """会话名 + 预览行配对：预览标签 [图片]/[文件] 判类型，无 [] 判文字。"""
+        from wx_backend import MessageType
+        b = VisualBackend()
+        b._hwnd = 0x1234
+        b._session_region = (0.09, 0.0855, 0.4165, 0.993)
+        shot = _solid((1300, 1610), (255, 255, 255))
+        with mock.patch("wx_backend.visual_backend.ocr_image", return_value=[
+            {"text": "王文生", "x": 214, "y": 163, "w": 73, "h": 20},
+            {"text": "[文件] 部门简介.docx", "x": 220, "y": 203, "w": 291, "h": 20},
+            {"text": "杨冬梅", "x": 215, "y": 393, "w": 73, "h": 20},
+            {"text": "[图片]", "x": 217, "y": 430, "w": 52, "h": 20},
+            {"text": "王美晨", "x": 216, "y": 506, "w": 73, "h": 20},
+            {"text": "你好呀", "x": 216, "y": 543, "w": 60, "h": 20},
+        ]):
+            coords = b._extract_session_names(shot)
+        self.assertIn("王文生", coords)
+        self.assertEqual(b._session_types.get("王文生"), MessageType.FILE)
+        self.assertEqual(b._session_types.get("杨冬梅"), MessageType.IMAGE)
+        self.assertEqual(b._session_types.get("王美晨"), MessageType.TEXT)
 
 
 # ---- 未读红圈角标检测 ----

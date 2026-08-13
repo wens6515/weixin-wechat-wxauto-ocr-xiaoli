@@ -53,6 +53,23 @@ gdi32.CreateCompatibleDC.restype = _HANDLE
 gdi32.CreateCompatibleDC.argtypes = [_HANDLE]
 gdi32.CreateCompatibleBitmap.restype = _HANDLE
 gdi32.CreateCompatibleBitmap.argtypes = [_HANDLE, wt.INT, wt.INT]
+
+# ---------- DPI 感知 ----------
+# 不声明 DPI 感知时，GetWindowRect 返回被系统虚拟化的逻辑尺寸（如 743x920），
+# 而真实窗口物理尺寸是 743×1.75=1300 x 920×1.75=1610——capture_window 按逻辑
+# 尺寸建位图后 PrintWindow 只渲染出窗口上部约 62%（底部 352px 空白），表现为
+# "图形框选/联调截图不是整个微信窗口"。声明 per-monitor aware 后坐标全部为
+# 真实物理像素，截图完整、pyautogui 点击坐标也更准。
+# 注：SetProcessDpiAwareness 必须在进程早期调用（任何窗口/DC 创建前），
+# 失败时降级为 unaware（仅截图不完整，不影响其它逻辑）。此调用幂等。
+try:
+    _SHCORE = ctypes.windll.shcore
+    _SHCORE.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+except Exception:
+    try:
+        u32.SetProcessDPIAware()
+    except Exception:
+        pass
 gdi32.SelectObject.restype = _HANDLE
 gdi32.SelectObject.argtypes = [_HANDLE, _HANDLE]
 gdi32.DeleteObject.restype = wt.BOOL
@@ -140,29 +157,29 @@ def capture_window(hwnd) -> Image.Image | None:
         u32.ReleaseDC(hwnd, hdc_win)
 
 
-# ---------- Windows OCR（winsdk） ----------
+# ---------- OCR（RapidOCR / PaddleOCR onnxruntime） ----------
 
 _OCR_ENGINE = None
 
 
 def _get_ocr_engine():
-    """懒加载 Windows OCR 引擎（zh-Hans-CN）。不可用返回 None。"""
+    """懒加载 RapidOCR 引擎（PaddleOCR onnxruntime 轻量版）。不可用返回 None。
+
+    替换原 winsdk Windows OCR：实测 Windows OCR 对微信 UI 噪声致命且随内容
+    漂移（王文生→干立牛、[图片]→隆片]、王美晨→艹王美晨），RapidOCR 同一张
+    整窗截图全部读对（会话名置信度 1.00）。首次加载约 2s（模型初始化），
+    单例缓存避免每轮重建。
+    """
     global _OCR_ENGINE
     if _OCR_ENGINE is not None:
         return _OCR_ENGINE
     try:
-        from winsdk.windows.globalization import Language
-        from winsdk.windows.media.ocr import OcrEngine
+        from rapidocr_onnxruntime import RapidOCR
 
-        langs = [l.language_tag for l in OcrEngine.available_recognizer_languages]
-        if not any("zh" in l for l in langs):
-            logger.warning(f"Windows OCR 无中文语言包: {langs}")
-            _OCR_ENGINE = False
-            return None
-        _OCR_ENGINE = OcrEngine.try_create_from_language(Language("zh-Hans-CN"))
+        _OCR_ENGINE = RapidOCR()
         return _OCR_ENGINE
     except Exception as e:
-        logger.warning(f"Windows OCR 不可用: {e}")
+        logger.warning(f"RapidOCR 不可用: {e}")
         _OCR_ENGINE = False
         return None
 
@@ -180,7 +197,7 @@ def _norm_cjk(text: str) -> str:
 
 
 def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
-    """对图像做 Windows OCR，返回 [{text, x, y, w, h}]（图像像素坐标）。
+    """对图像做 RapidOCR 识别，返回 [{text, x, y, w, h}]（图像像素坐标）。
 
     大图先按 max_w 等比缩小（OCR 精度随缩放变化，默认不缩放）。
     返回空列表表示识别失败或无文本。
@@ -188,63 +205,30 @@ def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
     engine = _get_ocr_engine()
     if not engine:
         return []
-
-    async def _run():
-        import winsdk.windows.graphics.imaging as imaging
-        import winsdk.windows.storage.streams as streams
-
-        rgb = img.convert("RGB")
-        # 深色主题自适应：背景暗（平均亮度低）→ 反色后 OCR（Windows OCR
-        # 假设浅底深字，深色主题下识别率暴跌——实测整窗 0 行，反色后 13 行）。
-        # 用 PIL ImageStat 快速估计亮度，避免额外依赖。
-        try:
-            from PIL import ImageStat
-            stat = ImageStat.Stat(rgb)
-            mean_lum = sum(stat.mean) / 3
-            if mean_lum < 100:  # 暗背景（深色主题）
-                from PIL import ImageOps
-                rgb = ImageOps.invert(rgb)
-        except Exception:
-            pass  # 亮度估计失败时按原样 OCR
-        buf = io.BytesIO()
-        rgb.save(buf, format="PNG")
-        data = buf.getvalue()
-
-        stream = streams.InMemoryRandomAccessStream()
-        writer = streams.DataWriter(stream)
-        writer.write_bytes(data)
-        await writer.store_async()
-        stream.seek(0)
-        decoder = await imaging.BitmapDecoder.create_async(stream)
-        sbitmap = await decoder.get_software_bitmap_async()
-        return await engine.recognize_async(sbitmap)
-
+    if max_w > 0 and img.width > max_w:
+        ratio = max_w / img.width
+        img = img.resize((max_w, int(img.height * ratio)), Image.LANCZOS)
+    import numpy as np
     try:
-        result = asyncio.run(_run())
+        result, _elapse = engine(np.array(img.convert("RGB")))
     except Exception as e:
         logger.warning(f"OCR 识别失败: {e}")
         return []
-
     items = []
-    for line in result.lines:
-        text = _norm_cjk(line.text)
-        if not text:
-            continue
-        # 行内词合并成整行包围盒
-        ws = line.words
-        if ws:
-            x = min(w.bounding_rect.x for w in ws)
-            y = min(w.bounding_rect.y for w in ws)
-            x2 = max(w.bounding_rect.x + w.bounding_rect.width for w in ws)
-            y2 = max(w.bounding_rect.y + w.bounding_rect.height for w in ws)
-        else:
-            r = line.bounding_rect
-            x, y, x2, y2 = r.x, r.y, r.x + r.width, r.y + r.height
-        items.append({
-            "text": text,
-            "x": int(x), "y": int(y),
-            "w": int(x2 - x), "h": int(y2 - y),
-        })
+    if result:
+        for box, text, _score in result:
+            text = _norm_cjk((text or "").strip())
+            if not text:
+                continue
+            xs = [p[0] for p in box]
+            ys = [p[1] for p in box]
+            x, y = min(xs), min(ys)
+            x2, y2 = max(xs), max(ys)
+            items.append({
+                "text": text,
+                "x": int(x), "y": int(y),
+                "w": int(x2 - x), "h": int(y2 - y),
+            })
     return items
 
 
@@ -432,6 +416,29 @@ def _load_region_config() -> dict | None:
         return None
 
 
+_PREVIEW_TYPE_PATTERNS = [
+    (re.compile(r"^\[\s*图片\s*\]"), MessageType.IMAGE),
+    (re.compile(r"^\[\s*视频\s*\]"), MessageType.VIDEO),
+    (re.compile(r"^\[\s*文件\s*\]"), MessageType.FILE),
+    (re.compile(r"^\[\s*表情\s*\]"), MessageType.EMOJI),
+]
+
+
+def _preview_type(text: str) -> MessageType:
+    """从会话列表预览行文本判消息类型。
+
+    [图片]/[视频]/[文件]/[表情] → 对应类型；无 [] 标签 → 文字。
+    实测 RapidOCR 预览行：'[图片]'、'[文件] 部门简介+纳新宣传.do..'、'你好呀'。
+    """
+    if not text:
+        return MessageType.TEXT
+    t = (text or "").strip()
+    for pat, typ in _PREVIEW_TYPE_PATTERNS:
+        if pat.match(t):
+            return typ
+    return MessageType.TEXT
+
+
 class VisualBackend:
     """PrintWindow + 本地 OCR 的微信视觉后端。
 
@@ -447,6 +454,7 @@ class VisualBackend:
         self._poll_region = poll_region
         self._closed = False
         self._session_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 屏幕中心点
+        self._session_types: dict[str, MessageType] = {}  # 会话名 → 预览行判定的消息类型
         # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
         cfg = _load_region_config()
         self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
@@ -517,10 +525,11 @@ class VisualBackend:
         w, h = shot.size
         items = ocr_image(shot)
         self._session_coords.clear()
+        self._session_types.clear()
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
-        session_x_max = w * (self._session_region[2] + 0.17)  # 列表区右边界+0.17容差（无配置时 0.32+0.17=0.49，保留原语义）
+        session_x_max = w * self._session_region[2]  # 列表区右边界（不含容差——+0.17 会把置顶会话的顶部标题 x≈0.42w 误纳为会话条目）
 
         # 1. 预筛选：会话列表列 + 过滤搜索框/时间戳
         cand = []
@@ -580,6 +589,16 @@ class VisualBackend:
             cx = win_l + main_line["x"] + main_line["w"] // 2
             cy = win_t + main_line["y"] + main_line["h"] // 2
             self._session_coords[name] = (cx, cy)
+            # 预览行类型：cluster 内主名下方第一行（非时间戳）判消息类型
+            preview_text = ""
+            for it in cluster:
+                if it is main_line or it["y"] <= main_line["y"]:
+                    continue
+                t = (it["text"] or "").strip()
+                if t and not re.match(r"^[\d:：\s]+$", t):
+                    preview_text = t
+                    break
+            self._session_types[name] = _preview_type(preview_text)
         return self._session_coords
 
     def iter_unread_sessions(self) -> Iterator[str]:
