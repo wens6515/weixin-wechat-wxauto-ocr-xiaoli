@@ -239,6 +239,56 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.process_new_messages()
         self.assertEqual(calls["sessions"], 1, "无 unread 能力时应降级 iter_sessions")
 
+    def test_latest_takes_last_foreign_when_last_is_self_noise(self):
+        """输入框"发送"按钮被 OCR 读成 self 消息且排最下时，
+        latest 应取最后一条非 self 消息（用户真实消息），不得跳过。
+
+        RED 复现：真机日志 [最新消息] sender='self' content='发送' 后
+        [跳过] 是自己或空——用户发的消息被输入框按钮噪声顶掉，整会话跳过。
+        缺陷在 AgentBot 覆写的 process_new_messages（xiaoli_bot.py），
+        基类 WeChatBot 逐条遍历无此问题，故本测试必须建 AgentBot 实例。
+        """
+        from unittest import mock as _mock
+
+        from wx_backend.models import MessageType, WeChatMessage
+        from xiaoli_bot import AgentBot
+
+        handled = []
+
+        class FakeWx:
+            def iter_unread_sessions(self):
+                return iter(["王文生"])
+
+            def get_messages(self, chat):
+                return [
+                    WeChatMessage(id="v1", chat=chat, sender="未知",
+                                  content="你好", type=MessageType.TEXT),
+                    WeChatMessage(id="v2", chat=chat, sender="self",
+                                  content="发送", type=MessageType.TEXT),
+                ]
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.paused = False
+        bot._sending_lock = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = FakeWx()
+        bot.recent_msg_ids = set()
+        bot.nickname = "小漓"
+        bot._pending_files = {}
+        bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 10
+        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+            handled.append((sender, content))
+        with _mock.patch("xiaoli_bot.should_resume_listen",
+                         return_value=(True, False, None)), \
+             _mock.patch.object(bot, "_tick_poll_outbox"):
+            bot.process_new_messages()
+        self.assertEqual(handled, [("未知", "你好")],
+                         "应处理最后一条非 self 消息，而非被 self 噪声跳过")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

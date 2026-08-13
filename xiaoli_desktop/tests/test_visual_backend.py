@@ -242,6 +242,35 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(msgs[1].sender, "self")   # 右侧 → 自己
         b.close()
 
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    # 用户真实消息（左侧）→ 应保留
+                    {"text": "你好", "x": 100, "y": 60, "w": 30, "h": 20},
+                    # 输入框"发送"按钮（消息区右下角，x/y 均贴近边缘）
+                    # → 会被 OCR 读进来且 x 靠右判成 self，顶掉真实最新消息
+                    {"text": "发送", "x": 370, "y": 380, "w": 25, "h": 15},
+                ])
+    def test_get_messages_filters_input_box_send_button(self, _ocr, _cap, _find,
+                                                        _switch):
+        """输入框"发送"按钮（右下角固定位置）不应成为消息。
+
+        RED 复现：真机日志出现 latest sender='self' content='发送'——OCR 把
+        输入框发送按钮读成消息且 x 靠右判 self，process_new_messages 直接跳过
+        整个会话，用户真实消息永远不被处理。
+        """
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)  # 全窗，与配置解耦、确定性
+        b.connect()
+        msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 1, "发送按钮应被过滤，只剩用户真实消息")
+        self.assertEqual(msgs[0].content, "你好")
+        b.close()
+
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
                 return_value=_solid((200, 200), (255, 255, 255)))
