@@ -504,13 +504,18 @@ class TestIterUnreadSessions(unittest.TestCase):
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
                     {"text": "X", "x": 300, "y": 10, "w": 10, "h": 10},
-                    {"text": "强盗”集团(5)", "x": 100, "y": 10, "w": 120, "h": 20},
+                    {"text": '"强盗"', "x": 100, "y": 10, "w": 80, "h": 20},
+                    {"text": "集团(5)", "x": 185, "y": 10, "w": 60, "h": 20},
                 ])
-    def test_read_title_returns_longest_text(self, _ocr, _refresh):
-        """read_title 返回标题区最长文本行（排除单字符按钮噪声）。"""
+    def test_read_title_joins_split_segments(self, _ocr, _refresh):
+        """标题被 OCR 拆成多段时按 x 拼接（真机：'"强盗"' + '集团(5)'）。
+
+        RED 复现：真机 read_title 只读到'集团(5)'——OCR 把带引号的
+        '强盗'与'集团(5)'分成两个独立项，旧实现只取最长单行导致标题缺左半。
+        """
         b = self._backend()
         b._title_region = (0.0, 0.0, 1.0, 1.0)
-        self.assertEqual(b.read_title(), "强盗”集团(5)")
+        self.assertEqual(b.read_title(), '"强盗"集团(5)')
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid((200, 200), (255, 255, 255)))

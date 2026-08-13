@@ -607,15 +607,15 @@ class VisualBackend:
         ))
         region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
         items = ocr_image(region)
-        # 标题是区域内最长文本行（排除纯符号/单字符 OCR 杂项）
-        best = ""
-        for it in items:
+        # 标题可能被 OCR 拆成多段（真机：'"强盗"' + '集团(5)' 两个独立项），
+        # 按 x 排序拼接，而非只取最长单行——否则群聊标题缺左半
+        texts = []
+        for it in sorted(items, key=lambda i: i["x"]):
             t = (it["text"] or "").strip()
             if len(t) < 2 or not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", t):
-                continue
-            if len(t) > len(best):
-                best = t
-        return best or None
+                continue  # 排除单字符按钮噪声（如 'X'）与纯符号
+            texts.append(t)
+        return "".join(texts) or None
 
     def iter_sessions(self) -> Iterator[str]:
         """整窗 OCR + 按 y 聚类识别会话项。
