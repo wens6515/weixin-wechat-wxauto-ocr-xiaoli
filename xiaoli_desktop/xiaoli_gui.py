@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox,
                                QFileDialog, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton)
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QPixmap, QFont
 
 from xiaoli_app import config_store
 from xiaoli_app.engine import EngineBus, EngineThread
@@ -203,6 +203,12 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("小漓")
     app.setQuitOnLastWindowClosed(False)  # 关窗不退出（隐藏到托盘）
+    # 灰度抗锯齿：Windows ClearType 亚像素渲染在深色/渐变背景上会让文字
+    # 产生红绿彩色描边（用户反馈"文字阴影难看"）。PreferAntialias 走灰度
+    # AA，消除 subpixel fringe。
+    _font = app.font()
+    _font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    app.setFont(_font)
     app.setStyleSheet(APP_QSS)
 
     ctx = AppContext()
