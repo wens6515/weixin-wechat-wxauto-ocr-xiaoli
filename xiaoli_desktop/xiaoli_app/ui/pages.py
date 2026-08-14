@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
     QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox, QSpinBox,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QFrame,
-    QProgressBar,
+    QProgressBar, QScrollArea,
 )
 
 from xiaoli_app import card_store, config_store
@@ -1110,7 +1110,16 @@ class SettingsPage(QWidget):
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
-        lay = QVBoxLayout(self)
+        # 设置项多：外层套 QScrollArea 可滚动，避免窗口放不下时被裁掉
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(12)
 
         # 界面主题 + 壁纸
         g_theme = QGroupBox("界面主题与壁纸")
@@ -1144,7 +1153,7 @@ class SettingsPage(QWidget):
         self.btn_mem_clear = QPushButton("清空全部记忆")
         self.mem_view = QTextEdit()
         self.mem_view.setReadOnly(True)
-        self.mem_view.setMaximumHeight(200)
+        self.mem_view.setMinimumHeight(260)
         self.btn_mem_view.clicked.connect(self._view_memory)
         self.btn_mem_clear.clicked.connect(self._clear_memory)
         gl.addWidget(self.mem_summary)
@@ -1216,7 +1225,7 @@ class SettingsPage(QWidget):
         stl = QVBoxLayout(g_stem)
         self.stem_view = QTextEdit()
         self.stem_view.setReadOnly(True)
-        self.stem_view.setMaximumHeight(120)
+        self.stem_view.setMinimumHeight(180)
         self.btn_stem_refresh = QPushButton("刷新")
         self.btn_stem_refresh.clicked.connect(self._refresh_stems)
         stl.addWidget(self.stem_view)
@@ -1224,6 +1233,8 @@ class SettingsPage(QWidget):
         lay.addWidget(g_stem)
 
         lay.addStretch(1)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
     def refresh(self):
         cfg = self.ctx.cfg or {}

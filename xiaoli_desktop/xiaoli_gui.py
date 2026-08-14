@@ -132,16 +132,22 @@ class FirstRunDialog(QDialog):
         row_a = QHBoxLayout()
         row_a.addWidget(self.ed_avatar, 1)
         row_a.addWidget(btn_avatar)
-        self.lbl_avatar = QLabel("（可选）上传你的微信头像截图，用于识别你自己发的消息")
+        self.lbl_avatar = QLabel("（必选）上传你的微信头像截图——小漓靠它区分消息是你发的还是别人发的，不选会导致你自己的消息被误判成别人的")
         self.lbl_avatar.setWordWrap(True)
         form.addRow("头像模板", row_a)
         form.addRow("", self.lbl_avatar)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("开始使用")
         bb.button(QDialogButtonBox.Cancel).setText("取消")
-        bb.accepted.connect(self.accept)
+        bb.accepted.connect(self._on_accept)
         bb.rejected.connect(self.reject)
         form.addRow(bb)
+
+    def _on_accept(self):
+        if not self.ed_avatar.text().strip():
+            QMessageBox.warning(self, "请选择头像", "请上传你的微信头像截图（必选）——小漓用它区分消息是你发的还是别人发的。")
+            return
+        self.accept()
 
     def _pick(self, edit, is_dir):
         if is_dir:

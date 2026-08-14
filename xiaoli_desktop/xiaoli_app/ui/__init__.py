@@ -69,7 +69,7 @@ QProgressBar { border: none; border-radius: 7px; background: $border; height: 12
 QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); border-radius: 7px; }
 QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 9px;
-              padding: 7px 18px; color: $text; font-size: 13px; font-weight: 500; }
+              padding: 8px 20px; min-height: 32px; color: $text; font-size: 13px; font-weight: 500; }
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
 QPushButton:pressed { background: $hover; }
 QPushButton:disabled { color: $muted; background: $frame; border-color: $border; }
@@ -101,14 +101,27 @@ QStatusBar { background: transparent; color: $muted; }
 """)
 
 
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """#RRGGBB → rgba(r, g, b, alpha)，用于 QSS 渐变淡光晕。"""
+    h = hex_color.lstrip("#")
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return f"rgba(91, 140, 255, {alpha})"
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
 def build_qss(theme: str = "blue", wallpaper: str = "") -> str:
-    """按主题名 + 可选壁纸路径生成 QSS。壁纸为空时用主题纯色背景。"""
+    """按主题名 + 可选壁纸路径生成 QSS。壁纸为空时用主题色径向光晕背景。"""
     t = THEMES.get(theme, THEMES["blue"])
     if wallpaper and os.path.isfile(wallpaper):
         wp = wallpaper.replace("\\", "/")
         bg_rule = f'background-image: url("{wp}"); background-position: center;'
     else:
-        bg_rule = f"background: {t['bg']};"
+        # 顶部主题色淡光晕 → 底部背景色，比纯色更有层次
+        soft = _hex_to_rgba(t["p1"], 0.16)
+        bg_rule = (f"background: qradialgradient(cx:0.5, cy:0, radius:1.3, "
+                   f"fx:0.5, fy:0, stop:0 {soft}, stop:1 {t['bg']});")
     return _QSS_TEMPLATE.substitute(**t, bg_rule=bg_rule)
 
 
