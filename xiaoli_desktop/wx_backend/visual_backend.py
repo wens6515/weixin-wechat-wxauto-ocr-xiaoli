@@ -277,6 +277,132 @@ def ocr_image_sharded(img: Image.Image, max_side: int = 736) -> list[dict]:
     return items
 
 
+def detect_bubble_colors(img: Image.Image) -> dict:
+    """自动探测消息区背景色 / 对方气泡色 / 自己气泡色（1x RGB 图）。
+
+    微信两套主题的气泡色实测（真机探针）：
+    - 深色主题：背景(30,30,31)、对方气泡(47,47,48)、自己气泡绿(53,210,141)
+    - 浅色主题：背景白灰、对方气泡白、自己气泡绿(149,236,105)
+    探测失败项为 None。策略：
+    - 背景：边缘 8px 像素中位数（边缘通常无气泡、无文字）
+    - 自己气泡：绿色像素中位数（G 显著高于 R/B，微信品牌绿两主题皆绿）
+    - 对方气泡：非背景、非绿色像素的中位数（深色=深灰、浅色=白）
+    """
+    import numpy as np
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    h, w, _ = arr.shape
+    if h < 16 or w < 16:
+        return {"bg": None, "other": None, "self": None}
+    border = np.concatenate([
+        arr[:8].reshape(-1, 3), arr[-8:].reshape(-1, 3),
+        arr[:, :8].reshape(-1, 3), arr[:, -8:].reshape(-1, 3),
+    ])
+    bg = tuple(int(v) for v in np.median(border, axis=0))
+    R, G, B = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+    green = (G - R > 40) & (G - B > 40) & (G > 100)
+    self_color = None
+    if int(green.sum()) > 80:
+        self_color = tuple(int(v) for v in np.median(arr[green], axis=0))
+    bgdist = np.abs(arr - np.array(bg, dtype=np.int16)).sum(axis=2)
+    # 对方气泡：与背景「接近但不同」的非绿色像素。深色主题深灰比背景亮
+    # ~17 色阶/分量（总差 ~51），浅色主题白气泡比背景亮（总差 ~45）；
+    # 图片内容颜色多样、与背景差异大（总差常 >100），不纳入 other——
+    # 否则大块图片会污染 other 中位数，导致气泡色探测错。
+    other_mask = (bgdist > 10) & (bgdist < 90) & (~green)
+    other_color = None
+    if int(other_mask.sum()) > 80:
+        other_color = tuple(int(v) for v in np.median(arr[other_mask], axis=0))
+    return {"bg": bg, "other": other_color, "self": self_color}
+
+
+def _near_color(arr, color, tol):
+    """返回与 color 接近（RGB 各分量差 ≤ tol）的布尔掩码。"""
+    import numpy as np
+    d = np.abs(arr - np.array(color, dtype=np.int16))
+    return (d[:, :, 0] <= tol) & (d[:, :, 1] <= tol) & (d[:, :, 2] <= tol)
+
+
+def _connected_boxes(mask, min_h=20, min_w=40, x_gap=8, y_gap=6):
+    """把布尔掩码聚合成连通域边界框 [(top, bottom, left, right)]（像素坐标）。
+
+    逐行找连续段，跨行按「y 连续 + x 重叠」合并。过滤掉小噪声（气泡至少
+    高 20px、宽 40px）。"""
+    import numpy as np
+    h, w = mask.shape
+    boxes = []
+    for y in range(h):
+        xs = np.where(mask[y])[0]
+        if len(xs) == 0:
+            continue
+        segs = []
+        start = xs[0]
+        prev = xs[0]
+        for x in xs[1:]:
+            if x - prev > x_gap:
+                segs.append((start, prev))
+                start = x
+            prev = x
+        segs.append((start, prev))
+        for (l, r) in segs:
+            merged = False
+            for b in boxes:
+                if b[1] >= y - y_gap and not (r < b[2] or l > b[3]):
+                    b[1] = y
+                    b[2] = min(b[2], l)
+                    b[3] = max(b[3], r)
+                    merged = True
+                    break
+            if not merged:
+                boxes.append([y, y, l, r])
+    return [(t, b, l, r) for (t, b, l, r) in boxes
+            if (b - t) >= min_h and (r - l) >= min_w]
+
+
+def find_bubble_boxes(img: Image.Image, colors: dict) -> list[tuple]:
+    """用颜色连通域找气泡边界框 [(top, bottom, left, right, is_self)]（1x 坐标）。
+
+    is_self：气泡是绿色（自己发的）为 True，否则 False。
+
+    对方气泡色（深色主题下深灰）与背景差异仅 ~17 色阶，图片消息暗部/文字
+    会把深灰像素连成一片、聚合出接近全屏的异常框——过滤掉高度超消息区
+    60% 的框（正常对方气泡 < 60%），被过滤时调用方回退 y 阈值处理对方消息。
+    """
+    import numpy as np
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    boxes = []
+    if colors.get("self"):
+        mask = _near_color(arr, colors["self"], tol=60)
+        for (t, b, l, r) in _connected_boxes(mask):
+            boxes.append((t, b, l, r, True))
+    if colors.get("other"):
+        # 对方气泡色与背景差异小（深色主题仅 ~17 色阶），tol 要收紧
+        mask = _near_color(arr, colors["other"], tol=12)
+        for (t, b, l, r) in _connected_boxes(mask):
+            if (b - t) < img.height * 0.6:
+                boxes.append((t, b, l, r, False))
+    return boxes
+
+
+def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
+    """检测图片/视频/表情的内容矩形（非背景、非气泡色的大块连通域）。
+
+    媒体消息（图片/视频/动画表情）在消息区是一块非背景、非气泡色的大矩形
+    （图片内容本身），无气泡包裹。排除 bg/other/self 三种色后剩余的大块
+    连通域即媒体内容——用于图片消息精确定位（点击中心打开预览），替代
+    整屏截图降级。返回 [(top, bottom, left, right)]（1x 坐标）。
+    """
+    import numpy as np
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    h, w, _ = arr.shape
+    content = np.ones((h, w), dtype=bool)
+    for key, tol in (("bg", 30), ("other", 12), ("self", 60)):
+        c = colors.get(key)
+        if c is not None:
+            content &= ~_near_color(arr, c, tol)
+    # 媒体内容 ≥ 60px 宽高（头像 ~40px、文字小块被过滤）
+    return _connected_boxes(content, min_h=60, min_w=60)
+
+
 def region_changed(a: Image.Image, b: Image.Image, region=None,
                    threshold: int = 30) -> bool:
     """像素级差异检测（毫秒级）：region=(l,t,r,b) 局部区域或整图。
@@ -500,7 +626,8 @@ _PREVIEW_TYPE_PATTERNS = [
     (re.compile(r"^\[\s*图片\s*\]"), MessageType.IMAGE),
     (re.compile(r"^\[\s*视频\s*\]"), MessageType.VIDEO),
     (re.compile(r"^\[\s*文件\s*\]"), MessageType.FILE),
-    (re.compile(r"^\[\s*表情\s*\]"), MessageType.EMOJI),
+    # 表情预览实际为 [动画表情]（非 [表情]）；(动画)? 兼容两种写法
+    (re.compile(r"^\[\s*(动画)?表情\s*\]"), MessageType.EMOJI),
 ]
 
 
@@ -915,6 +1042,40 @@ class VisualBackend:
                 ys.append(int(pt[1]) + target_h // 2)
         return ys
 
+    def _detect_self_avatar_boxes(self, region_img: Image.Image) -> list[tuple[int, int, int, int]]:
+        """检测自己头像的矩形（含 x），返回 [(x, y, w, h)]（region 同坐标系）。
+
+        与 _detect_self_avatar_ys 同源（多尺度模板匹配），但保留 x/宽高——
+        用于排除头像区域内 OCR 文字（头像图片上的字，如「蓝色大肥鱼」）。
+        未配置头像/匹配失败返回空列表。
+        """
+        if self._avatar_template is None:
+            return []
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            return []
+        region = np.array(region_img.convert("RGB"))
+        template = np.array(self._avatar_template)
+        th, tw = template.shape[:2]
+        rh = region.shape[0]
+        if th <= 0 or tw <= 0:
+            return []
+        base_h = max(40, rh // 18)
+        boxes = []
+        for scale in (0.7, 0.85, 1.0, 1.15, 1.3):
+            target_h = int(base_h * scale)
+            target_w = int(tw * target_h / th)
+            if target_w <= 0 or target_h <= 0 or target_w > region.shape[1] or target_h > rh:
+                continue
+            resized = cv2.resize(template, (target_w, target_h))
+            result = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(result >= 0.6)
+            for pt in zip(*loc[::-1]):
+                boxes.append((int(pt[0]), int(pt[1]), target_w, target_h))
+        return boxes
+
     def get_messages(self, chat: str, limit: int | None = None) -> list[WeChatMessage]:
         """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
 
@@ -939,18 +1100,27 @@ class VisualBackend:
             self._current_is_group = is_group
         region = None
         items = []
+        bubble_boxes: list[tuple] = []  # 2x 坐标气泡框 [(t,b,l,r,is_self)]
         for attempt in range(2):
             shot = self._refresh(force=True)
             if shot is None:
                 return []
             w, h = shot.size
-            region = shot.crop((
+            region_1x = shot.crop((
                 int(w * self._message_region[0]), int(h * self._message_region[1]),
                 int(w * self._message_region[2]), int(h * self._message_region[3]),
             ))
-            region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
+            region = region_1x.resize((region_1x.width * 2, region_1x.height * 2), Image.LANCZOS)
             items = ocr_image_sharded(region)
             if items:
+                # 连通域分气泡：自动探测主题气泡色/背景色，找气泡边界框，
+                # 换算到 2x 与 OCR 坐标对齐。探测失败（纯色/mock 截图）时
+                # bubble_boxes 留空 → 下行合并回退 y 阈值逻辑。
+                colors = detect_bubble_colors(region_1x)
+                if colors.get("self") or colors.get("other"):
+                    boxes_1x = find_bubble_boxes(region_1x, colors)
+                    bubble_boxes = [(t * 2, b * 2, l * 2, r * 2, is_self)
+                                    for (t, b, l, r, is_self) in boxes_1x]
                 break
             # 消息区空白：可能 toggle 取消选中了（微信再点一次恢复选中）
             if attempt == 0:
@@ -960,6 +1130,35 @@ class VisualBackend:
             return []
         # 按 y 排序 → 合并相邻行成消息块（时间戳行作为分隔）
         items.sort(key=lambda it: (it["y"], it["x"]))
+        # 气泡归属标记：每个 OCR 行标它落在哪个气泡框（供分组 + sender 判定）
+        for it in items:
+            cy = it["y"] + it["h"] // 2
+            cx = it["x"] + it["w"] // 2
+            it["_bubble"] = None
+            it["_bubble_self"] = None
+            for (t, b, l, r, is_self) in bubble_boxes:
+                if t <= cy <= b and l <= cx <= r:
+                    it["_bubble"] = (t, b)
+                    it["_bubble_self"] = is_self
+                    break
+        # 头像文字排除：自己头像（模板匹配）+ 对方头像（气泡左边缘反推）。
+        # 头像图片上的文字（如「蓝色大肥鱼」）不应成为消息内容——头像在
+        # 气泡外侧：自己头像在右侧（模板匹配），对方头像在左侧（气泡框
+        # left 更左边那一列）。
+        self_avatar_boxes = self._detect_self_avatar_boxes(region)
+        other_lefts = [l for (t, b, l, r, is_self) in bubble_boxes if not is_self]
+        other_avatar_x_max = min(other_lefts) if other_lefts else None
+        for it in items:
+            cx = it["x"] + it["w"] // 2
+            cy = it["y"] + it["h"] // 2
+            it["_in_avatar"] = False
+            for (ax, ay, aw, ah) in self_avatar_boxes:
+                if ax <= cx <= ax + aw and ay <= cy <= ay + ah:
+                    it["_in_avatar"] = True
+                    break
+            if not it["_in_avatar"] and other_avatar_x_max is not None \
+                    and cx < other_avatar_x_max:
+                it["_in_avatar"] = True
         midline_x = region.width // 2  # 消息区中线：右侧=自己发的
         # 头像锚定：检测小漓头像位置（自己消息气泡右侧），优先于 x 坐标
         avatar_ys = self._detect_self_avatar_ys(region)
@@ -1021,8 +1220,14 @@ class VisualBackend:
                     if not is_send_button:
                         # 群聊：气泡上方发送者名（pending_name 被内容行消费时
                         # 设置 block_sender）；私聊退回会话名。
-                        sender = "self" if _is_self(first_x, first_y) \
-                            else (block_sender or chat)
+                        # sender 判定：连通域气泡 is_self 优先（最可靠），
+                        # 气泡探测失败时降级头像锚定 + x 中线。
+                        bubble_self = cur_lines[0].get("_bubble_self")
+                        if bubble_self is not None:
+                            sender = "self" if bubble_self else (block_sender or chat)
+                        else:
+                            sender = "self" if _is_self(first_x, first_y) \
+                                else (block_sender or chat)
                         seq += 1
                         msgs.append(WeChatMessage(
                             id=f"visual_{seq}",
@@ -1053,10 +1258,23 @@ class VisualBackend:
                 continue
             if _is_noise(text):
                 continue
-            # 气泡归并：用相邻行 y 差区分「同一气泡内换行」与「跨气泡」。
-            # 同一气泡多行换行行距小（<70），跨气泡间距大（≥106）→ 超阈值才换块。
-            if cur_y and abs(it["y"] - cur_y[-1]) > _BUBBLE_LINE_GAP:
-                _flush()
+            # 头像文字排除：落在头像区域（自己模板 / 对方气泡左列）的文字
+            # 是头像图片上的字，不是消息内容，直接丢弃。
+            if it.get("_in_avatar"):
+                continue
+            # 气泡归并：连通域气泡框优先——同一气泡框的行合并、不同气泡框
+            # 换块（气泡内换行 vs 跨气泡不再靠猜行距）。气泡框缺失（纯色/
+            # mock 截图探测失败）时回退 y 阈值。
+            if cur_lines:
+                cb = cur_lines[0].get("_bubble")
+                ib = it.get("_bubble")
+                if cb is not None and ib is not None:
+                    if ib != cb:
+                        _flush()
+                elif cb is not None or ib is not None:
+                    _flush()  # 一个在气泡内、一个在气泡外（发送者名/时间戳）→ 换块
+                elif cur_y and abs(it["y"] - cur_y[-1]) > _BUBBLE_LINE_GAP:
+                    _flush()
             if not cur_lines:
                 first_x0 = it["x"]
                 first_y0 = it["y"]
@@ -1080,8 +1298,10 @@ class VisualBackend:
                 if pending_name is not None:
                     _flush()
                     pending_name = None
-                # 4. 对方短文本（≤8 字符）→ 候选群聊发送者名（不立即成消息）
-                if len(text.strip()) <= 8:
+                # 4. 对方短文本（≤8 字符）→ 候选群聊发送者名（不立即成消息）。
+                #    但气泡框内的短文本是内容（如 8 字标题），不是发送者名——
+                #    发送者名在气泡上方、气泡框外（_bubble 为 None）。
+                if it.get("_bubble") is None and len(text.strip()) <= 8:
                     pending_name = (text.strip(), first_y0)
                     continue
                 # 5. 普通内容行
@@ -1175,6 +1395,37 @@ class VisualBackend:
         except (OSError, ValueError):
             pass
         return None
+
+    def media_screen_boxes(self) -> list[tuple[int, int]]:
+        """检测消息区媒体内容（图片/视频/表情）的屏幕中心点，供点击打开预览。
+
+        截图消息区 → 探测气泡色 → find_media_boxes 检测「非背景非气泡」的
+        大块媒体矩形 → 换算屏幕物理坐标（DPI 已 per-monitor aware，窗口
+        rect 与截图同坐标系）。返回 [(cx, cy), ...] 屏幕坐标，检测不到返回空。
+        """
+        if self._hwnd is None:
+            return []
+        shot = self._refresh(force=True)
+        if shot is None:
+            return []
+        w, h = shot.size
+        region = shot.crop((
+            int(w * self._message_region[0]), int(h * self._message_region[1]),
+            int(w * self._message_region[2]), int(h * self._message_region[3]),
+        ))
+        colors = detect_bubble_colors(region)
+        if not (colors.get("self") or colors.get("other")):
+            return []
+        boxes = find_media_boxes(region, colors)
+        if not boxes:
+            return []
+        rect = wt.RECT()
+        u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        win_l, win_t = rect.left, rect.top
+        msg_l = win_l + int(w * self._message_region[0])
+        msg_t = win_t + int(h * self._message_region[1])
+        return [(msg_l + (l + r) // 2, msg_t + (t + b) // 2)
+                for (t, b, l, r) in boxes]
 
     def send_file(self, chat: str, file_path: str) -> bool:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""

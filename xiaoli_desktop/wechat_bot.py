@@ -489,31 +489,31 @@ class WeChatBot:
         logger.debug(f"[处理] sender={sender} chat={chat_name} msg_class={msg_class}")
         tmp_path = None
         try:
-            # 视觉后端消息：无控件坐标，整窗截图降级（无法精确裁剪单图）
-            if not hasattr(msg_obj, 'roll_into_view') or not hasattr(msg_obj, 'control'):
-                logger.info("[处理] 视觉后端消息：整窗截图降级")
-                return self._process_image_visual_fallback(chat_name, sender)
-
-            # 1. 确保消息可见
-            msg_obj.roll_into_view()
-            time.sleep(0.3)
-
-            # 2. 获取控件（用 getattr，不用 __dict__——修复根因1）
-            control = getattr(msg_obj, 'control', None)
-            logger.debug(f"[处理] control 存在: {control is not None}, "
-                        f"类型: {type(control).__name__ if control else 'N/A'}")
-
-            if not control or not hasattr(control, 'BoundingRectangle'):
-                logger.error("[处理] 无法定位图片消息控件")
-                self._send_text("图片处理失败：无法定位消息", chat_name)
-                return False
-
-            # 3. 点击控件中心打开图片预览（应用竖图偏移校准）
-            rect = control.BoundingRectangle
-            off = self.image_click_offset or [0, 0]
-            click_x = rect.left + rect.width() // 2 + int(off[0])
-            click_y = rect.top + rect.height() // 2 + int(off[1])
-            logger.debug(f"[处理] 点击图片: ({click_x}, {click_y}) 偏移={off}")
+            # 1. 获取图片屏幕坐标：wxauto 用控件矩形，visual 用媒体矩形检测
+            if hasattr(msg_obj, 'roll_into_view') and hasattr(msg_obj, 'control'):
+                # wxauto 路径：确保消息可见 + 取控件矩形
+                msg_obj.roll_into_view()
+                time.sleep(0.3)
+                control = getattr(msg_obj, 'control', None)
+                logger.debug(f"[处理] control 存在: {control is not None}, "
+                             f"类型: {type(control).__name__ if control else 'N/A'}")
+                if not control or not hasattr(control, 'BoundingRectangle'):
+                    logger.error("[处理] 无法定位图片消息控件")
+                    self._send_text("图片处理失败：无法定位消息", chat_name)
+                    return False
+                rect = control.BoundingRectangle
+                off = self.image_click_offset or [0, 0]
+                click_x = rect.left + rect.width() // 2 + int(off[0])
+                click_y = rect.top + rect.height() // 2 + int(off[1])
+            else:
+                # visual 路径：媒体矩形检测定位图片（替代整屏截图降级）。
+                # 检测不到时才回退整屏降级（空消息区/纯文字场景）。
+                centers = getattr(self.wx, 'media_screen_boxes', lambda: [])()
+                if not centers:
+                    logger.info("[处理] 视觉后端未检测到媒体矩形，整窗截图降级")
+                    return self._process_image_visual_fallback(chat_name, sender)
+                click_x, click_y = centers[-1]  # 最新一张图片
+            logger.debug(f"[处理] 点击图片: ({click_x}, {click_y})")
             pyautogui.click(click_x, click_y)
             time.sleep(1.0)
 
