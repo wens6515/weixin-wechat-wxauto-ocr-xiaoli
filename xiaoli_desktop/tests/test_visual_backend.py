@@ -208,6 +208,39 @@ class TestVisualBackend(unittest.TestCase):
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
                 return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    # 同一气泡多行（行距 44px，2x 后微信气泡内换行）→ 应合并为一条
+                    {"text": "@小漓 测试，生成10秒视频：镜头1：缓慢推镜，昏暗",
+                     "x": 100, "y": 100, "w": 300, "h": 22},
+                    {"text": "镜头2：微微特写少年侧脸，眼神平静",
+                     "x": 100, "y": 144, "w": 260, "h": 22},
+                    {"text": "镜头3：镜头缓缓拉远，整个安静的房间",
+                     "x": 100, "y": 188, "w": 280, "h": 22},
+                ])
+    def test_get_messages_merges_multiline_bubble(self, _ocr, _cap, _find,
+                                                 _switch):
+        """同一气泡内多行换行（行距小）应合并为一条消息，不得拆散。
+
+        RED 复现：真机长任务指令（含镜头1/2/3 多行）被拆成 12 条独立消息，
+        只有带 @ 前缀的第一行成为任务，其余行被 [跳过]——task.json raw_message
+        只剩「测试，生成10秒视频」。根因：y 阈值 18px 小于气泡内换行距，
+        且续行无 append 分支被静默丢弃。
+        """
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 1, "同一气泡多行应合并为一条消息")
+        self.assertIn("镜头2", msgs[0].content)
+        self.assertIn("镜头3", msgs[0].content)
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])
     def test_get_messages_empty_ocr(self, _ocr, _cap, _find, _switch):
         b = VisualBackend()

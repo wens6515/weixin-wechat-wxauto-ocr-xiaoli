@@ -402,6 +402,10 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
 # 不同会导致错位，普通用户分发需引导框选或自适应检测。
 _SESSION_REGION_RATIO = (0.09, 0.0878, 0.418, 0.9895)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.4165, 0.1288, 0.9913, 0.8337)
+# 同一气泡内换行 vs 气泡间距的 y 差阈值（2x 坐标）。真机标定：气泡内换行
+# 行距 ~40-50px，群聊名字-内容 106px、内容块间最小 186px——取 70 夹中间，
+# 让换行合并、气泡分开。旧值 18 小于换行距，多行长消息被逐行拆散。
+_BUBBLE_LINE_GAP = 70
 # 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
 _TITLE_REGION_RATIO = (0.4151, 0.0386, 0.8128, 0.082)
 
@@ -1049,7 +1053,9 @@ class VisualBackend:
                 continue
             if _is_noise(text):
                 continue
-            if cur_y and abs(it["y"] - sum(cur_y) / len(cur_y)) > 18:
+            # 气泡归并：用相邻行 y 差区分「同一气泡内换行」与「跨气泡」。
+            # 同一气泡多行换行行距小（<70），跨气泡间距大（≥106）→ 超阈值才换块。
+            if cur_y and abs(it["y"] - cur_y[-1]) > _BUBBLE_LINE_GAP:
                 _flush()
             if not cur_lines:
                 first_x0 = it["x"]
@@ -1079,6 +1085,12 @@ class VisualBackend:
                     pending_name = (text.strip(), first_y0)
                     continue
                 # 5. 普通内容行
+                cur_lines.append(it)
+                cur_y.append(it["y"])
+            else:
+                # 续行：同一气泡内的后续换行/左右分片框，直接并入当前块。
+                # （旧实现无此分支——cur_lines 非空时续行被静默丢弃，多行长
+                # 消息只剩第一行，任务 raw_message 截断。）
                 cur_lines.append(it)
                 cur_y.append(it["y"])
         _flush()
