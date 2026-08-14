@@ -391,6 +391,86 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         self.assertEqual(handled, [("哆拉A萝", "@小漓 在吗")],
                          "群聊 @ 消息应正常处理")
 
+    def test_group_emoji_is_skipped(self):
+        """群聊表情消息（EMOJI）不处理——即使 @ 了小漓也不读表情。"""
+        from unittest import mock as _mock
+
+        from wx_backend.models import MessageType, WeChatMessage
+        from xiaoli_bot import AgentBot
+
+        handled = []
+
+        class FakeWx:
+            _current_is_group = True
+
+            def iter_unread_sessions(self):
+                return iter(["强盗”集团"])
+
+            def get_messages(self, chat):
+                return [
+                    WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
+                                  content="@小漓 [动画表情]", type=MessageType.EMOJI),
+                ]
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.paused = False
+        bot._sending_lock = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = FakeWx()
+        bot.recent_msg_ids = set()
+        bot.nickname = "小漓"
+        bot._pending_files = {}
+        bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 10
+        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+            handled.append((sender, content))
+        with _mock.patch("xiaoli_bot.should_resume_listen",
+                         return_value=(True, False, None)), \
+             _mock.patch.object(bot, "_tick_poll_outbox"):
+            bot.process_new_messages()
+        self.assertEqual(handled, [], "群聊表情消息不应处理（即使 @ 了）")
+
+
+class TestImageProcessing(unittest.TestCase):
+    def test_process_image_visual_uses_media_box(self):
+        """visual 图片消息用媒体矩形检测定位 + 点击，而非整屏降级。"""
+        from unittest import mock as _mock
+        from wx_backend.models import WeChatMessage, MessageType
+
+        bot = WeChatBot.__new__(WeChatBot)
+        bot.image_click_offset = [0, 0]
+        bot.vision_prompt = "描述这张图片"
+        bot.wx = _mock.MagicMock()
+        bot.wx.media_screen_boxes.return_value = [(100, 200)]
+
+        msg = WeChatMessage(id="v1", chat="王文生", sender="王文生",
+                            content="", type=MessageType.IMAGE)
+
+        with _mock.patch("wechat_bot.pyautogui") as pg, \
+             _mock.patch("uiautomation.WindowControl") as wc, \
+             _mock.patch.object(bot, "call_vision_api", return_value="识别结果"), \
+             _mock.patch.object(bot, "_save_screenshot_compressed"), \
+             _mock.patch.object(bot, "_reply_with_vision", return_value=True), \
+             _mock.patch.object(bot, "_process_image_visual_fallback",
+                                return_value=True) as fallback:
+            preview = _mock.MagicMock()
+            preview.Exists.return_value = False  # 无预览 → 主窗口截图分支
+            wechat_win = _mock.MagicMock()
+            wechat_win.BoundingRectangle.left = 0
+            wechat_win.BoundingRectangle.top = 0
+            wechat_win.BoundingRectangle.width.return_value = 400
+            wechat_win.BoundingRectangle.height.return_value = 400
+            wc.side_effect = [preview, wechat_win]
+            pg.screenshot.return_value = _mock.MagicMock()
+
+            bot._process_image("王文生", "王文生", msg)
+
+            pg.click.assert_called_once_with(100, 200)
+            fallback.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

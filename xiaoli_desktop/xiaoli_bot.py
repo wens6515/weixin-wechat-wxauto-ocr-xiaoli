@@ -1134,6 +1134,11 @@ class AgentBot(WeChatBot):
                         logger.info(
                             f"[跳过] {chat_name} 群聊消息未 {at_tag}：{content[:30]!r}")
                         continue
+                    # 群聊表情消息不读：EMOJI 类型直接跳过（用户明确要求），
+                    # 即使 @ 了小漓也不处理——表情是图形、无业务语义。
+                    if is_group and getattr(msg, "type", None) == MessageType.EMOJI:
+                        logger.info(f"[跳过] {chat_name} 群聊表情消息不处理")
+                        continue
                     if last_foreign is None:
                         last_foreign = msg
                     if getattr(msg, "type", None) == MessageType.IMAGE:
@@ -1202,6 +1207,9 @@ class AgentBot(WeChatBot):
                     logger.info(f"[跳过] {chat_name} 群聊最新消息未 {at_tag}，不回复")
                     continue
                 if getattr(latest, "type", None) in (MessageType.IMAGE, MessageType.FILE):
+                    continue
+                # 群聊表情消息不读（latest 兜底路径，同 for 循环内的过滤）
+                if is_group and getattr(latest, "type", None) == MessageType.EMOJI:
                     continue
                 msg_key = f"{chat_name}_{sender}_{content}"
                 if msg_key in self.recent_msg_ids:

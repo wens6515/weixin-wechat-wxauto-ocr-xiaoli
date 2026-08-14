@@ -27,7 +27,12 @@ from wx_backend.visual_backend import (
     _norm_cjk,
     ocr_image,
     region_changed,
+    detect_bubble_colors,
+    find_bubble_boxes,
+    find_media_boxes,
+    _preview_type,
 )
+from wx_backend.models import MessageType
 
 
 # ---- 辅助：构造测试用 PIL 图像 ----
@@ -114,6 +119,81 @@ class TestOcrImageMocked(unittest.TestCase):
             {"text": "王文生", "x": 10, "y": 20, "w": 90, "h": 30},
             {"text": "[图片]", "x": 5, "y": 80, "w": 55, "h": 20},
         ])
+
+
+# ---- 气泡色探测 + 连通域分气泡 ----
+
+
+def _dark_msg_region():
+    """模拟深色主题消息区：深黑背景 + 深灰对方气泡 + 绿色自己气泡。"""
+    from PIL import ImageDraw
+    img = Image.new("RGB", (400, 300), (30, 30, 31))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([40, 30, 240, 110], radius=8, fill=(47, 47, 48))      # 对方气泡
+    d.rounded_rectangle([160, 150, 360, 210], radius=8, fill=(53, 210, 141))  # 自己气泡
+    return img
+
+
+class TestBubbleDetection(unittest.TestCase):
+    def test_detect_bubble_colors_dark(self):
+        colors = detect_bubble_colors(_dark_msg_region())
+        self.assertIsNotNone(colors["bg"])
+        self.assertIsNotNone(colors["self"])
+        self.assertIsNotNone(colors["other"])
+        # 背景接近深黑
+        self.assertLess(abs(colors["bg"][0] - 30), 8)
+        # 自己气泡是绿色（G 显著高、R 低）
+        self.assertGreater(colors["self"][1], 150)
+        self.assertLess(colors["self"][0], 100)
+        # 对方气泡深灰（各分量接近 47）
+        for c in colors["other"]:
+            self.assertLess(abs(c - 47), 10)
+
+    def test_find_bubble_boxes_dark(self):
+        img = _dark_msg_region()
+        colors = detect_bubble_colors(img)
+        boxes = find_bubble_boxes(img, colors)
+        self.assertEqual(len(boxes), 2, "应找到 2 个气泡（对方 + 自己）")
+        flags = sorted(b[4] for b in boxes)
+        self.assertEqual(flags, [False, True])
+
+    def test_detect_on_solid_returns_none(self):
+        """纯色/mock 截图探测不到气泡色 → 返回 None（get_messages 回退 y 阈值）。"""
+        colors = detect_bubble_colors(_solid((200, 200), (255, 255, 255)))
+        self.assertIsNone(colors["self"])
+        self.assertIsNone(colors["other"])
+
+    def test_find_media_boxes_detects_image(self):
+        """媒体内容（图片）是「非背景、非气泡色」的大块，应被检测为矩形。"""
+        from PIL import ImageDraw
+        img = Image.new("RGB", (400, 300), (30, 30, 31))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle([40, 30, 240, 110], radius=8, fill=(47, 47, 48))  # 对方气泡
+        d.rectangle([40, 130, 240, 260], fill=(120, 80, 200))                 # 图片内容
+        colors = detect_bubble_colors(img)
+        boxes = find_media_boxes(img, colors)
+        self.assertEqual(len(boxes), 1, "应检测到 1 个媒体矩形（图片）")
+        t, b, l, r = boxes[0]
+        self.assertLess(abs(t - 130), 10)
+        self.assertLess(abs(b - 260), 10)
+
+
+class TestPreviewType(unittest.TestCase):
+    def test_animated_emoji(self):
+        """微信列表预览表情是 [动画表情]，不是 [表情]——须识别为 EMOJI。"""
+        self.assertEqual(_preview_type("[动画表情]"), MessageType.EMOJI)
+
+    def test_plain_emoji(self):
+        self.assertEqual(_preview_type("[表情]"), MessageType.EMOJI)
+
+    def test_image_video_file(self):
+        self.assertEqual(_preview_type("[图片]"), MessageType.IMAGE)
+        self.assertEqual(_preview_type("[视频]"), MessageType.VIDEO)
+        self.assertEqual(_preview_type("[文件] 部门简介.do.."), MessageType.FILE)
+
+    def test_text_fallback(self):
+        self.assertEqual(_preview_type("你好呀"), MessageType.TEXT)
+        self.assertEqual(_preview_type(""), MessageType.TEXT)
 
 
 # ---- 后端行为（mock 窗口与 OCR） ----
@@ -234,6 +314,65 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(len(msgs), 1, "同一气泡多行应合并为一条消息")
         self.assertIn("镜头2", msgs[0].content)
         self.assertIn("镜头3", msgs[0].content)
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window")
+    @mock.patch("wx_backend.visual_backend.ocr_image")
+    def test_get_messages_groups_by_bubble(self, _ocr, _cap, _find, _switch):
+        """连通域分气泡：同一气泡内多行合并、不同气泡分开，优先于 y 阈值。
+
+        RED 方向：y 阈值靠猜行距，换主题/字体就失效。连通域用气泡背景色
+        （绿色=自己、深灰/白=对方）直接框出气泡边界，sender 判定也不再依赖
+        x 中线。
+        """
+        _cap.return_value = _dark_msg_region()  # 400x300 深色图（对方+自己气泡）
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        with mock.patch.object(b, "read_title", return_value="王文生"):
+            # OCR 文字（2x 坐标）：对方气泡 2x [80,60,480,220]、
+            # 自己气泡 2x [320,300,720,420]
+            _ocr.return_value = [
+                {"text": "镜头1：缓慢推镜", "x": 100, "y": 80, "w": 200, "h": 30},
+                {"text": "镜头2：特写侧脸", "x": 100, "y": 140, "w": 200, "h": 30},
+                {"text": "收到任务啦", "x": 340, "y": 320, "w": 200, "h": 30},
+            ]
+            msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 2, "应分组成 2 条（对方气泡 + 自己气泡）")
+        self.assertIn("镜头1", msgs[0].content)
+        self.assertIn("镜头2", msgs[0].content)
+        self.assertEqual(msgs[0].sender, "王文生", "对方气泡 → 私聊 sender=会话名")
+        self.assertEqual(msgs[1].content, "收到任务啦")
+        self.assertEqual(msgs[1].sender, "self", "绿色气泡 → self")
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window")
+    @mock.patch("wx_backend.visual_backend.ocr_image")
+    def test_get_messages_excludes_avatar_text(self, _ocr, _cap, _find, _switch):
+        """头像区域内的 OCR 文字（头像图片上的字）应被排除，不当消息内容。"""
+        _cap.return_value = _dark_msg_region()  # 深色图（对方+自己气泡）
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        with mock.patch.object(b, "read_title", return_value="王文生"), \
+             mock.patch.object(b, "_detect_self_avatar_boxes",
+                               return_value=[(700, 300, 80, 80)]):
+            _ocr.return_value = [
+                # 气泡内容（对方气泡 2x [80,60,480,220] 内）
+                {"text": "镜头1：缓慢推镜", "x": 100, "y": 80, "w": 200, "h": 30},
+                # 头像文字（落在自己头像矩形 (700,300,80,80) 内）
+                {"text": "蓝色大肥鱼", "x": 710, "y": 310, "w": 60, "h": 20},
+            ]
+            msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 1, "头像文字应被排除，只剩气泡内容")
+        self.assertIn("镜头1", msgs[0].content)
+        self.assertNotIn("蓝色大肥鱼", msgs[0].content)
         b.close()
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
