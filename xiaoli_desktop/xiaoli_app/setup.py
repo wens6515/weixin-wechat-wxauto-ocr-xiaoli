@@ -733,7 +733,7 @@ def send_yes_and_close(title, sleep_fn=None, send_fn=None, close_fn=None):
     close_fn = close_fn or close_window_by_title
     if not title:
         return False
-    ok = send_fn(title, "/yes", enter_times=2)
+    ok = send_fn(title, "/yes", hold=2.0, enter_times=2)
     sleep_fn(1.0)  # 等 CLI 完成模式切换
     close_fn(title)
     return ok

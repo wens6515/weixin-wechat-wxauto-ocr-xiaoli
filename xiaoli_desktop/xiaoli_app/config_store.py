@@ -131,7 +131,7 @@ PRESET_PROVIDERS = [
      "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro"]},
     {"id": "zhipu", "name": "智谱 GLM",
      "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-     "models": ["zhipu:glm-5.2", "zhipu:glm-5v-turbo"]},
+     "models": ["zhipu:glm-5.2", "zhipu:glm-5v-turbo", "zhipu:glm-4.6v", "zhipu:glm-4v-flash"]},
     {"id": "qwen", "name": "通义千问",
      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
      "models": ["qwen:qwen-plus", "qwen:qwen-vl-plus"]},
@@ -464,6 +464,8 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
         "avatar_template": "",  # 小漓头像模板图路径（首次启动用户上传，用于消息区识别自己发的消息）
+        "theme": "blue",  # 界面主题（THEMES 键：blue/dark/emerald/sunset/rose）
+        "wallpaper_path": "",  # 背景壁纸图路径（空 = 主题纯色背景）
     }.items():
         if k not in cfg:
             cfg[k] = v

@@ -303,6 +303,17 @@ def activate_window_by_title(title):
         return False
     try:
         win.SetActive()
+        # SetActive 之外再强制 SetForegroundWindow：终端类窗口（天枢 CLI 跑在
+        # Windows Terminal/cmd）仅 SetActive 有时不把焦点真正切到前台，导致
+        # 后续 Ctrl+V/回车发到错误窗口（用户实测 /yes、开始处理均未提交）。
+        try:
+            hwnd = win.NativeWindowHandle
+            if hwnd:
+                import ctypes
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                time.sleep(0.2)
+        except Exception:
+            pass
         return True
     except Exception as e:
         logger.error(f"[窗口] 激活失败: {e}")
@@ -724,7 +735,7 @@ class AgentBot(WeChatBot):
             # 全自动模式由首启一次性引导的 /yes 保证（持久化，重启后仍生效，
             # 见 run_first_run_guide）——这里不再会话内切 YOLO（旧机制：
             # /permission yolo confirm 每次投递都要重发）。直接发触发指令。
-            ok = send_trigger_to_window(title, self.tianshu_trigger_command)
+            ok = send_trigger_to_window(title, self.tianshu_trigger_command, hold=2.0)
             if not ok:
                 logger.error(f"[天枢] 唤起窗口失败: {title}，任务 {task_id} 保留在 {os.path.join(self.tasks_dir, task_id)}")
                 self._send_text("天枢窗口没找到，不过任务已经记下了，处理完我会把结果发给你～", chat_name)
