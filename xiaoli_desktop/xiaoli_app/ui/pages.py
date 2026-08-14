@@ -727,6 +727,7 @@ class CardsPage(QWidget):
 class ModelsPage(QWidget):
     # 测试连接结果从后台线程回主线程弹窗（跨线程 GUI 会死锁）
     _probe_done = Signal(str, str)  # (kind, message) kind: "ok" / "fail"
+    _models_fetched = Signal(int, str, list)  # (row, provider_id, model_ids) 检测到可用模型后写回
 
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
@@ -747,6 +748,7 @@ class ModelsPage(QWidget):
             | QTableWidget.EditTrigger.DoubleClicked
             | QTableWidget.EditTrigger.AnyKeyPressed)
         self._probe_done.connect(self._show_probe_result)
+        self._models_fetched.connect(self._apply_fetched_models)
         self.cb_show_key = QCheckBox("显示 API Key")
         self.cb_show_key.toggled.connect(lambda on: self._refresh_keys(on))
         btn_row = QHBoxLayout()
@@ -958,6 +960,7 @@ class ModelsPage(QWidget):
             return
         url = self.table.item(r, 1).text().strip() if self.table.item(r, 1) else ""
         key = self.table.item(r, 2).text().strip() if self.table.item(r, 2) else ""
+        pid = self.table.item(r, 4).text().strip() if self.table.item(r, 4) else ""
         if not url:
             QMessageBox.warning(self, "提示", "请先填写 Base URL")
             return
@@ -972,8 +975,12 @@ class ModelsPage(QWidget):
                 resp = requests.get(models_url, headers={"Authorization": f"Bearer {key}"}, timeout=(5, 10))
                 if resp.status_code == 200:
                     names = [m.get("id", "") for m in resp.json().get("data", [])]
-                    self._probe_done.emit("ok",
-                                          f"可用模型（{len(names)} 个）：\n" + "\n".join(names[:20]))
+                    names = [n for n in names if n]
+                    self._probe_done.emit(
+                        "ok",
+                        f"检测到 {len(names)} 个可用模型，已填入「模型」列，点「保存并应用」后生效：\n"
+                        + "\n".join(names[:20]))
+                    self._models_fetched.emit(r, pid, names)
                 else:
                     self._probe_done.emit("fail", f"HTTP {resp.status_code}: {resp.text[:200]}")
             except Exception as e:
@@ -986,6 +993,22 @@ class ModelsPage(QWidget):
             QMessageBox.information(self, "连接成功", message)
         else:
             QMessageBox.warning(self, "连接失败", message)
+
+    def _apply_fetched_models(self, row, pid, names):
+        """检测到可用模型后写回 provider 的「模型」列，并同步内存 providers（下拉立即可选）。
+
+        模型 id 沿用「厂商:模型」前缀格式（与 PRESET_PROVIDERS 一致，引擎
+        strip_model_prefix 剥离前缀透传）；真正持久化仍走「保存并应用」。
+        """
+        if row < 0 or row >= self.table.rowCount() or not names:
+            return
+        prefixed = [f"{pid}:{n}" if pid and ":" not in n else n for n in names]
+        self.table.setItem(row, 3, QTableWidgetItem(", ".join(prefixed)))
+        for p in self.ctx.cfg.get("providers", []):
+            if p.get("id") == pid:
+                p["models"] = prefixed
+                break
+        self._reload_model_config()
 
 
 # =====================================================================
