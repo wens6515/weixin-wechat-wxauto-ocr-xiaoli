@@ -1112,6 +1112,30 @@ class SettingsPage(QWidget):
         self.ctx = ctx
         lay = QVBoxLayout(self)
 
+        # 界面主题 + 壁纸
+        g_theme = QGroupBox("界面主题与壁纸")
+        tfl = QFormLayout(g_theme)
+        self.cb_theme = QComboBox()
+        from . import THEMES
+        for key, t in THEMES.items():
+            self.cb_theme.addItem(t["label"], key)
+        self.ed_wallpaper = QLineEdit()
+        self.ed_wallpaper.setReadOnly(True)
+        row_wp = QHBoxLayout()
+        row_wp.addWidget(self.ed_wallpaper, 1)
+        btn_wp = QPushButton("选择壁纸…")
+        btn_wp.clicked.connect(self._pick_wallpaper)
+        btn_wp_clear = QPushButton("清除壁纸")
+        btn_wp_clear.clicked.connect(self._clear_wallpaper)
+        row_wp.addWidget(btn_wp)
+        row_wp.addWidget(btn_wp_clear)
+        self.btn_theme_apply = QPushButton("应用主题")
+        self.btn_theme_apply.clicked.connect(self._apply_theme)
+        tfl.addRow("主题", self.cb_theme)
+        tfl.addRow("壁纸", row_wp)
+        tfl.addRow(self.btn_theme_apply)
+        lay.addWidget(g_theme)
+
         # 记忆
         g_mem = QGroupBox("对话记忆（memory.json）")
         gl = QVBoxLayout(g_mem)
@@ -1221,7 +1245,34 @@ class SettingsPage(QWidget):
         self.cb_send.setCurrentIndex(max(0, idx))
         self.ed_files.setText(cfg.get("file_storage_path", ""))
         self.ed_tasks.setText(cfg.get("tasks_dir", ""))
+        theme = cfg.get("theme", "blue")
+        ti = self.cb_theme.findData(theme)
+        self.cb_theme.setCurrentIndex(max(0, ti))
+        self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
         self._refresh_stems()
+
+    def _pick_wallpaper(self):
+        p, _f = QFileDialog.getOpenFileName(
+            self, "选择背景壁纸", self.ed_wallpaper.text(),
+            "图片 (*.png *.jpg *.jpeg *.bmp)")
+        if p:
+            self.ed_wallpaper.setText(p)
+
+    def _clear_wallpaper(self):
+        self.ed_wallpaper.clear()
+
+    def _apply_theme(self):
+        theme = self.cb_theme.currentData() or "blue"
+        wp = self.ed_wallpaper.text().strip()
+        self.ctx.cfg["theme"] = theme
+        self.ctx.cfg["wallpaper_path"] = wp
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        from . import build_qss
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_qss(theme, wp))
+        QMessageBox.information(self, "已应用", "主题已应用并保存")
 
     def _view_memory(self):
         cfg = self.ctx.cfg or {}

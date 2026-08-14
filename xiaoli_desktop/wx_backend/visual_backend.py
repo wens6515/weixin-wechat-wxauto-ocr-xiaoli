@@ -243,6 +243,40 @@ def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
     return items
 
 
+def ocr_image_sharded(img: Image.Image, max_side: int = 736) -> list[dict]:
+    """宽图左右分片 OCR：避免长文本行被检测模型压缩截断。
+
+    img 应为 2x 分辨率（调用方已 resize）。RapidOCR 检测模型 limit_side_len=736
+    （min）——消息区 2x 后宽 1508px 会被内部压缩到 736 再检测，长文本行
+    （用户的长任务指令）检测框不完整 → 内容截断（真机：task.json raw_message
+    只投递前半段「镜头1：缓」）。分片让每片宽度 ≈ 检测限制，长文本行不被压缩。
+    返回 items 坐标与输入 img 同一坐标系（2x 整图）。
+    """
+    if img.width <= max_side + 100:  # 宽度在检测限制附近，单片即可
+        return ocr_image(img)
+    overlap = int(img.width * 0.12)
+    mid = img.width // 2
+    left = img.crop((0, 0, mid + overlap, img.height))
+    right = img.crop((mid - overlap, 0, img.width, img.height))
+    left_items = ocr_image(left)
+    right_items = ocr_image(right)
+    offset_x = mid - overlap  # 右片 x 坐标换算到整图
+    items: list[dict] = []
+    seen: set = set()
+    for it in left_items:
+        key = (round(it["y"] / 10), it["text"])
+        if key not in seen:
+            seen.add(key)
+            items.append(it)
+    for it in right_items:
+        it["x"] += offset_x
+        key = (round(it["y"] / 10), it["text"])
+        if key not in seen:
+            seen.add(key)
+            items.append(it)
+    return items
+
+
 def region_changed(a: Image.Image, b: Image.Image, region=None,
                    threshold: int = 30) -> bool:
     """像素级差异检测（毫秒级）：region=(l,t,r,b) 局部区域或整图。
@@ -911,7 +945,7 @@ class VisualBackend:
                 int(w * self._message_region[2]), int(h * self._message_region[3]),
             ))
             region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
-            items = ocr_image(region)
+            items = ocr_image_sharded(region)
             if items:
                 break
             # 消息区空白：可能 toggle 取消选中了（微信再点一次恢复选中）
