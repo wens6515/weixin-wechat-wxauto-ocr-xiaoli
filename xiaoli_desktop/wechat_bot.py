@@ -151,7 +151,7 @@ def load_config(path="config.json"):
         "chat_model": "deepseek:deepseek-v4-flash",
         "chat_temperature": 0.7,
         "chat_top_p": 0.9,
-        "vision_model": "zhipu:glm-4.6v",
+        "vision_model": "zhipu:glm-5v-turbo",
         "vision_temp": 0.7,
         "vision_max_tokens": 10000,
         "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",

@@ -471,10 +471,13 @@ def send_prompt_to_tianshu(text, window_title):
     """把首轮提示词发送给天枢窗口（激活→剪贴板粘贴→两次回车）。返回 bool。
 
     天枢 CLI 实测：粘贴后单次回车不提交，需连续两次回车（首轮提示词均如此）。
+    hold 加长到 2.0s：首轮提示词场景 CLI 可能刚由 resolve_cli_window 第 3 级
+    启动，TUI 尚未就绪——粘贴/回车发得太早会丢在初始化阶段（用户实测「只
+    复制了提示词却缺失两次回车」）。加长等待让 CLI 输入框就绪。
     """
     if not window_title or not text:
         return False
-    return _send_trigger_to_window(window_title, text, enter_times=2)
+    return _send_trigger_to_window(window_title, text, hold=2.0, enter_times=2)
 
 
 # resolve_cli_window 第 3 级 launch 幂等护栏：冷却期内不重复 launch。

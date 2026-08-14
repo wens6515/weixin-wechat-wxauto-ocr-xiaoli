@@ -322,10 +322,13 @@ def send_trigger_to_window(title, command, hold=0.5, enter_times=1):
         return False
     time.sleep(0.1)
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(0.3)
+    # 粘贴后等待：长文本（首轮提示词几百字多行）粘贴比短指令慢，按内容长度
+    # 自适应；等待不足时回车会按在粘贴未完成/输入框未就绪的状态（丢回车）。
+    paste_wait = 1.0 if len(command) > 200 else 0.4
+    time.sleep(paste_wait)
     for _ in range(enter_times):
         pyautogui.press("enter")
-        time.sleep(0.2)
+        time.sleep(0.3)
     logger.info(f"[天枢] 已向窗口「{title}」发送指令: {command}（回车 {enter_times} 次）")
     return True
 

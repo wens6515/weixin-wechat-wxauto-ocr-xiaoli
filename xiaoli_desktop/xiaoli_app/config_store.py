@@ -128,10 +128,10 @@ AI_DEFAULTS = {
 PRESET_PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek 深度求索",
      "base_url": "https://api.deepseek.com/v1/chat/completions",
-     "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-reasoner"]},
+     "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro"]},
     {"id": "zhipu", "name": "智谱 GLM",
      "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-     "models": ["zhipu:glm-4.6", "zhipu:glm-4.6v"]},
+     "models": ["zhipu:glm-5.2", "zhipu:glm-5v-turbo"]},
     {"id": "qwen", "name": "通义千问",
      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
      "models": ["qwen:qwen-plus", "qwen:qwen-vl-plus"]},
