@@ -46,9 +46,7 @@ QTabBar::tab:hover { background: $hover; color: $text; }
 QTabBar::tab:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                        stop:0 $p1, stop:1 $p2);
                        color: #FFFFFF; font-weight: 600; }
-QLabel#title { font-size: 26px; font-weight: 700;
-               color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-               stop:0 $p1, stop:1 $p2); }
+QLabel#title { font-size: 26px; font-weight: 700; color: $p1; }
 QLabel#subtitle { font-size: 13px; color: $muted; }
 QLabel#stateLabel { font-size: 14px; color: $muted; }
 QFrame#card { background: $card; border: 1px solid $border; border-radius: 14px; }
@@ -88,6 +86,16 @@ QListWidget, QTableWidget { background: $input_bg; border: 1px solid $border;
 QListWidget::item { padding: 7px 10px; border-radius: 8px; margin: 2px 4px; }
 QListWidget::item:hover { background: $hover; }
 QListWidget::item:selected { background: $hover; color: $text; }
+/* 左侧导航栏：窄侧边 + 竖排导航项，选中态渐变背景 + 白字白图标 */
+QListWidget#navList { background: $frame; border: none;
+                      border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
+QListWidget#navList::item { padding: 12px 14px; border-radius: 10px;
+                            margin: 3px 6px; color: $muted; font-size: 14px;
+                            font-weight: 500; }
+QListWidget#navList::item:hover { background: $hover; color: $text; }
+QListWidget#navList::item:selected {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 $p1, stop:1 $p2);
+    color: #FFFFFF; font-weight: 600; }
 QTableWidget::item:selected { background: $hover; color: $text; }
 QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;
