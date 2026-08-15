@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -470,6 +471,75 @@ class TestImageProcessing(unittest.TestCase):
 
             pg.click.assert_called_once_with(100, 200)
             fallback.assert_not_called()
+
+
+# ---- 文件显示名提取 + 目录快照增量（微信保留源时间戳的应对） ----
+
+
+class TestFileDisplayNameAndSnapshot(unittest.TestCase):
+    """Bug2 回归：视觉后端 FILE 消息 content 可能是合并文本（多条文件消息
+    OCR 并成一个文本块 + 图标杂字符），必须拆出真实文件名；目录兜底扫描
+    用快照增量识别「新下载」，不按 mtime/ctime 猜（微信保留源时间戳）。"""
+
+    @staticmethod
+    def _obj():
+        import wechat_bot
+        return object.__new__(wechat_bot.WeChatBot)
+
+    def test_extract_display_name_from_merged_text(self):
+        """合并文本（两个文件名 + 图标杂字符 W）→ 拆出第一个真实文件名。"""
+        from wx_backend.models import WeChatMessage, MessageType
+        obj = self._obj()
+        m = WeChatMessage(id="x", chat="c", sender="s",
+                          content="新宣传.docx 部门简介+纳新宣传.docx W",
+                          type=MessageType.FILE)
+        self.assertEqual(obj._extract_file_display_name(m), "新宣传.docx")
+
+    def test_extract_display_name_single(self):
+        """干净单文件名原样返回（含 + 号）。"""
+        from wx_backend.models import WeChatMessage, MessageType
+        obj = self._obj()
+        m = WeChatMessage(id="x", chat="c", sender="s",
+                          content="部门简介+纳新宣传.docx", type=MessageType.FILE)
+        self.assertEqual(obj._extract_file_display_name(m), "部门简介+纳新宣传.docx")
+
+    def test_extract_display_name_other_ext(self):
+        """xlsx/pdf 等扩展名同样可拆。"""
+        from wx_backend.models import WeChatMessage, MessageType
+        obj = self._obj()
+        m = WeChatMessage(id="x", chat="c", sender="s",
+                          content="名单.xlsx 说明.pdf W", type=MessageType.FILE)
+        self.assertEqual(obj._extract_file_display_name(m), "名单.xlsx")
+
+    def test_snapshot_incremental_finds_new_download(self):
+        """快照增量：首次建基线返回 None；新文件（即使 mtime 是旧的——
+        微信保留源时间戳）被识别为增量并按重名编号取最新；重启后无新文件
+        返回 None。"""
+        obj = self._obj()
+        with tempfile.TemporaryDirectory() as tmp:
+            obj._file_snapshot_path = os.path.join(tmp, "snap.json")
+            obj._file_snapshot = {}
+            obj._sent_back_files = {}
+            obj._sent_back_stems = {}
+            d = os.path.join(tmp, "files")
+            os.makedirs(d)
+            old = os.path.join(d, "部门简介+纳新宣传(1).docx")
+            with open(old, "w") as f:
+                f.write("old")
+            t_past = time.time() - 86400
+            os.utime(old, (t_past, t_past))
+            # 首次：建基线，不返回（无从判断增量）
+            self.assertIsNone(obj._find_user_file(d))
+            # 新文件落盘：重名编号大（(5)），mtime 仍是旧源时间戳
+            newf = os.path.join(d, "部门简介+纳新宣传(5).docx")
+            with open(newf, "w") as f:
+                f.write("new")
+            os.utime(newf, (t_past, t_past))
+            got = obj._find_user_file(d)
+            self.assertEqual(os.path.basename(got), "部门简介+纳新宣传(5).docx")
+            # 重启模拟：重新加载快照，无新增 → None
+            obj._file_snapshot = obj._load_file_snapshot()
+            self.assertIsNone(obj._find_user_file(d))
 
 
 if __name__ == "__main__":

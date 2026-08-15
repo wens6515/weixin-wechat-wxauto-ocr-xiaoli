@@ -31,6 +31,9 @@ from wx_backend.visual_backend import (
     find_bubble_boxes,
     find_media_boxes,
     _preview_type,
+    ensure_window_visible,
+    find_window_by_title,
+    window_rect,
 )
 from wx_backend.models import MessageType
 
@@ -845,6 +848,69 @@ class TestRegionConfig(unittest.TestCase):
                 b = VisualBackend()
             self.assertEqual(b._session_region, vb._SESSION_REGION_RATIO)
             self.assertEqual(b._message_region, vb._MESSAGE_REGION_RATIO)
+
+
+# ---- 窗口查找 / 矩形（Win32 mock） ----
+
+
+class TestWindowLookup(unittest.TestCase):
+    """微信 4.1.12 窗口类名是 Qt51514QWindowIcon，uiautomation 类名搜索与
+    BoundingRectangle 均不可靠——窗口定位改标题精确匹配 + GetWindowRect。"""
+
+    def test_find_window_by_title_exact_and_visible(self):
+        """标题精确匹配 + 仅可见窗口；'微信' 不误匹配 '微信文件'。"""
+        titles = {0x111: "图片和视频", 0x222: "微信", 0x333: "微信文件"}
+        visible = {0x111: True, 0x222: False, 0x333: True}
+        hwnds = list(titles.keys())
+
+        def fake_enum(cb, _lparam):
+            for h in hwnds:
+                if not cb(h, _lparam):
+                    break
+            return True
+
+        def fake_gettext(hwnd, buf, _n):
+            buf.value = titles.get(hwnd, "")
+            return len(buf.value)
+
+        with mock.patch("wx_backend.visual_backend.u32.EnumWindows", side_effect=fake_enum), \
+                mock.patch("wx_backend.visual_backend.u32.GetWindowTextW", side_effect=fake_gettext), \
+                mock.patch("wx_backend.visual_backend.u32.IsWindowVisible",
+                           side_effect=lambda h: visible.get(h, False)):
+            self.assertEqual(find_window_by_title("图片和视频"), 0x111)
+            self.assertIsNone(find_window_by_title("微信"))  # 不可见 → 跳过
+            self.assertEqual(find_window_by_title("微信文件"), 0x333)
+
+    def test_find_window_by_title_empty(self):
+        self.assertIsNone(find_window_by_title(""))
+        self.assertIsNone(find_window_by_title(None))
+
+    def test_window_rect(self):
+        rects = {0x1234: (10, 20, 510, 320)}  # left, top, right, bottom
+
+        def fake_getrect(hwnd, out):
+            v = rects.get(hwnd)
+            if v is None:
+                return 0
+            r = out._obj  # CArgObject 包装的真实 RECT
+            r.left, r.top, r.right, r.bottom = v
+            return 1
+
+        with mock.patch("wx_backend.visual_backend.u32.GetWindowRect", side_effect=fake_getrect):
+            self.assertEqual(window_rect(0x1234), (10, 20, 500, 300))
+            self.assertIsNone(window_rect(0x999))  # GetWindowRect 失败
+        self.assertIsNone(window_rect(None))
+
+    def test_ensure_window_visible_restores_iconic(self):
+        """最小化窗口先 SW_RESTORE 再返回 True；正常窗口不动。"""
+        with mock.patch("wx_backend.visual_backend.u32.IsIconic", side_effect=lambda h: h == 0x111), \
+                mock.patch("wx_backend.visual_backend.u32.ShowWindow") as show:
+            self.assertTrue(ensure_window_visible(0x111))
+            show.assert_called_once_with(0x111, 9)  # SW_RESTORE
+            show.reset_mock()
+            self.assertTrue(ensure_window_visible(0x222))  # 非最小化 → 不调用 ShowWindow
+            show.assert_not_called()
+        self.assertFalse(ensure_window_visible(None))
 
 
 if __name__ == "__main__":

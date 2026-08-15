@@ -1023,9 +1023,12 @@ class AgentBot(WeChatBot):
                         self._process_file_with_instruction(
                             chat_name, pending["sender"], got[0], got[1], got[2], c.strip())
                     else:
-                        # 取不到文件（下载失败等）：把指令按普通文本处理
-                        logger.warning(f"[等待指令] 取不到文件，按普通消息处理: {chat_name}")
-                        self._handle_text(chat_name, s, c.strip(), getattr(m, "id", None))
+                        # 取不到文件（下载失败/未落盘等）：直接回复失败，
+                        # 不按普通消息处理——普通消息路径会把文件消息的
+                        # OCR 文本（文件名拼接）当聊天内容，用户得不到明确的
+                        # 失败反馈，还会误触发一次无关回复。
+                        logger.warning(f"[等待指令] 取不到文件，回复处理失败: {chat_name}")
+                        self._send_text("文件处理失败，请检查文件是否下载完成后重试～", chat_name)
                     self.last_reply_time = time.time()
                     return
             except Exception as e:
