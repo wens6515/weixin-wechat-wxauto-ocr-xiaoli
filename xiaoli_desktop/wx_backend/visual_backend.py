@@ -1217,7 +1217,13 @@ class VisualBackend:
         # 气泡外侧：自己头像在右侧（模板匹配），对方头像在左侧（气泡框
         # left 更左边那一列）。
         self_avatar_boxes = self._detect_self_avatar_boxes(region)
-        other_lefts = [l for (t, b, l, r, is_self) in bubble_boxes if not is_self]
+        # 对方头像只在消息区左侧（对方消息/头像在左）：只取 left<中线 的
+        # other 气泡框。对方气泡色接近背景时 find_bubble_boxes 会把右侧
+        # 背景误连成 other 框（真机实测 left=1220 > 中线 747）——若不过滤，
+        # other_avatar_x_max 被污染成右侧值，消息区所有行 cx<该值 被误判
+        # 头像区丢弃，全部消息读空（get_messages 读 0 条的真机根因）。
+        other_lefts = [l for (t, b, l, r, is_self) in bubble_boxes
+                       if not is_self and l < region.width // 2]
         other_avatar_x_max = min(other_lefts) if other_lefts else None
         for it in items:
             cx = it["x"] + it["w"] // 2

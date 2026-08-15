@@ -609,6 +609,42 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(b._session_types.get("杨冬梅"), MessageType.IMAGE)
         self.assertEqual(b._session_types.get("王美晨"), MessageType.TEXT)
 
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                return_value={"bg": (30, 30, 31), "other": (30, 35, 38),
+                              "self": (53, 210, 141)})
+    @mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                return_value=[
+                    # self 绿气泡（bot 长回复）
+                    (0, 490, 262, 1226, True),
+                    # other 气泡误检在右侧：left=1220 > 中线 747（other 色
+                    # 接近背景时 find_bubble_boxes 把右侧背景误连成 other 框）
+                    (0, 490, 1220, 1492, False),
+                ])
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    {"text": "18:47", "x": 679, "y": 1989, "w": 40, "h": 15},
+                    {"text": "你好", "x": 276, "y": 2144, "w": 30, "h": 20},
+                ])
+    def test_get_messages_rightside_other_bubble_not_avatar(self, _ocr, _fb,
+                                                            _dc, _cap, _find,
+                                                            _switch):
+        """RED 复现：other 气泡框被误检在右侧（left>中线）时，头像排除
+        不得把整个消息区当头像区——否则所有消息被丢弃，get_messages 读空
+        （真机根因：19:10 王文生已选中读 0 条，OCR 17 行全被 _in_avatar
+        丢弃，other_avatar_x_max 被右侧误检框污染成 1220）。"""
+        b = VisualBackend()
+        b.connect()
+        msgs = b.get_messages("王文生")
+        self.assertTrue(msgs, "右侧误检 other 框不得导致消息全被头像区排除")
+        self.assertTrue(any("你好" in m.content for m in msgs),
+                        "「你好」应被读到（不被误判头像区）")
+        b.close()
+
 
 # ---- 未读红圈角标检测 ----
 
