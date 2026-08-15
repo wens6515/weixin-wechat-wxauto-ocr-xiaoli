@@ -126,6 +126,58 @@ def find_wechat_window():
     return found[0] if found else None
 
 
+def find_window_by_title(title: str):
+    """按窗口标题精确匹配返回可见窗口句柄；未找到返回 None。
+
+    微信 4.1.12 窗口类名是 Qt51514QWindowIcon（随 Qt 版本变化），uiautomation
+    按 ClassName 搜索会失配、BoundingRectangle 对 Qt 窗口实测返回 (0,0,0x0)。
+    图片预览窗口标题是「图片和视频」（微信 4.1.12 实测），主窗口标题「微信」。
+    """
+    if not title:
+        return None
+    found = []
+
+    @_WNDENUMPROC
+    def _cb(hwnd, _lparam):
+        buf = ctypes.create_unicode_buffer(512)
+        n = u32.GetWindowTextW(hwnd, buf, 512)
+        if n and buf.value == title and u32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+            return False
+        return True
+
+    u32.EnumWindows(_cb, 0)
+    return found[0] if found else None
+
+
+def window_rect(hwnd) -> tuple[int, int, int, int] | None:
+    """返回窗口物理矩形 (left, top, width, height)；失败/零尺寸返回 None。
+
+    与 capture_window 同一 DPI 感知上下文（进程级 SetProcessDpiAwareness），
+    返回真实物理像素，与 pyautogui 屏幕坐标一致。
+    """
+    if not hwnd:
+        return None
+    rect = wt.RECT()
+    if not u32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        return None
+    w, h = rect.right - rect.left, rect.bottom - rect.top
+    if w <= 0 or h <= 0:
+        return None
+    return (rect.left, rect.top, w, h)
+
+
+def ensure_window_visible(hwnd) -> bool:
+    """窗口最小化时恢复（GetWindowRect 对最小化窗口返回任务栏占位
+    (-32000, -32000, ...)，截图前必须先恢复）。返回窗口是否可用。"""
+    if not hwnd:
+        return False
+    if u32.IsIconic(hwnd):
+        u32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        time.sleep(0.3)
+    return True
+
+
 def capture_window(hwnd) -> Image.Image | None:
     """PrintWindow + PW_RENDERFULLCONTENT 截取窗口内容，返回 RGBA PIL Image。
 
