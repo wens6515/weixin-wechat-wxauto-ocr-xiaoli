@@ -1040,9 +1040,24 @@ class VisualBackend:
         变空。因此已选中目标会话时直接返回，不重复点击（用户实测：再点一次
         就取消选中了）。force=True 强制点击，绕过已选中判断——用于
         get_messages 读到 0 条时的 toggle 兜底重试。
+
+        已选中判定优先用 UI 信号（标题区 OCR）：_current_chat 是进程内
+        状态，与微信 UI 实际选中可能失同步——bot 重启后 _current_chat
+        清空、或用户手动切换过会话，盲点会把已选中的会话点击成取消选中
+        （消息区读空、get_messages 读 0 条，真机复现）。标题区显示目标
+        会话 = 微信 UI 已选中，直接返回不点击。
         """
-        if not force and self._current_chat == chat:
-            return True  # 已选中，再点会取消选中
+        if not force:
+            # UI 检测：标题区显示目标会话 = 已选中（后台静默截图，不置前）
+            try:
+                title = self.read_title(foreground=False)
+                if title and parse_title(title)[0] == chat:
+                    self._current_chat = chat
+                    return True
+            except Exception:
+                pass
+            if self._current_chat == chat:
+                return True  # 已选中（UI 检测失败时退回到内存状态）
         if chat not in self._session_coords:
             # 坐标未知：先刷新会话列表
             list(self.iter_sessions())
@@ -1053,6 +1068,7 @@ class VisualBackend:
         try:
             import pyautogui
             self._foreground()  # 点击依赖前台，先置前微信窗口
+            logger.info(f"[切换] 点击会话 {chat!r} @({coord[0]},{coord[1]}) force={force} _current_chat={self._current_chat!r}")
             pyautogui.click(coord[0], coord[1])
             self._current_chat = chat
             time.sleep(0.5)  # 等待消息区刷新
@@ -1144,8 +1160,10 @@ class VisualBackend:
         if not title:
             # 标题区空：可能 toggle 取消选中（force 重复点击同一会话会取消），
             # force 重切恢复选中后再读一次（与读 0 条重试同模式）
+            logger.warning(f"[读取] {chat!r} 标题区为空（微信未选中任何会话？），force 重切")
             self._switch_chat(chat, force=True)
             title = self.read_title(foreground=True)
+        logger.info(f"[读取] {chat!r} 标题={title!r}")
         if title:
             name, is_group, _ = parse_title(title)
             self._current_title = name or chat
@@ -1156,6 +1174,7 @@ class VisualBackend:
         for attempt in range(2):
             shot = self._refresh(force=True)
             if shot is None:
+                logger.warning(f"[读取] {chat!r} 截图失败（capture_window 返回 None，句柄失效/窗口关闭？）attempt={attempt}")
                 return []
             w, h = shot.size
             region_1x = shot.crop((
