@@ -30,7 +30,6 @@ from wx_backend.visual_backend import (
     detect_bubble_colors,
     find_bubble_boxes,
     find_media_boxes,
-    _preview_type,
     ensure_window_visible,
     find_window_by_title,
     window_rect,
@@ -179,24 +178,6 @@ class TestBubbleDetection(unittest.TestCase):
         t, b, l, r = boxes[0]
         self.assertLess(abs(t - 130), 10)
         self.assertLess(abs(b - 260), 10)
-
-
-class TestPreviewType(unittest.TestCase):
-    def test_animated_emoji(self):
-        """微信列表预览表情是 [动画表情]，不是 [表情]——须识别为 EMOJI。"""
-        self.assertEqual(_preview_type("[动画表情]"), MessageType.EMOJI)
-
-    def test_plain_emoji(self):
-        self.assertEqual(_preview_type("[表情]"), MessageType.EMOJI)
-
-    def test_image_video_file(self):
-        self.assertEqual(_preview_type("[图片]"), MessageType.IMAGE)
-        self.assertEqual(_preview_type("[视频]"), MessageType.VIDEO)
-        self.assertEqual(_preview_type("[文件] 部门简介.do.."), MessageType.FILE)
-
-    def test_text_fallback(self):
-        self.assertEqual(_preview_type("你好呀"), MessageType.TEXT)
-        self.assertEqual(_preview_type(""), MessageType.TEXT)
 
 
 # ---- 后端行为（mock 窗口与 OCR） ----
@@ -588,9 +569,8 @@ class TestVisualBackend(unittest.TestCase):
         self.assertNotIn("干立牛", coords)
         self.assertIn("强盗集团", coords)
 
-    def test_extract_session_names_extracts_preview_types(self):
-        """会话名 + 预览行配对：预览标签 [图片]/[文件] 判类型，无 [] 判文字。"""
-        from wx_backend import MessageType
+    def test_extract_session_names(self):
+        """会话名提取：整窗 OCR 聚类出会话名 + 坐标（预览类型已移除）。"""
         b = VisualBackend()
         b._hwnd = 0x1234
         b._session_region = (0.09, 0.0855, 0.4165, 0.993)
@@ -601,13 +581,11 @@ class TestVisualBackend(unittest.TestCase):
             {"text": "杨冬梅", "x": 215, "y": 393, "w": 73, "h": 20},
             {"text": "[图片]", "x": 217, "y": 430, "w": 52, "h": 20},
             {"text": "王美晨", "x": 216, "y": 506, "w": 73, "h": 20},
-            {"text": "你好呀", "x": 216, "y": 543, "w": 60, "h": 20},
         ]):
             coords = b._extract_session_names(shot)
         self.assertIn("王文生", coords)
-        self.assertEqual(b._session_types.get("王文生"), MessageType.FILE)
-        self.assertEqual(b._session_types.get("杨冬梅"), MessageType.IMAGE)
-        self.assertEqual(b._session_types.get("王美晨"), MessageType.TEXT)
+        self.assertIn("杨冬梅", coords)
+        self.assertIn("王美晨", coords)
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
                 return_value=True)
@@ -765,7 +743,7 @@ class TestIterUnreadSessions(unittest.TestCase):
         轮询，必须在后台进行；只有检测到新消息后的点击/读取/发送才置前。
         """
         b = self._backend()
-        list(b.iter_unread_with_type())
+        list(b.iter_unread_sessions())
         self.assertEqual(_refresh.call_args, mock.call(force=True, foreground=False))
 
 

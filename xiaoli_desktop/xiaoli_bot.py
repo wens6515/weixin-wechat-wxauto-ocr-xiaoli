@@ -994,47 +994,6 @@ class AgentBot(WeChatBot):
             return None
         return (latest_file, os.path.basename(latest_file), text_content)
 
-    def _wait_pending_instruction(self):
-        """pending 文件等待指令期间：暂停其他消息监听，只轮询 pending 聊天，
-        从最新往回找用户文本作为指令（跳过 bot 自己的消息）。收到后获取文件并处理"""
-        for chat_name in list(self._pending_files.keys()):
-            try:
-                msgs = self.wx.get_messages(chat_name)
-                if not msgs:
-                    continue
-                for i in range(len(msgs) - 1, -1, -1):
-                    m = msgs[i]
-                    s = getattr(m, "sender", None)
-                    c = getattr(m, "content", "")
-                    if s is None or s == "self" or s == self.nickname:
-                        continue
-                    if getattr(m, "type", None) in (MessageType.IMAGE, MessageType.FILE, MessageType.TIME, MessageType.SYSTEM):
-                        continue
-                    # 文件消息的 OCR 文本（含文档扩展名）不是用户指令——跳过，
-                    # 继续往前找真实指令（否则文件名会冒充指令：LLM 对
-                    # 'xxx.docx' 判 is_task=False，真实指令被错过）
-                    if _looks_like_file_text(c):
-                        continue
-                    if not c.strip():
-                        continue
-                    pending = self._pending_files.pop(chat_name)
-                    got = self._acquire_received_file(msg=pending.get("msg"))
-                    if got:
-                        self._process_file_with_instruction(
-                            chat_name, pending["sender"], got[0], got[1], got[2], c.strip())
-                    else:
-                        # 取不到文件（下载失败/未落盘等）：直接回复失败，
-                        # 不按普通消息处理——普通消息路径会把文件消息的
-                        # OCR 文本（文件名拼接）当聊天内容，用户得不到明确的
-                        # 失败反馈，还会误触发一次无关回复。
-                        logger.warning(f"[等待指令] 取不到文件，回复处理失败: {chat_name}")
-                        self._send_text("文件处理失败，请检查文件是否下载完成后重试～", chat_name)
-                    self.last_reply_time = time.time()
-                    return
-            except Exception as e:
-                logger.error(f"[等待指令] 异常 {chat_name}: {e}")
-                continue
-
     def _handle_text(self, chat_name, sender, content, msg_id=None):
         """文本消息统一处理：任务判断 → 天枢投递 或 普通聊天。
 
@@ -1091,24 +1050,17 @@ class AgentBot(WeChatBot):
             # 天枢任务进行中或刚完成（缓冲期内）：暂停消息监听，
             # 缓冲期满后自动恢复，避免 ChatWith 切走窗口打断文件发送
             return
-        if self._pending_files:
-            # 有待处理文件的聊天：暂停其他消息监听，专注等待该聊天的用户指令
-            # （Wave 2 改为不停摆 + sender 关联，先保持原语义）
-            self._wait_pending_instruction()
-            return
         if time.time() - self.last_reply_time < self.cooldown:
             return
         try:
-            # A: 红圈检测——iter_unread_with_type 已算好列表预览类型
-            if hasattr(self.wx, "iter_unread_with_type"):
-                sessions = list(self.wx.iter_unread_with_type())
-            elif hasattr(self.wx, "iter_unread_sessions"):
-                sessions = [(n, MessageType.TEXT) for n in self.wx.iter_unread_sessions()]
+            # A: 红圈检测
+            if hasattr(self.wx, "iter_unread_sessions"):
+                sessions = list(self.wx.iter_unread_sessions())
             else:
-                sessions = [(n, MessageType.TEXT) for n in self.wx.iter_sessions()]
+                sessions = list(self.wx.iter_sessions())
             if not sessions:
                 return
-            for chat_name, _preview_type in sessions:
+            for chat_name in sessions:
                 if not chat_name:
                     continue
                 logger.info(f"🔔 发现新消息：{chat_name}")
@@ -1164,16 +1116,27 @@ class AgentBot(WeChatBot):
         ]
         text_content = "\n".join(text_parts)
         has_media = bool(win.get("has_media"))
+        # sender 关联：该发送者之前发过文件、现在发来文字指令
+        if sender in self._pending_files and text_content:
+            pending = self._pending_files.pop(sender)
+            logger.info(f"[文件] {sender} 发来处理指令，关联到待处理文件 {pending['filename']}")
+            return self._process_file_with_instruction(
+                pending["chat_name"], sender, pending["file_path"],
+                pending["filename"], pending["file_content"], text_content)
         # ============ 四分类分发 ============
         if file_text:
             logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
             return self._handle_file_message(chat_name, sender, file_text, text_content)
+        if has_media and text_content:
+            # 图片 + 文字 → 文字 LLM 判任务，任务投递（图截图），非任务组装
+            logger.info(f"🖼💬 判断为图片+文字消息：{chat_name}")
+            return self._handle_image_with_text(chat_name, sender, text_content)
         if has_media and not text_content:
             # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 图片多模态
             logger.info(f"🖼 判断为图片消息：{chat_name}")
             return self._process_image(chat_name, sender, None)
         if text_content:
-            # 纯文字（或文字+图，图在 Wave3 补多模态）→ 任务判断 + 聊天
+            # 纯文字 → 任务判断 + 聊天
             logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")
             return self._handle_text(chat_name, sender, text_content, None)
         return False
@@ -1204,10 +1167,41 @@ class AgentBot(WeChatBot):
             # 文件 + 伴随文字 → 按指令处理（任务判断 or 文件识别附带指令）
             return self._process_file_with_instruction(
                 chat_name, sender, file_path, filename, file_content, text_content)
-        # 无伴随文字 → 回复收到 + 询问（Wave 2 改不停摆）
-        self._pending_files[chat_name] = {"sender": sender, "msg": None}
+        # 无伴随文字 → 回复收到 + 记录 sender 关联（不停摆，等该 sender 后续指令）
+        self._pending_files[sender] = {
+            "chat_name": chat_name,
+            "file_path": file_path,
+            "filename": filename,
+            "file_content": file_content,
+        }
         self._send_text("文件已收到～请告诉我需要怎么处理呢？", chat_name)
         return True
+
+    def _handle_image_with_text(self, chat_name, sender, text_content):
+        """图片 + 文字：文字 LLM 判任务；任务则图截图+文字投递，非任务则图描述+文字组装。"""
+        if self.task_enabled:
+            cls = self._classify_task(text_content)
+            if cls["is_task"]:
+                img_path = self._capture_latest_image(chat_name)
+                self._add_history(chat_name, "user", f"[任务] {text_content}")
+                self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
+                self._dispatch_and_notify(
+                    chat_name, sender, cls["task"],
+                    attachment_paths=[img_path] if img_path else None,
+                    extra={"msg_id": None, "raw_message": text_content},
+                )
+                return True
+        # 非任务：图片多模态 + 文字组装
+        vision_reply = self._describe_image(chat_name)
+        if vision_reply:
+            prompt = (f"用户发来一张图片（内容描述：{vision_reply}）和一段文字：\n\n"
+                      f"{text_content}\n\n请结合图片和文字，以{self.nickname}的身份回复用户。")
+            reply = self.call_chat_ai(
+                chat_name, prompt, sender_name=sender, is_group=is_group_chat(chat_name))
+            self._send_text(reply, chat_name)
+            return True
+        # 图片识别失败 → 退回纯文字处理
+        return self._handle_text(chat_name, sender, text_content, None)
 
 class TianshuController(Controller):
     HELP = {

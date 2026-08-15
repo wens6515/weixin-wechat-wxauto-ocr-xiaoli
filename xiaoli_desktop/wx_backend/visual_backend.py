@@ -451,8 +451,9 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
         c = colors.get(key)
         if c is not None:
             content &= ~_near_color(arr, c, tol)
-    # 媒体内容 ≥ 60px 宽高（头像 ~40px、文字小块被过滤）
-    return _connected_boxes(content, min_h=60, min_w=60)
+    # 媒体内容 ≥ 80px 宽高（真机实测对方头像 ~62px 被 60 阈值误检为媒体，
+    # 提到 80 排除头像；图片/视频/表情/文件卡片均 > 80px）
+    return _connected_boxes(content, min_h=80, min_w=80)
 
 
 def region_changed(a: Image.Image, b: Image.Image, region=None,
@@ -674,30 +675,6 @@ def parse_title(title: str) -> tuple[str, bool, int | None]:
     return title.strip(), False, None
 
 
-_PREVIEW_TYPE_PATTERNS = [
-    (re.compile(r"^\[\s*图片\s*\]"), MessageType.IMAGE),
-    (re.compile(r"^\[\s*视频\s*\]"), MessageType.VIDEO),
-    (re.compile(r"^\[\s*文件\s*\]"), MessageType.FILE),
-    # 表情预览实际为 [动画表情]（非 [表情]）；(动画)? 兼容两种写法
-    (re.compile(r"^\[\s*(动画)?表情\s*\]"), MessageType.EMOJI),
-]
-
-
-def _preview_type(text: str) -> MessageType:
-    """从会话列表预览行文本判消息类型。
-
-    [图片]/[视频]/[文件]/[表情] → 对应类型；无 [] 标签 → 文字。
-    实测 RapidOCR 预览行：'[图片]'、'[文件] 部门简介+纳新宣传.do..'、'你好呀'。
-    """
-    if not text:
-        return MessageType.TEXT
-    t = (text or "").strip()
-    for pat, typ in _PREVIEW_TYPE_PATTERNS:
-        if pat.match(t):
-            return typ
-    return MessageType.TEXT
-
-
 class VisualBackend:
     """PrintWindow + 本地 OCR 的微信视觉后端。
 
@@ -713,7 +690,6 @@ class VisualBackend:
         self._poll_region = poll_region
         self._closed = False
         self._session_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 屏幕中心点
-        self._session_types: dict[str, MessageType] = {}  # 会话名 → 预览行判定的消息类型
         self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
         self._current_title: str | None = None  # 当前会话标题（read_title 权威名称）
         self._current_is_group: bool = False  # 当前会话是否群聊（标题含括号人数）
@@ -866,7 +842,6 @@ class VisualBackend:
         w, h = shot.size
         items = ocr_image(shot)
         self._session_coords.clear()
-        self._session_types.clear()
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
@@ -930,36 +905,15 @@ class VisualBackend:
             cx = win_l + main_line["x"] + main_line["w"] // 2
             cy = win_t + main_line["y"] + main_line["h"] // 2
             self._session_coords[name] = (cx, cy)
-            # 预览行类型：cluster 内主名下方第一行（非时间戳）判消息类型
-            preview_text = ""
-            for it in cluster:
-                if it is main_line or it["y"] <= main_line["y"]:
-                    continue
-                t = (it["text"] or "").strip()
-                if t and not re.match(r"^[\d:：\s]+$", t):
-                    preview_text = t
-                    break
-            self._session_types[name] = _preview_type(preview_text)
         return self._session_coords
 
     def iter_unread_sessions(self) -> Iterator[str]:
         """仅迭代有未读红圈角标的会话（可选能力，wxauto 等后端可不提供）。
 
-        内部复用 iter_unread_with_type 的匹配逻辑，只取会话名（兼容旧调用方）。
-        """
-        for name, _type in self.iter_unread_with_type():
-            yield name
-
-    def iter_unread_with_type(self) -> Iterator[tuple[str, MessageType]]:
-        """迭代未读会话，产出 (会话名, 消息类型)。
-
-        类型来自会话列表预览行（_extract_session_names 填充的 _session_types）：
-        [图片]/[视频]/[文件]/[表情] → 对应类型，无 [] → 文字。
-
         效率路径：
         1. 截图 force（红圈像素检测毫秒级，无 diff 保护）
         2. 无红簇 → 直接结束（零 OCR 零点击）
-        3. 有红簇 → OCR 提取会话名 + 预览类型
+        3. 有红簇 → OCR 提取会话名
         4. 红簇与会话名坐标匹配（红圈在联系人名左上角，|dy|<60 且红圈 x<名字 x）
         5. 匹配失败 → 红圈锚定 fallback（点击红圈右下条目，读顶部标题）
         """
@@ -993,7 +947,7 @@ class VisualBackend:
             if best is not None and best not in seen:
                 seen.add(best)
                 logger.debug(f"[未读] {best!r} 红圈屏幕 ({bcx},{bcy})")
-                yield (best, self._session_types.get(best, MessageType.TEXT))
+                yield best
             elif best is not None:
                 logger.debug(f"[未读] {best!r} 已有红圈（重复角标，跳过）")
             else:
@@ -1002,7 +956,7 @@ class VisualBackend:
                 anchored = self._anchor_badge(bcx, bcy)
                 if anchored and anchored not in seen:
                     seen.add(anchored)
-                    yield (anchored, MessageType.TEXT)
+                    yield anchored
 
     def _anchor_badge(self, bcx: int, bcy: int) -> str | None:
         """红圈锚定 fallback：点击红圈右下（联系人条目），读顶部标题拿会话名。
@@ -1396,13 +1350,6 @@ class VisualBackend:
 
         if limit:
             msgs = msgs[-limit:]
-        # 类型标注：最新一条消息用会话列表预览类型（[图片]/[文件]/[视频]/[表情]）
-        # 覆盖消息区 OCR 的 TEXT 硬编码——类型信号来自会话列表，比消息区可靠。
-        if msgs:
-            t = self._session_types.get(chat, MessageType.TEXT)
-            if t != MessageType.TEXT:
-                from dataclasses import replace
-                msgs[-1] = replace(msgs[-1], type=t)
         return msgs
 
     # ---- 协议：发送 ----
