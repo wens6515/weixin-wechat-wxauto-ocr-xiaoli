@@ -791,19 +791,6 @@ class WeChatBot:
         self._send_text(final_reply, chat_name)
         return True
 
-    def _has_bot_reply_after(self, msgs, idx, window=5):
-        """检查 msgs[idx] 之后 window 条内是否已有 bot 自己的回复。
-        用于跳过已处理过的图片/文件消息，防止重复处理。"""
-        end = min(idx + 1 + window, len(msgs))
-        for j in range(idx + 1, end):
-            m = msgs[j]
-            s = getattr(m, "sender", None)
-            if s is None:
-                continue
-            if s == "self" or s == self.nickname or "Self" in str(type(m)):
-                return True
-        return False
-
     def _find_latest_file(self, directory):
         """递归查找目录下最近修改的文件（显示名定位失败的兜底扫描）"""
         latest_path = None

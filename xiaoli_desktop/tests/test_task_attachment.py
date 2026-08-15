@@ -24,13 +24,29 @@ def _text_msg(sender, content, mid):
 
 
 class _FakeWx:
-    """最小 wx 桩：一个会话、一条文本消息（新协议）。"""
+    """最小 wx 桩：一个会话、消息列表（窗口边界协议）。"""
 
-    def __init__(self, msgs):
+    def __init__(self, msgs, has_media=False, bot_bottom=None):
         self._msgs = msgs
+        self._has_media = has_media
+        self._bot_bottom = bot_bottom
+        self._session_types = {}
+
+    def iter_unread_with_type(self):
+        return iter([("小明", MessageType.TEXT)])
 
     def iter_unread_sessions(self):
         return iter(["小明"])
+
+    def analyze_window(self, chat):
+        return {
+            "bot_bottom": self._bot_bottom,
+            "other_text": [],
+            "other_media": [],
+            "has_text": True,
+            "has_media": self._has_media,
+            "width": 747, "height": 1135,
+        }
 
     def get_messages(self, chat):
         return self._msgs
@@ -156,28 +172,25 @@ class TestFileTaskClassifyInput(unittest.TestCase):
             ["[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页"])
 
 
-class TestImagePreviewDrive(unittest.TestCase):
-    def test_preview_image_drives_process_when_msg_flow_self_only(self):
-        """消息流全是 self（图片无文字、被 bot 回复顶出视口）但会话列表
-        预览 [图片] → 直接触发图片处理（识别信号来自会话列表而非消息区）。
-        RED 复现：旧实现 latest=sender=self → 跳过，图片永不处理。"""
+class TestImageMediaDrive(unittest.TestCase):
+    def test_media_drives_process_when_msg_flow_self_only(self):
+        """消息流全是 self（图片无文字、被 bot 回复顶出视口）但窗口媒体
+        矩形检测到媒体 → 触发图片处理（识别信号来自媒体矩形而非消息区）。"""
         bot = _make_bot()
-        bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")])
-        bot.wx._session_types = {"小明": MessageType.IMAGE}
+        bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")], has_media=True)
         bot._tick_poll_outbox = lambda: None
         processed = []
         bot._process_image = lambda chat, sender, msg: processed.append(
             (chat, sender))
         bot._send_text = lambda *a, **k: None
         bot.process_new_messages()
-        self.assertTrue(processed, "预览 [图片] 应触发图片处理")
+        self.assertTrue(processed, "媒体矩形应触发图片处理")
         self.assertEqual(processed[0][0], "小明")
 
-    def test_preview_text_does_not_drive_image(self):
-        """预览不是 [图片] 时不得触发图片处理（保持原跳过行为）。"""
+    def test_no_media_does_not_drive_image(self):
+        """无媒体矩形且无对方文字时不得触发图片处理（窗口空 → 跳过）。"""
         bot = _make_bot()
-        bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")])
-        bot.wx._session_types = {"小明": MessageType.TEXT}
+        bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")], has_media=False)
         bot._tick_poll_outbox = lambda: None
         processed = []
         bot._process_image = lambda chat, sender, msg: processed.append(1)

@@ -45,3 +45,4 @@ class WeChatMessage:
     sender: str
     content: str
     type: MessageType
+    y: int | None = None  # 消息首行 y 坐标（消息区 1x 像素，visual 后端填；wxauto 后端为 None）
