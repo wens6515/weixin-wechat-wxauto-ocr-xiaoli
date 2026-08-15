@@ -191,6 +191,24 @@ CONFIG = None  # 延迟加载：仅 wechat_bot 独立运行模式使用（见 __
 # cfg（两套加载并存）。改为 __main__ 内加载，import 零副作用。
 
 
+_FILE_TOKEN_RE = re.compile(
+    r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]*?"
+    r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)",
+    re.I)
+
+
+def _extract_file_name_token(text):
+    """从 OCR 文本拆出干净文件名 token（含常见文档扩展名，去掉大小/图标字符）。
+
+    '部门简介+纳新宣传.docx 20.1K W' → '部门简介+纳新宣传.docx'
+    文件卡片 OCR 会把文件名、大小（20.1K 带小数点）、图标字符（W/P/?）读成
+    一串——整串当文件名传给 os.path.splitext 时，20.1K 的小数点会被误当
+    扩展名分隔符，导致主干匹配失败。先拆出真实文件名 token。
+    """
+    toks = _FILE_TOKEN_RE.findall(text or "")
+    return toks[0] if toks else None
+
+
 class WeChatBot:
     def __init__(self, cfg, stop_event=None, max_connect_retries=None):
         """stop_event：微信连接重试可被外部中断（GUI 引擎停止时用，None=不中断）。
@@ -1025,12 +1043,7 @@ class WeChatBot:
                 # 真实文件名（含常见文档扩展名的 token，取第一个）。
                 name = content.strip()
                 if name:
-                    toks = re.findall(
-                        r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]*?\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)",
-                        name, flags=re.I)
-                    if toks:
-                        return toks[0]
-                    return name
+                    return _extract_file_name_token(name) or name
         except Exception as e:
             logger.error(f"[文件] 提取文件名失败: {e}")
         return None

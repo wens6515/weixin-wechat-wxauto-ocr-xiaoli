@@ -11,7 +11,7 @@
 import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil, uuid, struct
 import requests as req
 import pyautogui
-from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat
+from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat, _extract_file_name_token
 from wx_backend.models import MessageType
 
 if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
@@ -1151,7 +1151,10 @@ class AgentBot(WeChatBot):
         if not file_dir or not os.path.isdir(file_dir):
             self._send_text("文件下载失败，请重试～", chat_name)
             return True
-        file_path = self._find_file_by_display_name(file_text)
+        # 拆出干净文件名（OCR 可能读到 "文件名.docx 20.1K W" 含大小+图标字符，
+        # 20.1K 的小数点会坑 splitext——先 token 拆出真实文件名）
+        clean_name = _extract_file_name_token(file_text) or file_text
+        file_path = self._find_file_by_display_name(clean_name)
         if not file_path:
             time.sleep(3)
             file_path = self._find_user_file(file_dir)
