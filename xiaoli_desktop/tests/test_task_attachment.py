@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from xiaoli_bot import AgentBot
+from xiaoli_bot import AgentBot, _looks_like_file_text
 from wx_backend.models import MessageType
 
 
@@ -114,6 +114,76 @@ class TestTextTaskNoAttachment(unittest.TestCase):
             extra={"msg_id": None, "raw_message": "报告.docx", "file_text": "x"})
         self.assertEqual(dispatched, [[r"D:\recv\报告.docx"]],
                          "文件消息路径必须继续投递附件")
+
+
+# ---- 文件文本识别 + 任务判断输入格式 + 图片预览驱动 ----
+
+
+class TestLooksLikeFileText(unittest.TestCase):
+    def test_file_text_true(self):
+        """含文档扩展名的 OCR 文本 = 文件消息（含合并文本 + 图标杂字符）。"""
+        self.assertTrue(_looks_like_file_text(
+            "新宣传.docx 部门简介+纳新宣传.docx W"))
+        self.assertTrue(_looks_like_file_text("报告.xlsx"))
+        self.assertTrue(_looks_like_file_text("演示文稿.PPTX"))
+
+    def test_instruction_false(self):
+        """真实用户指令不含扩展名 → 不是文件文本。"""
+        self.assertFalse(_looks_like_file_text(
+            "把这个做成一个赛博朋克风格的网页"))
+        self.assertFalse(_looks_like_file_text(""))
+        self.assertFalse(_looks_like_file_text("帮我总结一下"))
+
+
+class TestFileTaskClassifyInput(unittest.TestCase):
+    def test_classify_input_includes_filename(self):
+        """任务判断输入 = '[文件]<文件名> <处理要求>'——LLM 需要处理对象
+        才能判断是否动手类任务；仅指令（'把这个做成网页'）缺对象会误判
+        闲聊。RED 复现：旧实现传纯指令，文件名丢失。"""
+        bot = _make_bot()
+        got = []
+        bot._classify_task = lambda t: got.append(t) or {
+            "is_task": True, "task": "做网页"}
+        bot._dispatch_and_notify = lambda *a, **k: None
+        bot._send_text = lambda *a, **k: None
+        bot._add_history = lambda *a, **k: None
+        bot._process_file_with_instruction(
+            "小明", "王", r"D:\recv\部门简介+纳新宣传(6).docx",
+            "部门简介+纳新宣传(6).docx", "内容",
+            "把这个做成一个赛博朋克风格的网页")
+        self.assertEqual(
+            got,
+            ["[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页"])
+
+
+class TestImagePreviewDrive(unittest.TestCase):
+    def test_preview_image_drives_process_when_msg_flow_self_only(self):
+        """消息流全是 self（图片无文字、被 bot 回复顶出视口）但会话列表
+        预览 [图片] → 直接触发图片处理（识别信号来自会话列表而非消息区）。
+        RED 复现：旧实现 latest=sender=self → 跳过，图片永不处理。"""
+        bot = _make_bot()
+        bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")])
+        bot.wx._session_types = {"小明": MessageType.IMAGE}
+        bot._tick_poll_outbox = lambda: None
+        processed = []
+        bot._process_image = lambda chat, sender, msg: processed.append(
+            (chat, sender))
+        bot._send_text = lambda *a, **k: None
+        bot.process_new_messages()
+        self.assertTrue(processed, "预览 [图片] 应触发图片处理")
+        self.assertEqual(processed[0][0], "小明")
+
+    def test_preview_text_does_not_drive_image(self):
+        """预览不是 [图片] 时不得触发图片处理（保持原跳过行为）。"""
+        bot = _make_bot()
+        bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")])
+        bot.wx._session_types = {"小明": MessageType.TEXT}
+        bot._tick_poll_outbox = lambda: None
+        processed = []
+        bot._process_image = lambda chat, sender, msg: processed.append(1)
+        bot._send_text = lambda *a, **k: None
+        bot.process_new_messages()
+        self.assertFalse(processed)
 
 
 if __name__ == "__main__":
