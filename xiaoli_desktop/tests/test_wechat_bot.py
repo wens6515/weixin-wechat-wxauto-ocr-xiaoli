@@ -273,6 +273,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             def iter_unread_sessions(self):
                 return iter(["王文生"])
 
+            def analyze_window(self, chat):
+                return {"bot_bottom": None, "other_text": [], "other_media": [],
+                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+
             def get_messages(self, chat):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="未知",
@@ -322,6 +326,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             def iter_unread_sessions(self):
                 return iter(["强盗”集团"])
 
+            def analyze_window(self, chat):
+                return {"bot_bottom": None, "other_text": [], "other_media": [],
+                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+
             def get_messages(self, chat):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
@@ -363,6 +371,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
             def iter_unread_sessions(self):
                 return iter(["强盗”集团"])
+
+            def analyze_window(self, chat):
+                return {"bot_bottom": None, "other_text": [], "other_media": [],
+                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
 
             def get_messages(self, chat):
                 return [

@@ -589,8 +589,6 @@ class AgentBot(WeChatBot):
         # 见 run_first_run_guide）——不再配置 config 级 YOLO（旧机制：
         # rivet config set-approval 只影响下次启动，且 /yes 已覆盖此需求）。
         # 是否暂停消息监听由 has_active_tasks 每次实时判断，不保存粘滞状态
-        self.dispatched_msg_ids = set()
-        self._load_dispatched_ids()
         self._pending_files = {}  # chat_name -> {sender} 群聊文件等待用户指令
         self._sent_back_files = {}  # 回传成果文件 绝对路径 -> mtime（目录扫描时排除，防误当用户发送的文件）
         # 回传成果文件名主干 -> 发送时刻（排除微信写入接收目录的成果副本）。
@@ -613,26 +611,6 @@ class AgentBot(WeChatBot):
             logger.error(f"[任务桥] 加载成果登记失败: {e}")
 
     # ---------- 任务桥 ----------
-
-    def _load_dispatched_ids(self):
-        """启动时扫描已有任务目录，收集已投递的 msg_id（防重启重复投递）"""
-        if not os.path.isdir(self.tasks_dir):
-            return
-        for name in os.listdir(self.tasks_dir):
-            task_dir = os.path.join(self.tasks_dir, name)
-            if not os.path.isdir(task_dir):
-                continue
-            tj = os.path.join(task_dir, "task.json")
-            if os.path.isfile(tj):
-                try:
-                    with open(tj, "r", encoding="utf-8") as f:
-                        info = json.load(f)
-                    mid = info.get("msg_id")
-                    if mid:
-                        self.dispatched_msg_ids.add(mid)
-                except Exception:
-                    continue
-        logger.info(f"[任务桥] 已加载 {len(self.dispatched_msg_ids)} 条已投递记录")
 
     def set_tianshu_window_title(self, title):
         """记住天枢窗口标题（写回 config.json）"""
@@ -727,8 +705,6 @@ class AgentBot(WeChatBot):
             _cs.grant_tasks_dir_to_tianshu(str(self.tasks_dir or "").strip())
         except Exception:
             pass
-        if task_info.get("msg_id"):
-            self.dispatched_msg_ids.add(task_info["msg_id"])
         self._send_text("收到任务啦，正在处理中，稍等一下哦～", chat_name)
         # 唤起天枢：统一走 resolve_cli_window——tianshu_window_title 可能被
         # 旧版本污染为桌面端「天枢 · Tianshu」，直接 send 会激活桌面端窗口。
@@ -1041,10 +1017,6 @@ class AgentBot(WeChatBot):
                         continue
                     if not c.strip():
                         continue
-                    msg_key = f"{chat_name}_{s}_{c}"
-                    if msg_key in self.recent_msg_ids:
-                        continue
-                    self._remember_recent(msg_key)
                     pending = self._pending_files.pop(chat_name)
                     got = self._acquire_received_file(msg=pending.get("msg"))
                     if got:
@@ -1081,7 +1053,7 @@ class AgentBot(WeChatBot):
                 content = "你好呀～"  # 与基类 process_new_messages 群聊空内容文案一致
         question = content.strip()
         logger.info(f"[MSG] [{chat_name}] {sender}: {question[:80]}")
-        if self.task_enabled and msg_id not in self.dispatched_msg_ids:
+        if self.task_enabled:
             cls = self._classify_task(question)
             if cls["is_task"]:
                 logger.info(f"[任务桥] 判定为任务: {cls['task'][:60]}")
@@ -1121,156 +1093,121 @@ class AgentBot(WeChatBot):
             return
         if self._pending_files:
             # 有待处理文件的聊天：暂停其他消息监听，专注等待该聊天的用户指令
+            # （Wave 2 改为不停摆 + sender 关联，先保持原语义）
             self._wait_pending_instruction()
             return
         if time.time() - self.last_reply_time < self.cooldown:
             return
         try:
-            # 新协议：只处理有未读红圈的会话（visual 后端红圈驱动）；
-            # 降级（wxauto 等无 iter_unread_sessions）走全量会话遍历。
-            if hasattr(self.wx, "iter_unread_sessions"):
-                sessions = list(self.wx.iter_unread_sessions())
+            # A: 红圈检测——iter_unread_with_type 已算好列表预览类型
+            if hasattr(self.wx, "iter_unread_with_type"):
+                sessions = list(self.wx.iter_unread_with_type())
+            elif hasattr(self.wx, "iter_unread_sessions"):
+                sessions = [(n, MessageType.TEXT) for n in self.wx.iter_unread_sessions()]
             else:
-                sessions = list(self.wx.iter_sessions())
+                sessions = [(n, MessageType.TEXT) for n in self.wx.iter_sessions()]
             if not sessions:
                 return
-            for chat_name in sessions:
+            for chat_name, _preview_type in sessions:
                 if not chat_name:
                     continue
                 logger.info(f"🔔 发现新消息：{chat_name}")
-                # get_messages 内部会切到目标会话（visual 点击 / wxauto ChatWith）
-                msgs = self.wx.get_messages(chat_name)
-                logger.info(f"[读取] {chat_name} 读到 {len(msgs)} 条消息")
-                if not msgs:
-                    logger.info(f"[跳过] {chat_name} 读到 0 条（toggle 取消选中/屏幕黑/无消息）")
-                    continue
-                full_msgs = msgs
-                # 群聊判定：标题（视觉后端 _current_is_group，权威）优先，
-                # 回退名称启发式（无视觉后端/旧路径）
-                is_group = getattr(self.wx, "_current_is_group", None)
-                if is_group is None:
-                    is_group = is_group_chat(chat_name)
-                at_tag = f"@{self.nickname}"
-                last_foreign = None  # 最后一条非 self 消息（防被输入框按钮等 self 噪声顶掉）
-                for i in range(len(full_msgs) - 1, -1, -1):
-                    msg = full_msgs[i]
-                    sender = getattr(msg, "sender", None)
-                    content = getattr(msg, "content", "")
-                    if sender is None or sender == "self" or sender == self.nickname:
-                        continue
-                    if "Self" in str(type(msg)):
-                        continue
-                    # 群聊 @ 过滤：只有 @小漓 的消息才回复（无 @ 消息不打扰）
-                    if is_group and at_tag not in content:
-                        logger.info(
-                            f"[跳过] {chat_name} 群聊消息未 {at_tag}：{content[:30]!r}")
-                        continue
-                    # 群聊表情消息不读：EMOJI 类型直接跳过（用户明确要求），
-                    # 即使 @ 了小漓也不处理——表情是图形、无业务语义。
-                    if is_group and getattr(msg, "type", None) == MessageType.EMOJI:
-                        logger.info(f"[跳过] {chat_name} 群聊表情消息不处理")
-                        continue
-                    if last_foreign is None:
-                        last_foreign = msg
-                    if getattr(msg, "type", None) == MessageType.IMAGE:
-                        logger.info(f"🖼 判断为图片消息：{chat_name}")
-                        if self._has_bot_reply_after(full_msgs, i, 5):
-                            continue
-                        self._process_image(chat_name, sender, msg)
-                        self.last_reply_time = time.time()
-                        return
-                    if getattr(msg, "type", None) == MessageType.FILE:
-                        logger.info(f"📁 判断为文件消息：{chat_name}")
-                        if "upload" in str(content).lower() or "上传" in str(content):
-                            continue
-                        if self._has_bot_reply_after(full_msgs, i, 5):
-                            continue
-
-                        # 检查后三条消息中是否有用户文本（作为文件处理指令）
-                        user_instruction = None
-                        end = min(i + 4, len(full_msgs))
-                        for j in range(i + 1, end):
-                            next_msg = full_msgs[j]
-                            next_sender = getattr(next_msg, "sender", None)
-                            next_content = getattr(next_msg, "content", "")
-                            if next_sender and next_sender != "self" and next_sender != self.nickname:
-                                if getattr(next_msg, "type", None) not in (MessageType.IMAGE, MessageType.FILE, MessageType.TIME, MessageType.SYSTEM):
-                                    if next_content.strip():
-                                        user_instruction = next_content.strip()
-                                        msg_key = f"{chat_name}_{next_sender}_{next_content}"
-                                        self._remember_recent(msg_key)
-                                        break
-
-                        # 文件下载目录
-                        file_dir = self.file_storage_path
-                        if not file_dir or not os.path.isdir(file_dir):
-                            return
-
-                        if user_instruction:
-                            # 用户已给出指令 → 按文件消息中的文件名精确定位（回退 sleep + 目录扫描）
-                            got = self._acquire_received_file(msg=msg)
-                            if got:
-                                self._process_file_with_instruction(
-                                    chat_name, sender, got[0], got[1], got[2], user_instruction)
-                            else:
-                                # 下载失败/取不到文件，走原流程兜底（内含等待与提示）
-                                self._process_file(chat_name, sender, msg)
-                        else:
-                            # 无后续指令 → 存待处理状态（连同文件消息对象，指令到达后按文件名精确定位）
-                            self._pending_files[chat_name] = {
-                                "sender": sender,
-                                "msg": msg,
-                            }
-                            self._send_text(
-                                "文件已收到～请告诉我需要怎么处理呢？",
-                                chat_name)
-                        self.last_reply_time = time.time()
-                        return
-                latest = last_foreign if last_foreign is not None else msgs[-1]
-                sender = getattr(latest, "sender", None)
-                content = getattr(latest, "content", "")
-                logger.info(f"[最新消息] {chat_name} sender={sender!r} type={getattr(latest, 'type', None)} content={content[:50]!r}")
-                if sender is None or sender == "self" or sender == self.nickname:
-                    # 图片入口（视觉后端）：图片气泡无文字，消息区 OCR 读不到
-                    # IMAGE 消息（图片在视口外/被 bot 回复顶出时，消息流只剩
-                    # self 文本、甚至 0 条）——但会话列表预览类型 [图片] 是
-                    # 权威信号，直接媒体矩形定位点击最新图片。识别信号来自
-                    # 会话列表而非消息区，两者不必一致。
-                    preview_t = getattr(getattr(self, "wx", None), "_session_types", {}).get(chat_name)
-                    if preview_t == MessageType.IMAGE:
-                        logger.info(f"🖼 [图片]预览驱动：消息流无图片消息，媒体矩形定位处理")
-                        self._process_image(chat_name, chat_name, None)
-                        self.last_reply_time = time.time()
-                        return
-                    logger.info(f"[跳过] {chat_name} 最新消息 sender={sender!r} 是自己或空")
-                    continue
-                # 群聊 @ 过滤（latest 兜底路径）
-                if is_group and at_tag not in content:
-                    logger.info(f"[跳过] {chat_name} 群聊最新消息未 {at_tag}，不回复")
-                    continue
-                if getattr(latest, "type", None) in (MessageType.IMAGE, MessageType.FILE):
-                    continue
-                # 群聊表情消息不读（latest 兜底路径，同 for 循环内的过滤）
-                if is_group and getattr(latest, "type", None) == MessageType.EMOJI:
-                    continue
-                msg_key = f"{chat_name}_{sender}_{content}"
-                if msg_key in self.recent_msg_ids:
-                    logger.info(f"[跳过] {chat_name} 消息已处理过（去重命中）")
-                    continue
-                self._remember_recent(msg_key)
-                # 文本统一处理：任务判断（纯文字任务不带附件——附件只由
-                # 文件消息路径投递）/ 普通聊天
-                latest_msg_id = getattr(latest, "id", None)
-                self._handle_text(chat_name, sender, content, latest_msg_id)
-                self.last_reply_time = time.time()
-                return
+                if self._handle_unread_session(chat_name):
+                    self.last_reply_time = time.time()
+                    return  # 每轮只处理一个会话，回复后回到红点监听
         except Exception as e:
             logger.error(f"Message processing error: {e}\n{traceback.format_exc()}")
 
+    def _handle_unread_session(self, chat_name):
+        """处理一个未读会话：窗口边界（bot 最后回复之后的对方消息）+ 四分类分发。
 
-# =====================================================================
-# TianshuController：继承原 Controller，加 tianshu-window / task-status 命令
-# =====================================================================
+        返回 True = 已处理（回复/投递）；False = 无待处理（回到红点监听）。
+        """
+        is_group = getattr(self.wx, "_current_is_group", None)
+        if is_group is None:
+            is_group = is_group_chat(chat_name)
+        at_tag = f"@{self.nickname}"
+        # D/R: 截图 + 气泡/媒体分析（无 OCR）
+        win = self.wx.analyze_window(chat_name)
+        if not (win.get("has_text") or win.get("has_media")):
+            logger.info(f"[跳过] {chat_name} 窗口空（bot 已回复或无对方消息）")
+            return False
+        # F: 有媒体（图/文件/表情）→ sleep 10s 防话没说完
+        if win.get("has_media"):
+            time.sleep(10)
+            win = self.wx.analyze_window(chat_name)
+            if not (win.get("has_text") or win.get("has_media")):
+                return False
+        bot_bottom = win.get("bot_bottom")
+        # 读窗口内文字（get_messages 带 y，过滤 bot 最后回复之后的对方消息）
+        msgs = self.wx.get_messages(chat_name)
+        window_msgs = [
+            m for m in msgs
+            if m.sender not in (None, "self", self.nickname)
+            and (bot_bottom is None or (m.y is not None and m.y >= bot_bottom))
+        ]
+        # 群聊 @ 过滤：只有 @小漓 的消息才处理
+        if is_group:
+            window_msgs = [m for m in window_msgs if at_tag in m.content]
+            if not window_msgs:
+                logger.info(f"[跳过] {chat_name} 群聊消息未 {at_tag}")
+                return False
+        sender = window_msgs[-1].sender if window_msgs else chat_name
+        # 文件识别：OCR 文本含文件扩展名
+        file_text = next(
+            (m.content.strip() for m in window_msgs if _looks_like_file_text(m.content)),
+            None)
+        # 文字部分（排除文件名的 OCR 文本）
+        text_parts = [
+            m.content.strip() for m in window_msgs
+            if m.content.strip() and not _looks_like_file_text(m.content)
+        ]
+        text_content = "\n".join(text_parts)
+        has_media = bool(win.get("has_media"))
+        # ============ 四分类分发 ============
+        if file_text:
+            logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
+            return self._handle_file_message(chat_name, sender, file_text, text_content)
+        if has_media and not text_content:
+            # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 图片多模态
+            logger.info(f"🖼 判断为图片消息：{chat_name}")
+            return self._process_image(chat_name, sender, None)
+        if text_content:
+            # 纯文字（或文字+图，图在 Wave3 补多模态）→ 任务判断 + 聊天
+            logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")
+            return self._handle_text(chat_name, sender, text_content, None)
+        return False
+
+    def _handle_file_message(self, chat_name, sender, file_text, text_content):
+        """文件消息处理：按显示名/快照增量定位 → 提取文本 → 回复收到并询问。
+
+        Wave 1：有伴随文字走指令处理；无伴随文字存 pending（停摆语义，
+        Wave 2 改不停摆 + sender 关联）。
+        """
+        file_dir = self.file_storage_path
+        if not file_dir or not os.path.isdir(file_dir):
+            self._send_text("文件下载失败，请重试～", chat_name)
+            return True
+        file_path = self._find_file_by_display_name(file_text)
+        if not file_path:
+            time.sleep(3)
+            file_path = self._find_user_file(file_dir)
+        if not file_path:
+            self._send_text("文件下载失败，请重试～", chat_name)
+            return True
+        filename = os.path.basename(file_path)
+        file_content = self._extract_file_text(file_path)
+        if file_content is None:
+            self._send_text(f"收到文件「{filename}」，但这个格式我看不懂呢～", chat_name)
+            return True
+        if text_content:
+            # 文件 + 伴随文字 → 按指令处理（任务判断 or 文件识别附带指令）
+            return self._process_file_with_instruction(
+                chat_name, sender, file_path, filename, file_content, text_content)
+        # 无伴随文字 → 回复收到 + 询问（Wave 2 改不停摆）
+        self._pending_files[chat_name] = {"sender": sender, "msg": None}
+        self._send_text("文件已收到～请告诉我需要怎么处理呢？", chat_name)
+        return True
 
 class TianshuController(Controller):
     HELP = {

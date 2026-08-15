@@ -1312,18 +1312,20 @@ class VisualBackend:
                             sender=sender,
                             content=text,
                             type=MessageType.TEXT,
+                            y=first_y // 2,
                         ))
                 cur_lines.clear()
                 cur_y.clear()
             block_sender = None
             # 悬空的候选发送者名（后面没紧跟内容）→ 它本身是一条独立短消息
             if pending_name is not None:
-                name = pending_name[0]
+                name, pname_y = pending_name
                 pending_name = None
                 seq += 1
                 msgs.append(WeChatMessage(
                     id=f"visual_{seq}", chat=chat, sender=chat,
                     content=name, type=MessageType.TEXT,
+                    y=pname_y // 2,
                 ))
 
         for it in items:
@@ -1503,6 +1505,62 @@ class VisualBackend:
         msg_t = win_t + int(h * self._message_region[1])
         return [(msg_l + (l + r) // 2, msg_t + (t + b) // 2)
                 for (t, b, l, r) in boxes]
+
+    def analyze_window(self, chat: str, foreground: bool = True) -> dict:
+        """切会话 + 截图 + 气泡/媒体分析，返回窗口内消息结构（不 OCR 文字）。
+
+        供上层先判断「窗口内是否只有文字」还是「有图/文件」，再决定
+        sleep 10s 防话没说完 / OCR 读文字。
+
+        bot 消息判定：is_self 气泡 + 右对齐媒体矩形（右边缘 > 0.75×宽）。
+        实测锚点：bot 长文字气泡右边缘 614/747=0.82，对方大图右边缘
+        399/747=0.53——0.75 能干净切开（bot 图片/文件无绿色气泡，
+        只能靠右对齐 x 判据）。
+
+        返回 dict：
+        {
+            "bot_bottom": int | None,       # bot 最后回复 y 下边界（1x）；None=无 bot 回复
+            "other_text": [(t,b,l,r), ...],  # 窗口内对方文字气泡框
+            "other_media": [(t,b,l,r), ...], # 窗口内对方媒体矩形（图/视频/表情/文件卡片）
+            "has_text": bool,
+            "has_media": bool,
+            "width": int, "height": int,
+        }
+        """
+        self._switch_chat(chat)
+        shot = self._refresh(force=True, foreground=foreground)
+        empty = {"bot_bottom": None, "other_text": [], "other_media": [],
+                 "has_text": False, "has_media": False, "width": 0, "height": 0}
+        if shot is None:
+            return empty
+        w, h = shot.size
+        region = shot.crop((
+            int(w * self._message_region[0]), int(h * self._message_region[1]),
+            int(w * self._message_region[2]), int(h * self._message_region[3]),
+        ))
+        rw, rh = region.size
+        colors = detect_bubble_colors(region)
+        bubbles = find_bubble_boxes(region, colors)   # [(t,b,l,r,is_self)]
+        media = find_media_boxes(region, colors)       # [(t,b,l,r)]
+        # bot 消息：is_self 气泡 + 右对齐媒体矩形
+        bot_bottoms = [b for (t, b, l, r, is_self) in bubbles if is_self]
+        for (t, b, l, r) in media:
+            if r > 0.75 * rw:
+                bot_bottoms.append(b)
+        bot_bottom = max(bot_bottoms) if bot_bottoms else None
+        # 窗口内对方消息（y 在 bot 回复之后；无 bot 回复则整段都是对方消息）
+        other_text = [(t, b, l, r) for (t, b, l, r, is_self) in bubbles
+                      if not is_self and (bot_bottom is None or t >= bot_bottom)]
+        other_media = [(t, b, l, r) for (t, b, l, r) in media
+                       if r <= 0.75 * rw and (bot_bottom is None or t >= bot_bottom)]
+        return {
+            "bot_bottom": bot_bottom,
+            "other_text": other_text,
+            "other_media": other_media,
+            "has_text": bool(other_text),
+            "has_media": bool(other_media),
+            "width": rw, "height": rh,
+        }
 
     def send_file(self, chat: str, file_path: str) -> bool:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""
