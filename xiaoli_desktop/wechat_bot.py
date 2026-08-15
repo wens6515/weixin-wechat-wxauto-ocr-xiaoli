@@ -589,6 +589,70 @@ class WeChatBot:
                 except Exception as e:
                     logger.warning(f"[处理] 清理临时文件失败: {e}")
 
+    def _capture_latest_image(self, chat_name):
+        """点击最新图片 → 预览截图 → 保存临时文件 → 返回路径（不删，调用方负责）。
+
+        复用 _process_image 的定位+点击+截图逻辑，但不调视觉模型、不回复——
+        供图片+文字的任务投递（截图作附件）与描述提取共用。
+        """
+        tmp_path = None
+        try:
+            centers = getattr(self.wx, 'media_screen_boxes', lambda: [])()
+            if not centers:
+                return None
+            click_x, click_y = centers[-1]
+            import pyautogui
+            pyautogui.click(click_x, click_y)
+            time.sleep(1.0)
+            preview_hwnd = find_window_by_title("图片和视频")
+            if preview_hwnd:
+                ensure_window_visible(preview_hwnd)
+            preview_rect = window_rect(preview_hwnd) if preview_hwnd else None
+            if preview_rect:
+                l, t, w, h = preview_rect
+                screenshot = pyautogui.screenshot(region=(l, t, w, h))
+                pyautogui.press('esc')
+                time.sleep(0.3)
+            else:
+                wechat_hwnd = find_window_by_title("微信")
+                if wechat_hwnd:
+                    ensure_window_visible(wechat_hwnd)
+                wr = window_rect(wechat_hwnd) if wechat_hwnd else None
+                if not wr:
+                    return None
+                l, t, w, h = wr
+                screenshot = pyautogui.screenshot(region=(l, t, w, h))
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
+                tmp_path = tmpfile.name
+            self._save_screenshot_compressed(screenshot, tmp_path)
+            return tmp_path
+        except Exception as e:
+            logger.error(f"[图片截图] 异常: {e}")
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+            return None
+
+    def _describe_image(self, chat_name):
+        """点击最新图片 → 截图 → 视觉模型 → 返回描述文本（不回复，清理临时文件）。"""
+        tmp_path = self._capture_latest_image(chat_name)
+        if not tmp_path:
+            return None
+        try:
+            with open(tmp_path, 'rb') as f:
+                img_bytes = f.read()
+            return self.call_vision_api(img_bytes, self.vision_prompt)
+        except Exception as e:
+            logger.error(f"[图片描述] 异常: {e}")
+            return None
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
     def _process_image_visual_fallback(self, chat_name, sender):
         """视觉后端图片消息降级：整窗截图 → 送视觉模型（无法精确裁剪单图）。
 
@@ -1220,134 +1284,77 @@ class WeChatBot:
             return
         if time.time() - self.last_reply_time < self.cooldown:
             return
-
         try:
-            # 新链路（visual 后端）：只处理有未读红圈角标的会话——列表区像素
-            # 检测红圈 → 定位点击 → 消息区 OCR，无未读时零 OCR 零点击。
-            # 降级（wxauto 等旧后端）：无 iter_unread_sessions 能力时走全量
-            # 会话遍历，行为与重构前一致。
+            # 红圈驱动（visual 后端）；降级（wxauto 等）走全量会话遍历
             if hasattr(self.wx, "iter_unread_sessions"):
                 sessions = list(self.wx.iter_unread_sessions())
             else:
                 sessions = list(self.wx.iter_sessions())
             if not sessions:
                 return
-
+            file_re = re.compile(
+                r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)\b",
+                re.I)
             for chat_name in sessions:
                 if not chat_name:
                     continue
-
-                msgs = self.wx.get_messages(chat_name)
-                if not msgs:
-                    continue
-
-                logger.debug(f"[会话] {chat_name} 共 {len(msgs)} 条消息")
-                recent_msgs = msgs[-10:] if len(msgs) >= 10 else msgs
-
-                for msg in reversed(recent_msgs):
-                    sender = getattr(msg, 'sender', None)
-                    content = getattr(msg, 'content', '')
-                    msg_type = getattr(msg, 'type', None)
-                    msg_class = type(msg).__name__
-                    if sender is None:
+                # 窗口边界：定位 bot 最后回复之后的对方消息（visual 后端）
+                analyze = getattr(self.wx, "analyze_window", None)
+                win = analyze(chat_name) if analyze else None
+                bot_bottom = win.get("bot_bottom") if win else None
+                if win is not None:
+                    if not (win.get("has_text") or win.get("has_media")):
                         continue
-                    if sender == "self" or 'Self' in str(type(msg)) or sender == self.nickname:
-                        continue
-
-                    msg_id = getattr(msg, 'id', None)
-                    # 用消息 id 做去重 key（每条消息唯一，重发相同图片 id 也不同）
-                    msg_key = f"{chat_name}_{msg_id}" if msg_id else f"{chat_name}_{sender}_{content}"
-
-                    if msg_key in self.recent_msg_ids:
-                        continue
-
-                    # ── 调试日志（仅文件） ──
-                    logger.debug(f"[MSG] chat={chat_name} sender={sender} class={msg_class} "
-                                f"type={msg_type!r} content={content!r} "
-                                f"id={msg_id[:12] if msg_id else '无'}")
-
-                    # ========== 检测图片消息 ==========
-                    # 统一消息模型：type 枚举判断（wxauto 后端已转换，视觉后端原生）
-                    is_image = msg_type == MessageType.IMAGE
-                    # ====================================
-
-                    if is_image:
-                        logger.info(f"📷 收到 {sender} 的图片，开始识别...")
-                        success = self._process_image(chat_name, sender, msg)
-                        # 无论成败都标记已处理，防止重复处理
-                        self._remember_recent(msg_key)
-                        if msg_id:
-                            self._save_processed_id(msg_id)
-                        if not success:
-                            logger.warning("图片处理失败")
-                        self.last_reply_time = time.time()
-                        return
-
-                    # ========== 检测文件消息 ==========
-                    is_file = msg_type == MessageType.FILE
-                    # ====================================
-
-                    if is_file:
-                        # 跳过"上传中"的消息，等上传完成后的消息才处理
-                        if '上传中' in str(content):
-                            logger.debug(f"[文件] 文件上传中，等待完成消息...")
-                            self._remember_recent(msg_key)
-                            if msg_id:
-                                self._save_processed_id(msg_id)
+                    if win.get("has_media"):
+                        time.sleep(10)  # 防对方话没说完
+                        win = analyze(chat_name)
+                        if not (win.get("has_text") or win.get("has_media")):
                             continue
-
-                        success = self._process_file(chat_name, sender, msg)
-                        # 无论成败都标记已处理，防止重复处理
-                        self._remember_recent(msg_key)
-                        if msg_id:
-                            self._save_processed_id(msg_id)
-                        if not success:
-                            logger.warning("文件处理失败")
-                        self.last_reply_time = time.time()
-                        return
-
-                # 没有图片/文件，处理最新文本消息
-                latest = msgs[-1]
-                sender = getattr(latest, 'sender', None)
-                content = getattr(latest, 'content', '')
-                msg_class = type(latest).__name__
-                msg_type = getattr(latest, 'type', None)
-                if sender is None or sender == "self" or 'Self' in str(type(latest)) or sender == self.nickname:
-                    continue
-
-                # 防止图片消息掉进文本处理
-                if msg_type == MessageType.IMAGE:
-                    continue
-
-                # 防止文件消息掉进文本处理
-                if msg_type == MessageType.FILE:
-                    continue
-
-                msg_id = getattr(latest, 'id', None)
-                msg_key = f"{chat_name}_{msg_id}" if msg_id else f"{chat_name}_{sender}_{content}"
-
-                if msg_key in self.recent_msg_ids:
-                    continue
-                self._remember_recent(msg_key)
-
-                is_group = is_group_chat(chat_name)
-
-                if is_group:
-                    at_tag = f"@{self.nickname}"
-                    if not content.startswith(at_tag) and at_tag not in content:
-                        continue
-                    question = content.replace(at_tag, "").strip()
-                    if not question:
-                        question = "你好呀～"
-                else:
-                    question = content
-
-                logger.info(f"💬 [{chat_name}] {sender}: {question[:80]}")
-                reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group)
-                self._send_text(reply, chat_name)
-
-                self.last_reply_time = time.time()
-                return
+                        bot_bottom = win.get("bot_bottom")
+                msgs = self.wx.get_messages(chat_name)
+                window_msgs = [
+                    m for m in msgs
+                    if m.sender not in (None, "self", self.nickname)
+                    and (bot_bottom is None or (m.y is not None and m.y >= bot_bottom))
+                ]
+                file_text = next(
+                    (m.content.strip() for m in window_msgs if file_re.search(m.content or "")),
+                    None)
+                text_parts = [
+                    m.content.strip() for m in window_msgs
+                    if m.content.strip() and not file_re.search(m.content or "")
+                ]
+                text_content = "\n".join(text_parts)
+                has_media = bool(win.get("has_media")) if win else False
+                sender = window_msgs[-1].sender if window_msgs else chat_name
+                # 分发
+                if file_text:
+                    logger.info(f"📁 判断为文件消息：{chat_name}")
+                    self._process_file(chat_name, sender, window_msgs[-1])
+                    self.last_reply_time = time.time()
+                    return
+                if has_media and not text_content:
+                    logger.info(f"🖼 判断为图片消息：{chat_name}")
+                    self._process_image(chat_name, sender, None)
+                    self.last_reply_time = time.time()
+                    return
+                if text_content:
+                    is_group = is_group_chat(chat_name)
+                    question = text_content
+                    if is_group:
+                        at_tag = f"@{self.nickname}"
+                        if at_tag not in question:
+                            continue
+                        question = question.replace(at_tag, "").strip()
+                        if not question:
+                            question = "你好呀～"
+                    logger.info(f"💬 [{chat_name}] {sender}: {question[:80]}")
+                    reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group)
+                    self._send_text(reply, chat_name)
+                    self.last_reply_time = time.time()
+                    return
+        except Exception as e:
+            logger.error(f"处理消息异常: {e}\n{traceback.format_exc()}")
 
         except Exception as e:
             logger.error(f"处理消息异常: {e}\n{traceback.format_exc()}")
