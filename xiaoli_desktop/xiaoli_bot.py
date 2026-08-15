@@ -77,6 +77,19 @@ def generate_task_id():
     return time.strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:4]
 
 
+def _looks_like_file_text(text):
+    """判断 OCR 文本是否为文件消息的显示文本（含常见文档扩展名）。
+
+    视觉后端把文件消息 OCR 成文件名文本（多条合并如
+    '新宣传.docx 部门简介+纳新宣传.docx W'，type 可能是 TEXT）——
+    _wait_pending_instruction 找用户指令时须跳过这类文本，否则会把
+    文件名当指令（LLM 对文件名判 is_task=False 且真实指令被错过）。
+    """
+    return bool(re.search(
+        r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)\b",
+        text or "", flags=re.I))
+
+
 def _parse_classify_json(raw):
     """解析 LLM 分类输出。任何异常都兜底为 is_task=False（不误投递、不崩溃）"""
     if not raw:
@@ -929,9 +942,12 @@ class AgentBot(WeChatBot):
         if not instruction:
             instruction = user_instruction.strip()
 
-        # 判断用户指令是否为任务
+        # 判断用户指令是否为任务。任务判断输入 = 文件名 + 处理要求
+        # （LLM 需知道「处理的对象」才能判断是否动手类任务；仅指令如
+        # '把这个做成网页' 缺少对象，单独看会被误判闲聊）：
+        #   '[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页'
         if self.task_enabled:
-            cls = self._classify_task(instruction)
+            cls = self._classify_task(f"[文件]{filename} {instruction}")
             if cls["is_task"]:
                 logger.info(f"[任务桥] 文件+指令判定为任务: {cls['task'][:60]}")
                 self._add_history(chat_name, "user", f"[任务] 文件 {filename}: {text_content[:200]}")
@@ -1017,6 +1033,11 @@ class AgentBot(WeChatBot):
                     if s is None or s == "self" or s == self.nickname:
                         continue
                     if getattr(m, "type", None) in (MessageType.IMAGE, MessageType.FILE, MessageType.TIME, MessageType.SYSTEM):
+                        continue
+                    # 文件消息的 OCR 文本（含文档扩展名）不是用户指令——跳过，
+                    # 继续往前找真实指令（否则文件名会冒充指令：LLM 对
+                    # 'xxx.docx' 判 is_task=False，真实指令被错过）
+                    if _looks_like_file_text(c):
                         continue
                     if not c.strip():
                         continue
@@ -1210,6 +1231,17 @@ class AgentBot(WeChatBot):
                 content = getattr(latest, "content", "")
                 logger.info(f"[最新消息] {chat_name} sender={sender!r} type={getattr(latest, 'type', None)} content={content[:50]!r}")
                 if sender is None or sender == "self" or sender == self.nickname:
+                    # 图片入口（视觉后端）：图片气泡无文字，消息区 OCR 读不到
+                    # IMAGE 消息（图片在视口外/被 bot 回复顶出时，消息流只剩
+                    # self 文本、甚至 0 条）——但会话列表预览类型 [图片] 是
+                    # 权威信号，直接媒体矩形定位点击最新图片。识别信号来自
+                    # 会话列表而非消息区，两者不必一致。
+                    preview_t = getattr(getattr(self, "wx", None), "_session_types", {}).get(chat_name)
+                    if preview_t == MessageType.IMAGE:
+                        logger.info(f"🖼 [图片]预览驱动：消息流无图片消息，媒体矩形定位处理")
+                        self._process_image(chat_name, chat_name, None)
+                        self.last_reply_time = time.time()
+                        return
                     logger.info(f"[跳过] {chat_name} 最新消息 sender={sender!r} 是自己或空")
                     continue
                 # 群聊 @ 过滤（latest 兜底路径）
