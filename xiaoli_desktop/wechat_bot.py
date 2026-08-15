@@ -843,6 +843,28 @@ class WeChatBot:
         except Exception as e:
             logger.error(f"[文件] 快照保存失败: {e}")
 
+    def _refresh_file_snapshot(self, wait=2.0):
+        """扫描接收目录并刷新快照（任务回传成果落盘后调用：把 bot 发送
+        产生的副本固化进已见集合，下次 _find_user_file 不作为增量出现）。
+
+        wait：成果副本经微信复制进接收目录有延迟，先等再扫；即使等待后
+        副本仍未落盘（网络慢/异常），下次扫描它仍是增量——但会被
+        _sent_back_stems 排除逻辑挡掉（双保险，不依赖本刷新）。
+        """
+        file_dir = self.file_storage_path
+        if not file_dir or not os.path.isdir(file_dir):
+            return
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            current, _ = self._snapshot_dir(file_dir)
+            if self._file_snapshot != current:
+                self._file_snapshot = current
+                self._save_file_snapshot(current)
+                logger.info(f"[文件] 任务回传后快照已刷新（{len(current)} 个文件）")
+        except Exception as e:
+            logger.error(f"[文件] 快照刷新失败: {e}")
+
     def _snapshot_dir(self, directory):
         """扫描目录：返回 (当前全量 {path: [size, mtime]}, 相对上次快照的新增列表)。
 
@@ -966,6 +988,8 @@ class WeChatBot:
         """按消息中的显示文件名在接收目录精确定位（微信 4.0 下载命名
         '<hash>_<msgid>_m_<原名>'，目录文件名包含原名；bot 回传的成果副本
         是干净原名，不同名时天然不命中）。多个候选（重名 (1)(2)…）取时间戳最新。
+        排除 bot 自己发送产生的成果副本（stem + 发送时刻窗口）——用户把
+        成果转回给 bot 时，消息文件名与成果相同，不排除会误把成果当用户文件。
         返回路径或 None"""
         if not display_name:
             return None
@@ -985,6 +1009,15 @@ class WeChatBot:
                     try:
                         ts = os.path.getctime(full)
                     except OSError:
+                        continue
+                    # 排除 bot 发送产生的成果副本（stem 匹配 + ctime 在发送时刻附近）
+                    hit_stem = None
+                    for s in self._sent_back_stems:
+                        if fstem.startswith(s) or s in fstem:
+                            hit_stem = s
+                            break
+                    if hit_stem and abs(ts - self._sent_back_stems[hit_stem]) <= 300:
+                        logger.debug(f"[文件] 排除成果副本: {fname} (stem={hit_stem})")
                         continue
                     m_dup = re.search(r"\((\d+)\)$", os.path.splitext(fname)[0])
                     dup = int(m_dup.group(1)) if m_dup else 0

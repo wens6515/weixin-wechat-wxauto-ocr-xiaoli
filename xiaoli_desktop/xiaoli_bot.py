@@ -846,6 +846,13 @@ class AgentBot(WeChatBot):
                             # 登记回传的成果文件（源路径 + 主干+发送时刻）：目录扫描时排除，
                             # 防止把 bot 自己发出去的成果（含微信写入接收目录的副本）误当成"用户本次发送的文件"投递进下一轮任务附件
                             self._register_sent_back(fpath)
+                            # 成果副本落盘后刷新快照：把发送产生的副本固化进已见集合，
+                            # 下次目录扫描不作为增量出现（与 stem 排除构成双保险）。
+                            # 基类快照能力（AgentBot 继承）；快照未启用/目录不可用时内部静默跳过。
+                            try:
+                                self._refresh_file_snapshot()
+                            except Exception as e:
+                                logger.warning(f"[回传] 快照刷新失败（不影响排除登记）: {e}")
                 # 无论发送成败，任务结果都写入对话记忆（记忆记录的是任务产出，不是发送状态）
                 self._remember_task_result(chat, result)
             finally:

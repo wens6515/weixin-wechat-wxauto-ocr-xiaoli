@@ -542,5 +542,44 @@ class TestFileDisplayNameAndSnapshot(unittest.TestCase):
             self.assertIsNone(obj._find_user_file(d))
 
 
+    def test_find_file_by_display_name_excludes_sent_back(self):
+        """成果副本（stem 匹配 + ctime 在发送时刻附近）在文件名锚定路径
+        也被排除——用户把成果转回时消息文件名与成果相同，不排除会误选。"""
+        obj = self._obj()
+        with tempfile.TemporaryDirectory() as tmp:
+            obj.file_storage_path = tmp
+            obj._sent_back_stems = {}
+            f = os.path.join(tmp, "部门简介+纳新宣传(3).docx")
+            with open(f, "w") as fp:
+                fp.write("x")
+            # 未登记成果前：能按显示名定位
+            self.assertEqual(
+                obj._find_file_by_display_name("部门简介+纳新宣传.docx"), f)
+            # 登记成果（发送时刻 = 现在；副本 ctime ≈ 现在，落在 ±300s 窗口）
+            obj._sent_back_stems["部门简介+纳新宣传"] = time.time()
+            self.assertIsNone(
+                obj._find_file_by_display_name("部门简介+纳新宣传.docx"))
+
+    def test_refresh_file_snapshot(self):
+        """任务回传后刷新快照：扫描目录固化已见集合；目录不可用静默跳过。"""
+        import json
+        obj = self._obj()
+        with tempfile.TemporaryDirectory() as tmp:
+            obj.file_storage_path = tmp
+            obj._file_snapshot = {}
+            obj._file_snapshot_path = os.path.join(tmp, "snap.json")
+            f = os.path.join(tmp, "成果.docx")
+            with open(f, "w") as fp:
+                fp.write("x")
+            obj._refresh_file_snapshot(wait=0)
+            with open(obj._file_snapshot_path, encoding="utf-8") as fp:
+                snap = json.load(fp)
+            self.assertIn(f, snap)
+        # 目录不可用 → 不抛异常
+        obj2 = self._obj()
+        obj2.file_storage_path = None
+        obj2._refresh_file_snapshot(wait=0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
