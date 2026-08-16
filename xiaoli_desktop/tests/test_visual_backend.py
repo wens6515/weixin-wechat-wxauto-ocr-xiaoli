@@ -623,6 +623,32 @@ class TestVisualBackend(unittest.TestCase):
                         "「你好」应被读到（不被误判头像区）")
         b.close()
 
+    def test_analyze_window_rightside_other_bubble_is_bot(self):
+        """RED 复现：bot 回传的成果文件卡片无绿色气泡、被判 other 气泡，
+        但右对齐（r>0.75w）→ 应归 bot 消息，不得落入窗口内对方消息
+        （否则 bot 回传的 html 成果被误当王文生新发的文件，见真机日志
+        13:03 '判断为文件消息：就业服务部_赛博朋克宣传页.html'）。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                        return_value=[
+                            (0, 40, 20, 160, True),     # bot 绿气泡
+                            (50, 80, 30, 160, False),   # bot 文件卡片(右对齐 r=160>150)
+                            (100, 130, 10, 80, False),  # 对方消息(左对齐 r=80<150)
+                        ]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes",
+                        return_value=[]):
+            win = b.analyze_window("王文生")
+        self.assertEqual(win["bot_bottom"], 80,
+                         "bot 文件卡片(右对齐 other)下边界应计入 bot_bottom")
+        self.assertEqual(win["other_text"], [(100, 130, 10, 80)],
+                         "右对齐文件卡片不得落入窗口内对方消息")
+
 
 # ---- 未读红圈角标检测 ----
 

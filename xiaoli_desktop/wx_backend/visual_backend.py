@@ -1489,15 +1489,24 @@ class VisualBackend:
         colors = detect_bubble_colors(region)
         bubbles = find_bubble_boxes(region, colors)   # [(t,b,l,r,is_self)]
         media = find_media_boxes(region, colors)       # [(t,b,l,r)]
-        # bot 消息：is_self 气泡 + 右对齐媒体矩形
+        # bot 消息判定（三路并集）：
+        # 1. is_self 绿色气泡（bot 文字消息）
+        # 2. 右对齐气泡（bot 发的图片/文件卡片无绿色气泡，被判 other 但位置靠右）
+        # 3. 右对齐媒体矩形（bot 发的图片）
+        # 实测锚点：bot 文件卡片右边缘 622/747=0.83，对方消息右边缘 ≤0.53——0.75 切开。
         bot_bottoms = [b for (t, b, l, r, is_self) in bubbles if is_self]
+        for (t, b, l, r, is_self) in bubbles:
+            if not is_self and r > 0.75 * rw:
+                bot_bottoms.append(b)
         for (t, b, l, r) in media:
             if r > 0.75 * rw:
                 bot_bottoms.append(b)
         bot_bottom = max(bot_bottoms) if bot_bottoms else None
         # 窗口内对方消息（y 在 bot 回复之后；无 bot 回复则整段都是对方消息）
+        # 排除右对齐气泡（bot 文件卡片被判 other 但靠右，不属于对方）
         other_text = [(t, b, l, r) for (t, b, l, r, is_self) in bubbles
-                      if not is_self and (bot_bottom is None or t >= bot_bottom)]
+                      if not is_self and r <= 0.75 * rw
+                      and (bot_bottom is None or t >= bot_bottom)]
         other_media = [(t, b, l, r) for (t, b, l, r) in media
                        if r <= 0.75 * rw and (bot_bottom is None or t >= bot_bottom)]
         return {
