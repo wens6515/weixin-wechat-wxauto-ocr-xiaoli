@@ -209,12 +209,12 @@ QListWidget#navList::item:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 $p1, stop:1 $p2);
     color: #FFFFFF; font-weight: 600; }
 /* 设置页主题缩略图网格：选中项主色描边 */
-QListWidget#themeGrid { background: transparent; border: none; }
-QListWidget#themeGrid::item { border: 2px solid transparent; border-radius: 8px;
-                              color: $muted; font-size: 12px; }
-QListWidget#themeGrid::item:hover { background: $hover; }
-QListWidget#themeGrid::item:selected { background: $hover; color: $text;
-                                       border: 2px solid $p1; }
+QListWidget#themeGrid, QListWidget#wpGrid { background: transparent; border: none; }
+QListWidget#themeGrid::item, QListWidget#wpGrid::item { border: 2px solid transparent;
+                              border-radius: 8px; color: $muted; font-size: 12px; }
+QListWidget#themeGrid::item:hover, QListWidget#wpGrid::item:hover { background: $hover; }
+QListWidget#themeGrid::item:selected, QListWidget#wpGrid::item:selected { background: $hover;
+                              color: $text; border: 2px solid $p1; }
 QTableWidget::item:selected { background: $hover; color: $text; }
 QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;
@@ -363,6 +363,82 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
     except ValueError:
         return f"rgba(91, 140, 255, {alpha})"
     return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+# ---------- 内置壁纸库 ----------
+
+_WALLPAPER_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
+# 默认壁纸文件名关键词（匹配「壁纸」目录里的默认款）
+_DEFAULT_WALLPAPER_KEY = "活力少女"
+
+
+def wallpapers_dir() -> str:
+    """内置壁纸目录：项目根（app_base_dir 的父目录，即仓库根）下的「壁纸」文件夹。
+
+    源码模式 app_base_dir = xiaoli_desktop → 父目录 = 仓库根 D:\\AI\\小漓；
+    打包模式 app_base_dir = dist\\小漓，父目录与 exe 同级的「壁纸」也能被扫到。
+    同时兼容 app_base_dir 自身下的 壁纸/wallpapers。
+    """
+    base = app_base_dir()
+    for p in (base, os.path.dirname(base)):
+        for cand in (os.path.join(p, "壁纸"), os.path.join(p, "wallpapers")):
+            if os.path.isdir(cand):
+                return cand
+    return os.path.join(base, "壁纸")
+
+
+def list_wallpapers():
+    """扫描内置壁纸目录，返回 [(绝对路径, 文件名)] 按文件名排序。目录不存在返回 []。"""
+    d = wallpapers_dir()
+    if not os.path.isdir(d):
+        return []
+    out = []
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    for f in names:
+        if f.lower().endswith(_WALLPAPER_EXTS):
+            p = os.path.join(d, f)
+            if os.path.isfile(p):
+                out.append((p, f))
+    return out
+
+
+def default_wallpaper_path() -> str:
+    """默认壁纸：文件名含「活力少女」的那张；找不到回退第一张；目录空返回空串。"""
+    items = list_wallpapers()
+    for p, f in items:
+        if _DEFAULT_WALLPAPER_KEY in f:
+            return p
+    return items[0][0] if items else ""
+
+
+def wallpaper_short_name(fname: str) -> str:
+    """壁纸显示名：去「【哲风壁纸】」前缀 + 去扩展名。"""
+    for pre in ("【哲风壁纸】", "哲风壁纸-"):
+        if fname.startswith(pre):
+            fname = fname[len(pre):]
+    base = os.path.splitext(fname)[0]
+    return base or fname
+
+
+def render_wallpaper_thumb(path: str, width=120, height=76):
+    """壁纸缩略图：QImageReader 按目标尺寸解码（避免全尺寸加载大图），
+    失败回退主题色块。"""
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QImageReader, QPixmap
+    try:
+        r = QImageReader(path)
+        r.setScaledSize(QSize(width, height))
+        img = r.read()
+        if not img.isNull():
+            pm = QPixmap.fromImage(img)
+            if not pm.isNull():
+                return pm
+    except Exception:
+        pass
+    return render_theme_thumb("blue", width, height)
 
 
 def build_qss(theme: str = "blue", wallpaper: str = "") -> str:

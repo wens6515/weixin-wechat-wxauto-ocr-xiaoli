@@ -7,7 +7,7 @@ from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QMainWindow, QListWidget, QListWidgetItem, QLabel,
                                QSystemTrayIcon, QMessageBox, QHBoxLayout, QWidget,
-                               QStackedWidget, QStackedLayout)
+                               QStackedWidget, QVBoxLayout)
 
 from .backdrop import ParticleBackdrop
 from .pages import HomePage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
@@ -61,15 +61,21 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        # 双层结构：ParticleBackdrop（渐变+粒子背景）垫底，content 在上透明透出背景
+        # 双层结构：backdrop 垫底（手动几何跟随 central，QStackedLayout 会隐藏
+        # 非当前页导致背景层不渲染——必须用 lower + resize 同步），content 在上透明透出
         self.backdrop = ParticleBackdrop(central)
+        self.backdrop.setGeometry(0, 0, central.width(), central.height())
+        self.backdrop.lower()
+
+        def _sync_backdrop(e):
+            self.backdrop.setGeometry(0, 0, e.size().width(), e.size().height())
+        central.resizeEvent = _sync_backdrop
+
         content = QWidget(central)
-        stk = QStackedLayout(central)
-        stk.setContentsMargins(0, 0, 0, 0)
-        stk.setSpacing(0)
-        stk.addWidget(self.backdrop)
-        stk.addWidget(content)
-        stk.setCurrentIndex(1)
+        _outer = QVBoxLayout(central)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _outer.setSpacing(0)
+        _outer.addWidget(content)
         lay = QHBoxLayout(content)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
