@@ -8,6 +8,7 @@ build_qss 按主题 + 可选壁纸生成 QSS；毛玻璃用半透明卡片（rgb
 大圆角卡片、渐变主按钮、focus 高亮环、圆角滚动条、tooltip/菜单样式。
 """
 import os
+import re
 import sys
 from string import Template
 
@@ -131,17 +132,15 @@ THEMES = {
                    "scrollbar": "#3B4261", "card_alt": "#24283B"},
 }
 
-# Aurora 弥散渐变：斜向三段色彩过渡（紫→淡紫→粉），背景色由主题字段生成
-_AURORA_BG = (
-    "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
-    "stop:0 {glow_a}, stop:0.45 {glow_b}, stop:0.75 {glow_c}, stop:1 {bg});"
-)
+# Aurora 弥散渐变由 ParticleBackdrop 运行时绘制（斜向三段色彩过渡），
+# QSS 不再承担背景生成。
 
 _QSS_TEMPLATE = Template("""
 * { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
-QMainWindow, QWidget { $bg_rule }
+/* 背景由 ParticleBackdrop 绘制（渐变+粒子）；QMainWindow 纯 bg 兜底 */
+QMainWindow { background: $bg; }
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar::tab { background: transparent; padding: 10px 22px; margin-right: 8px;
                border-radius: 10px; color: $muted; font-size: 13px; font-weight: 500; }
@@ -165,8 +164,9 @@ QPushButton#btnMain { color: white; border: none; border-radius: 14px;
                       background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); }
 QPushButton#btnMain[tone="primary"]:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                      stop:0 $p1, stop:1 $p2); }
-QPushButton#btnMain[tone="primary"]:pressed { background: $p2; }
+                      stop:0 $p1_hi, stop:1 $p2_hi); }
+QPushButton#btnMain[tone="primary"]:pressed { background: $p2; padding-top: 10px;
+                      padding-bottom: 14px; }
 QPushButton#btnMain[tone="primary"]:disabled { background: $muted; }
 QPushButton#btnMain[tone="warn"] { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 #FBBF24, stop:1 #F59E0B); }
@@ -179,7 +179,7 @@ QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
 QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 10px;
               padding: 8px 20px; min-height: 32px; color: $text; font-size: 13px; font-weight: 500; }
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
-QPushButton:pressed { background: $hover; }
+QPushButton:pressed { background: $hover; border-top: 2px solid rgba(0,0,0,0.12); }
 QPushButton:disabled { color: $muted; background: $frame; border-color: $border; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: $input_bg; border: 1px solid $border; border-radius: 10px;
@@ -199,15 +199,22 @@ QListWidget::item { padding: 7px 10px; border-radius: 8px; margin: 2px 4px; }
 QListWidget::item:hover { background: $hover; }
 QListWidget::item:selected { background: $hover; color: $text; }
 /* 左侧导航栏：窄侧边 + 竖排导航项，选中态渐变背景 + 白字白图标 */
-QListWidget#navList { background: $frame; border: none;
+QListWidget#navList { background: transparent; border: none;
                       border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
 QListWidget#navList::item { padding: 12px 14px; border-radius: 10px;
                             margin: 3px 6px; color: $muted; font-size: 14px;
                             font-weight: 500; }
-QListWidget#navList::item:hover { background: $hover; color: $text; }
+QListWidget#navList::item:hover { background: $nav_hover; color: $text; }
 QListWidget#navList::item:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 $p1, stop:1 $p2);
     color: #FFFFFF; font-weight: 600; }
+/* 设置页主题缩略图网格：选中项主色描边 */
+QListWidget#themeGrid { background: transparent; border: none; }
+QListWidget#themeGrid::item { border: 2px solid transparent; border-radius: 8px;
+                              color: $muted; font-size: 12px; }
+QListWidget#themeGrid::item:hover { background: $hover; }
+QListWidget#themeGrid::item:selected { background: $hover; color: $text;
+                                       border: 2px solid $p1; }
 QTableWidget::item:selected { background: $hover; color: $text; }
 QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;
@@ -251,8 +258,101 @@ QRadioButton::indicator { border-radius: 9px; }
 QRadioButton::indicator:checked { border-radius: 9px; }
 """)
 
-# 各主题背景光晕透明度（浅色 0.16 柔和；深色 0.22 更明显）
-_GLOW_ALPHA = {"浅色": 0.16, "深色": 0.22}
+def _lighten(hex_color: str, amt: float) -> str:
+    """向白色方向提亮 #RRGGBB，amt∈[0,1]，用于 hover 高亮主色。"""
+    h = hex_color.lstrip("#")
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return hex_color
+    r = min(255, int(r + (255 - r) * amt))
+    g = min(255, int(g + (255 - g) * amt))
+    b = min(255, int(b + (255 - b) * amt))
+    return f"#{r:02X}{g:02X}{b:02X}"
+
+
+def _parse_color(spec: str):
+    """#RRGGBB 或 rgba(r,g,b,a) → QColor（缩略图绘制用）。"""
+    from PySide6.QtGui import QColor
+    s = spec.strip()
+    if s.startswith("rgba"):
+        m = re.match(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)", s)
+        if m:
+            r, g, b, a = (int(m.group(1)), int(m.group(2)),
+                          int(m.group(3)), float(m.group(4)))
+            return QColor(r, g, b, int(a * 255))
+    h = s.lstrip("#")
+    try:
+        return QColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except ValueError:
+        return QColor(91, 140, 255)
+
+
+def render_logo(size=44):
+    """渐变圆底品牌 logo（蓝紫渐变 + 白色「漓」字），固定品牌色。"""
+    from PySide6.QtCore import QPointF, Qt
+    from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPixmap
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    grad = QLinearGradient(QPointF(0, 0), QPointF(size, size))
+    grad.setColorAt(0, QColor("#5B8CFF"))
+    grad.setColorAt(1, QColor("#8B5CF6"))
+    p.setBrush(QBrush(grad))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(QPointF(size / 2, size / 2), size / 2, size / 2)
+    f = QFont("Microsoft YaHei UI", int(size * 0.42))
+    f.setBold(True)
+    p.setFont(f)
+    p.setPen(QColor("#FFFFFF"))
+    p.drawText(pm.rect(), Qt.AlignmentFlag.AlignCenter, "漓")
+    p.end()
+    return pm
+
+
+def render_theme_thumb(key: str, width=120, height=76):
+    """渲染主题缩略图（示意卡）：背景 + 导航条 + 选中项 + 卡片 + 主按钮。
+
+    供设置页「点击缩略图选主题」使用；运行时手绘，不依赖外部资源。
+    """
+    from PySide6.QtCore import QPointF, QRectF, Qt
+    from PySide6.QtGui import QBrush, QLinearGradient, QPainter, QPixmap
+    t = THEMES.get(key, THEMES["blue"])
+    pm = QPixmap(width, height)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # 背景
+    p.fillRect(QRectF(0, 0, width, height), _parse_color(t["bg"]))
+    # 左侧导航条
+    p.fillRect(QRectF(0, 0, width * 0.22, height), _parse_color(t["frame"]))
+    # 导航选中项（渐变块）
+    grad = QLinearGradient(QPointF(0, 0), QPointF(width * 0.22, 0))
+    grad.setColorAt(0, _parse_color(t["p1"]))
+    grad.setColorAt(1, _parse_color(t["p2"]))
+    p.setBrush(QBrush(grad))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(QRectF(width * 0.03, height * 0.13, width * 0.16, height * 0.14), 2, 2)
+    # 标题条（p1 色）
+    p.setPen(_parse_color(t["p1"]))
+    p.drawRect(int(width * 0.30), int(height * 0.07), int(width * 0.28), 3)
+    # 内容卡片
+    p.setBrush(_parse_color(t["card"]))
+    p.setPen(_parse_color(t["border"]))
+    p.drawRoundedRect(QRectF(width * 0.30, height * 0.20, width * 0.62, height * 0.30), 4, 4)
+    p.setPen(_parse_color(t["muted"]))
+    p.drawLine(int(width * 0.34), int(height * 0.28), int(width * 0.78), int(height * 0.28))
+    p.drawLine(int(width * 0.34), int(height * 0.35), int(width * 0.66), int(height * 0.35))
+    # 主按钮（p1→p2 渐变）
+    bgrad = QLinearGradient(QPointF(width * 0.30, 0), QPointF(width * 0.92, 0))
+    bgrad.setColorAt(0, _parse_color(t["p1"]))
+    bgrad.setColorAt(1, _parse_color(t["p2"]))
+    p.setBrush(QBrush(bgrad))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawRoundedRect(QRectF(width * 0.30, height * 0.58, width * 0.40, height * 0.15), 3, 3)
+    p.end()
+    return pm
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -266,28 +366,18 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def build_qss(theme: str = "blue", wallpaper: str = "") -> str:
-    """按主题名 + 可选壁纸路径生成 QSS。壁纸为空时用主题色渐变背景。
+    """按主题名 + 可选壁纸路径生成 QSS。
 
-    aurora 主题用斜向三段弥散渐变（紫→淡紫→粉）；其余主题用顶部主题色
-    光晕 → 底部背景色（深色主题光晕更明显）。
+    背景（渐变/粒子/壁纸）由 ParticleBackdrop 运行时绘制，QSS 只负责控件；
+    这里为 QMainWindow 提供纯 bg 兜底。动态派生 hover 提亮主色与导航悬停色。
     """
     t = dict(_DEFAULTS)
     t.update(THEMES.get(theme, THEMES["blue"]))
-    if wallpaper and os.path.isfile(wallpaper):
-        wp = wallpaper.replace("\\", "/")
-        bg_rule = f'background-image: url("{wp}"); background-position: center;'
-    elif theme == "aurora":
-        bg_rule = _AURORA_BG.format(
-            glow_a=_hex_to_rgba(t["p1"], 0.40),
-            glow_b=_hex_to_rgba(t["glow"], 0.32),
-            glow_c=_hex_to_rgba(t["p2"], 0.30),
-            bg=t["bg"])
-    else:
-        # 顶部主题色淡光晕 → 底部背景色，比纯色更有层次
-        alpha = _GLOW_ALPHA.get(t.get("group", "浅色"), 0.16)
-        soft = _hex_to_rgba(t["p1"], alpha)
-        bg_rule = (f"background: qradialgradient(cx:0.5, cy:0, radius:1.3, "
-                   f"fx:0.5, fy:0, stop:0 {soft}, stop:1 {t['bg']});")
+    # hover 主色：主题可自定义 p1_hi/p2_hi，缺省自动提亮 16%
+    t["p1_hi"] = _lighten(t.get("p1_hi", t["p1"]), 0.16)
+    t["p2_hi"] = _lighten(t.get("p2_hi", t["p2"]), 0.16)
+    t["nav_hover"] = _hex_to_rgba(t["p1"], 0.12)
+    bg_rule = f"background: {t['bg']};"
     return _QSS_TEMPLATE.substitute(**t, bg_rule=bg_rule)
 
 
@@ -317,6 +407,7 @@ class AppContext:
         self.cfg = None          # 最新 config（含投影字段）
         self.engine = None       # EngineThread
         self.bus = None          # EngineBus
+        self.win = None          # MainWindow（设置页切主题时同步背景层）
 
     def providers(self):
         return (self.cfg or {}).get("providers", [])

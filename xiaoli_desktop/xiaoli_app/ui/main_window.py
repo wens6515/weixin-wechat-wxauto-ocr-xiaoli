@@ -7,8 +7,9 @@ from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QMainWindow, QListWidget, QListWidgetItem, QLabel,
                                QSystemTrayIcon, QMessageBox, QHBoxLayout, QWidget,
-                               QStackedWidget)
+                               QStackedWidget, QStackedLayout)
 
+from .backdrop import ParticleBackdrop
 from .pages import HomePage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
 from ._icons import SVG_ICONS
 
@@ -60,7 +61,16 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
-        lay = QHBoxLayout(central)
+        # 双层结构：ParticleBackdrop（渐变+粒子背景）垫底，content 在上透明透出背景
+        self.backdrop = ParticleBackdrop(central)
+        content = QWidget(central)
+        stk = QStackedLayout(central)
+        stk.setContentsMargins(0, 0, 0, 0)
+        stk.setSpacing(0)
+        stk.addWidget(self.backdrop)
+        stk.addWidget(content)
+        stk.setCurrentIndex(1)
+        lay = QHBoxLayout(content)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
@@ -105,6 +115,9 @@ class MainWindow(QMainWindow):
         self._tick.timeout.connect(self._on_tick)
         self._tick.start(1000)
 
+        # 背景层应用当前主题/壁纸（粒子系统随主题重建）
+        self.apply_backdrop()
+
     # ---------- 刷新 ----------
 
     def _on_tick(self):
@@ -134,6 +147,12 @@ class MainWindow(QMainWindow):
                     self.status_label.setText("引擎已停止")
             elif kind == "error":
                 self.status_label.setText(f"错误: {payload.get('message', '')[:60]}")
+
+    def apply_backdrop(self, theme=None, wallpaper=None):
+        """主题/壁纸切换时同步背景层（设置页/入口调用）。"""
+        self.backdrop.set_theme(theme if theme is not None else self.ctx.theme())
+        self.backdrop.set_wallpaper(
+            wallpaper if wallpaper is not None else self.ctx.wallpaper())
 
     # ---------- 托盘联动 ----------
 
