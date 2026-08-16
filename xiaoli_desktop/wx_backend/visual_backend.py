@@ -429,6 +429,12 @@ def find_bubble_boxes(img: Image.Image, colors: dict) -> list[tuple]:
     if colors.get("other"):
         # 对方气泡色与背景差异小（深色主题仅 ~17 色阶），tol 要收紧
         mask = _near_color(arr, colors["other"], tol=12)
+        # 排除右侧滚动条：滚动条（深色主题灰 ~(36,36,38)）与 other 色
+        # (~47,47,48) 仅差 ~11 色阶，落在 tol=12 内被误判为 other，贯穿
+        # 整图聚成接近全屏的异常框，把真实对方气泡（如群聊 @ 消息）一起
+        # 吞掉后又被 60% 高度过滤丢弃（真机根因：群聊 @ 读不到消息）。
+        # 滚动条固定在消息区最右侧（x/w ≥ 0.99），直接掩掉。
+        mask[:, int(img.width * 0.99):] = False
         for (t, b, l, r) in _connected_boxes(mask):
             if (b - t) < img.height * 0.6:
                 boxes.append((t, b, l, r, False))
@@ -454,6 +460,58 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
     # 媒体内容 ≥ 80px 宽高（真机实测对方头像 ~62px 被 60 阈值误检为媒体，
     # 提到 80 排除头像；图片/视频/表情/文件卡片均 > 80px）
     return _connected_boxes(content, min_h=80, min_w=80)
+
+
+def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
+    """检测消息区左侧/右侧头像的顶部 y 列表（几何判据，无需头像模板）。
+
+    头像固定在消息区两侧：对方头像在最左（x/w∈[0.02,0.14]）、自己头像在最右
+    （x/w∈[0.84,0.98]）。头像颜色显著区别于背景（真机实测距离 >100，bg 距离 0、
+    对方气泡色距离 ~51），高度固定 ≈ 消息区高/18（真机 1135/18=63px）。
+
+    在窄带内找「非背景像素连续行段」，高度落在头像高附近、峰值足够的段即头像，
+    返回其顶部 y（头像顶部与消息气泡/媒体顶部对齐，真机实测差 0）。高度不足
+    （消息被上下滚动截断、显示不全）或峰值不足（滚动条等噪声）都丢弃。
+
+    side: "left"（对方头像）| "right"（自己头像）；bg 为 None 时返回空。
+    """
+    import numpy as np
+    if bg is None:
+        return []
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    rh, rw = arr.shape[:2]
+    if rw <= 0 or rh <= 0:
+        return []
+    if side == "right":
+        x0, x1 = int(rw * 0.84), int(rw * 0.98)
+    else:
+        x0, x1 = int(rw * 0.02), int(rw * 0.14)
+    if x1 - x0 <= 0:
+        return []
+    dist = np.abs(arr - np.array(bg, dtype=np.int16)).sum(axis=2)
+    counts = (dist[:, x0:x1] > 70).sum(axis=1)  # 每行非背景像素数
+    expected_h = max(40, rh // 18)
+    min_h = int(expected_h * 0.7)
+    max_h = int(expected_h * 1.4)
+    min_peak = int(expected_h * 0.4)
+    tops = []
+    in_seg = False
+    seg_start = 0
+    for y in range(rh):
+        c = int(counts[y])
+        if c >= 3 and not in_seg:
+            in_seg = True
+            seg_start = y
+        elif c < 3 and in_seg:
+            in_seg = False
+            seg_h = y - seg_start
+            if min_h <= seg_h <= max_h and int(counts[seg_start:y].max()) >= min_peak:
+                tops.append(seg_start)
+    if in_seg:
+        seg_h = rh - seg_start
+        if min_h <= seg_h <= max_h and int(counts[seg_start:rh].max()) >= min_peak:
+            tops.append(seg_start)
+    return tops
 
 
 def region_changed(a: Image.Image, b: Image.Image, region=None,
@@ -675,6 +733,21 @@ def parse_title(title: str) -> tuple[str, bool, int | None]:
     return title.strip(), False, None
 
 
+_QUOTE_TRANS = str.maketrans({
+    "\u201c": '"', "\u201d": '"',   # 弯双引号 → 直双引号
+    "\u2018": "'", "\u2019": "'",   # 弯单引号 → 直单引号
+})
+
+
+def normalize_chat_name(name: str) -> str:
+    """会话名归一化：OCR 对弯/直引号识别不稳定（同一群名列表区读弯引号、
+    标题区读直引号），比较前统一转直引号，避免 _switch_chat 已选中判定
+    失配 → 误点击 toggle 取消选中读空。"""
+    if not name:
+        return ""
+    return name.translate(_QUOTE_TRANS).strip()
+
+
 class VisualBackend:
     """PrintWindow + 本地 OCR 的微信视觉后端。
 
@@ -684,7 +757,7 @@ class VisualBackend:
 
     name = "visual"
 
-    def __init__(self, poll_region: bool = True, avatar_template: str = "", **kwargs: Any):
+    def __init__(self, poll_region: bool = True, **kwargs: Any):
         self._hwnd = None
         self._last_shot: Image.Image | None = None
         self._poll_region = poll_region
@@ -693,15 +766,6 @@ class VisualBackend:
         self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
         self._current_title: str | None = None  # 当前会话标题（read_title 权威名称）
         self._current_is_group: bool = False  # 当前会话是否群聊（标题含括号人数）
-        # 头像模板（首次启动用户上传）：用于消息区识别自己发的消息。
-        # 加载失败/未配置 → 降级 x 坐标中线判 sender。
-        self._avatar_template: Image.Image | None = None
-        if avatar_template and os.path.isfile(avatar_template):
-            try:
-                self._avatar_template = Image.open(avatar_template).convert("RGB")
-            except Exception as e:
-                logger.warning(f"头像模板加载失败（{e}），降级 x 坐标判 sender")
-                self._avatar_template = None
         # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
         cfg = _load_region_config()
         self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
@@ -894,9 +958,12 @@ class VisualBackend:
                 continue
             name = main_line["text"]
             # 清理 OCR 残留：
-            # - 去首尾非内容字符（'艹王美晨' → '王美晨'；'艹' 是未读角标误读）
+            # - 去首尾非内容字符（'艹王美晨' → '王美晨'；'艹' 是未读角标误读）。
+            #   白名单含弯引号“”：群名可合法以引号开头（'“强盗”集团'），
+            #   剥掉会让列表区会话名与标题区（read_title 不剥）失配，
+            #   _switch_chat 已选中判定失效 → 误点击 toggle 取消选中读空。
             # - 引号内空格（'" 强盗 " 集团' → '"强盗"集团'）
-            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9]+", "", name)
+            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9\u201c\u201d]+", "", name)
             name = re.sub(r"\"\s+", "\"", name)
             name = re.sub(r"\s+\"", "\"", name)
             name = name.strip()
@@ -1005,7 +1072,7 @@ class VisualBackend:
             # UI 检测：标题区显示目标会话 = 已选中（后台静默截图，不置前）
             try:
                 title = self.read_title(foreground=False)
-                if title and parse_title(title)[0] == chat:
+                if title and normalize_chat_name(parse_title(title)[0]) == normalize_chat_name(chat):
                     self._current_chat = chat
                     return True
             except Exception:
@@ -1030,73 +1097,6 @@ class VisualBackend:
         except Exception as e:
             logger.warning(f"[切换] 点击会话失败: {e}")
             return False
-
-    def _detect_self_avatar_ys(self, region_img: Image.Image) -> list[int]:
-        """在消息区检测小漓头像的 y 坐标（多尺度模板匹配），返回头像中心 y 列表。
-
-        头像在消息区右侧（自己消息气泡右边）。多尺度匹配覆盖头像缩放差异；
-        未配置头像 / 匹配失败返回空列表 → 调用方降级 x 坐标中线判 sender。
-        """
-        if self._avatar_template is None:
-            return []
-        try:
-            import cv2
-            import numpy as np
-        except ImportError:
-            return []
-        region = np.array(region_img.convert("RGB"))
-        template = np.array(self._avatar_template)
-        th, tw = template.shape[:2]
-        rh = region.shape[0]
-        if th <= 0 or tw <= 0:
-            return []
-        base_h = max(40, rh // 18)  # 头像高度标定：真机实测 ≈ 消息区 1/17.5（crop2x 130px/2270px，旧 1/12 偏大导致匹配脱靶）
-        ys = []
-        for scale in (0.7, 0.85, 1.0, 1.15, 1.3):
-            target_h = int(base_h * scale)
-            target_w = int(tw * target_h / th)
-            if target_w <= 0 or target_h <= 0 or target_w > region.shape[1] or target_h > rh:
-                continue
-            resized = cv2.resize(template, (target_w, target_h))
-            result = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
-            loc = np.where(result >= 0.6)
-            for pt in zip(*loc[::-1]):
-                ys.append(int(pt[1]) + target_h // 2)
-        return ys
-
-    def _detect_self_avatar_boxes(self, region_img: Image.Image) -> list[tuple[int, int, int, int]]:
-        """检测自己头像的矩形（含 x），返回 [(x, y, w, h)]（region 同坐标系）。
-
-        与 _detect_self_avatar_ys 同源（多尺度模板匹配），但保留 x/宽高——
-        用于排除头像区域内 OCR 文字（头像图片上的字，如「蓝色大肥鱼」）。
-        未配置头像/匹配失败返回空列表。
-        """
-        if self._avatar_template is None:
-            return []
-        try:
-            import cv2
-            import numpy as np
-        except ImportError:
-            return []
-        region = np.array(region_img.convert("RGB"))
-        template = np.array(self._avatar_template)
-        th, tw = template.shape[:2]
-        rh = region.shape[0]
-        if th <= 0 or tw <= 0:
-            return []
-        base_h = max(40, rh // 18)
-        boxes = []
-        for scale in (0.7, 0.85, 1.0, 1.15, 1.3):
-            target_h = int(base_h * scale)
-            target_w = int(tw * target_h / th)
-            if target_w <= 0 or target_h <= 0 or target_w > region.shape[1] or target_h > rh:
-                continue
-            resized = cv2.resize(template, (target_w, target_h))
-            result = cv2.matchTemplate(region, resized, cv2.TM_CCOEFF_NORMED)
-            loc = np.where(result >= 0.6)
-            for pt in zip(*loc[::-1]):
-                boxes.append((int(pt[0]), int(pt[1]), target_w, target_h))
-        return boxes
 
     def get_messages(self, chat: str, limit: int | None = None) -> list[WeChatMessage]:
         """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
@@ -1166,11 +1166,19 @@ class VisualBackend:
                     it["_bubble"] = (t, b)
                     it["_bubble_self"] = is_self
                     break
-        # 头像文字排除：自己头像（模板匹配）+ 对方头像（气泡左边缘反推）。
+        # 头像文字排除：自己头像（右侧几何窄带）+ 对方头像（气泡左边缘反推）。
         # 头像图片上的文字（如「蓝色大肥鱼」）不应成为消息内容——头像在
-        # 气泡外侧：自己头像在右侧（模板匹配），对方头像在左侧（气泡框
+        # 气泡外侧：自己头像在右侧（x/w≥0.84 窄带），对方头像在左侧（气泡框
         # left 更左边那一列）。
-        self_avatar_boxes = self._detect_self_avatar_boxes(region)
+        right_tops_1x = detect_avatar_tops(region_1x, colors.get("bg"), "right")
+        avatar_h_1x = max(40, region_1x.height // 18)
+        avatar_x_2x = int(region_1x.width * 0.84) * 2
+        avatar_w_2x = region.width - avatar_x_2x
+        avatar_h_2x = avatar_h_1x * 2
+        self_avatar_boxes = [
+            (avatar_x_2x, top * 2, avatar_w_2x, avatar_h_2x)  # (x, y, w, h)
+            for top in right_tops_1x
+        ]
         # 对方头像只在消息区左侧（对方消息/头像在左）：只取 left<中线 的
         # other 气泡框。对方气泡色接近背景时 find_bubble_boxes 会把右侧
         # 背景误连成 other 框（真机实测 left=1220 > 中线 747）——若不过滤，
@@ -1191,8 +1199,8 @@ class VisualBackend:
                     and cx < other_avatar_x_max:
                 it["_in_avatar"] = True
         midline_x = region.width // 2  # 消息区中线：右侧=自己发的
-        # 头像锚定：检测小漓头像位置（自己消息气泡右侧），优先于 x 坐标
-        avatar_ys = self._detect_self_avatar_ys(region)
+        # 头像锚定：右侧头像中心 y（几何窄带），优先于 x 坐标
+        avatar_ys = [top * 2 + avatar_h_1x for top in right_tops_1x]  # 2x 头像中心 y
 
         def _is_self(first_x: int, first_y: int) -> bool:
             for ay in avatar_ys:
@@ -1459,10 +1467,9 @@ class VisualBackend:
         供上层先判断「窗口内是否只有文字」还是「有图/文件」，再决定
         sleep 10s 防话没说完 / OCR 读文字。
 
-        bot 消息判定：is_self 气泡 + 右对齐媒体矩形（右边缘 > 0.75×宽）。
-        实测锚点：bot 长文字气泡右边缘 614/747=0.82，对方大图右边缘
-        399/747=0.53——0.75 能干净切开（bot 图片/文件无绿色气泡，
-        只能靠右对齐 x 判据）。
+        bot 消息判定：头像几何（右侧窄带非背景块=bot 头像，左侧=对方头像）。
+        无需头像模板、无需绿气泡色、无需宽度阈值——头像大小/位置固定，
+        对方长文字/文件即使右边缘靠右也不会被误判为 bot。
 
         返回 dict：
         {
@@ -1475,48 +1482,61 @@ class VisualBackend:
         }
         """
         self._switch_chat(chat)
-        shot = self._refresh(force=True, foreground=foreground)
         empty = {"bot_bottom": None, "other_text": [], "other_media": [],
                  "has_text": False, "has_media": False, "width": 0, "height": 0}
-        if shot is None:
-            return empty
-        w, h = shot.size
-        region = shot.crop((
-            int(w * self._message_region[0]), int(h * self._message_region[1]),
-            int(w * self._message_region[2]), int(h * self._message_region[3]),
-        ))
-        rw, rh = region.size
-        colors = detect_bubble_colors(region)
-        bubbles = find_bubble_boxes(region, colors)   # [(t,b,l,r,is_self)]
-        media = find_media_boxes(region, colors)       # [(t,b,l,r)]
-        # bot 消息判定（三路并集）：
-        # 1. is_self 绿色气泡（bot 文字消息）
-        # 2. 右对齐气泡（bot 发的图片/文件卡片无绿色气泡，被判 other 但位置靠右）
-        # 3. 右对齐媒体矩形（bot 发的图片）
-        # 实测锚点：bot 文件卡片右边缘 622/747=0.83，对方消息右边缘 ≤0.53——0.75 切开。
-        bot_bottoms = [b for (t, b, l, r, is_self) in bubbles if is_self]
-        for (t, b, l, r, is_self) in bubbles:
-            if not is_self and r > 0.75 * rw:
-                bot_bottoms.append(b)
-        for (t, b, l, r) in media:
-            if r > 0.75 * rw:
-                bot_bottoms.append(b)
-        bot_bottom = max(bot_bottoms) if bot_bottoms else None
-        # 窗口内对方消息（y 在 bot 回复之后；无 bot 回复则整段都是对方消息）
-        # 排除右对齐气泡（bot 文件卡片被判 other 但靠右，不属于对方）
-        other_text = [(t, b, l, r) for (t, b, l, r, is_self) in bubbles
-                      if not is_self and r <= 0.75 * rw
-                      and (bot_bottom is None or t >= bot_bottom)]
-        other_media = [(t, b, l, r) for (t, b, l, r) in media
-                       if r <= 0.75 * rw and (bot_bottom is None or t >= bot_bottom)]
-        return {
-            "bot_bottom": bot_bottom,
-            "other_text": other_text,
-            "other_media": other_media,
-            "has_text": bool(other_text),
-            "has_media": bool(other_media),
-            "width": rw, "height": rh,
-        }
+        for attempt in range(2):
+            if attempt > 0:
+                # 第一次分析结果为空：可能 toggle 取消选中（_switch_chat 标题
+                # 检测在微信被遮挡时失败，误点击已选中会话），force 重切恢复选中
+                self._switch_chat(chat, force=True)
+            shot = self._refresh(force=True, foreground=foreground)
+            if shot is None:
+                continue
+            w, h = shot.size
+            region = shot.crop((
+                int(w * self._message_region[0]), int(h * self._message_region[1]),
+                int(w * self._message_region[2]), int(h * self._message_region[3]),
+            ))
+            rw, rh = region.size
+            colors = detect_bubble_colors(region)
+            bubbles = find_bubble_boxes(region, colors)   # [(t,b,l,r,is_self)]
+            media = find_media_boxes(region, colors)       # [(t,b,l,r)]
+            # bot 消息判定：头像几何。右侧窄带非背景块 = bot 头像，左侧 = 对方头像。
+            # 头像大小/位置固定，无需模板、无需颜色、无需宽度阈值。真机实测：
+            # bot 文件 r/w=0.83、对方长文字 r/w=0.80——宽度阈值切不开，头像一右一左分离。
+            bot_tops = detect_avatar_tops(region, colors.get("bg"), "right")
+            other_tops = detect_avatar_tops(region, colors.get("bg"), "left")
+
+            def _aligned(t, tops, tol=40):
+                # tol=40：私聊头像与气泡顶部对齐（差 0），群聊对方消息头像上方
+                # 隔着发送者名字（真机实测差 ~37px），tol=12 私聊标定覆盖不了，
+                # 放宽到 40 覆盖名字行偏移且不跨消息误对齐（消息间距 ≥98px）。
+                return any(abs(t - top) <= tol for top in tops)
+
+            bot_boxes = [(t, b, l, r) for (t, b, l, r, _is_self) in bubbles
+                         if _aligned(t, bot_tops)]
+            bot_boxes += [(t, b, l, r) for (t, b, l, r) in media
+                          if _aligned(t, bot_tops)]
+            bot_bottom = max((b for (_, b, _, _) in bot_boxes), default=None)
+            # 窗口内对方消息：顶部对齐左侧头像，且在 bot 最后回复之后
+            other_text = [(t, b, l, r) for (t, b, l, r, _is_self) in bubbles
+                          if _aligned(t, other_tops)
+                          and (bot_bottom is None or t >= bot_bottom)]
+            other_media = [(t, b, l, r) for (t, b, l, r) in media
+                           if _aligned(t, other_tops)
+                           and (bot_bottom is None or t >= bot_bottom)]
+            # 窗口完全空（无气泡/媒体/头像）→ toggle 取消选中，重切兜底
+            if not bubbles and not media and not bot_tops and not other_tops:
+                continue
+            return {
+                "bot_bottom": bot_bottom,
+                "other_text": other_text,
+                "other_media": other_media,
+                "has_text": bool(other_text),
+                "has_media": bool(other_media),
+                "width": rw, "height": rh,
+            }
+        return empty
 
     def send_file(self, chat: str, file_path: str) -> bool:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""
