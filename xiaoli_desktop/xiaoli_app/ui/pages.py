@@ -5,7 +5,8 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal, QSize
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
@@ -52,13 +53,21 @@ class HomePage(QWidget):
         lay.setContentsMargins(32, 28, 32, 20)
         lay.setSpacing(14)
 
-        # 标题
+        # 标题行：品牌 logo + 标题 + 副标题并排
+        title_row = QHBoxLayout()
+        title_row.setSpacing(12)
+        from . import render_logo
+        self.lbl_logo = QLabel()
+        self.lbl_logo.setPixmap(render_logo(44))
+        title_row.addWidget(self.lbl_logo)
         self.lbl_title = QLabel("小漓")
         self.lbl_title.setObjectName("title")
+        title_row.addWidget(self.lbl_title)
+        title_row.addStretch(1)
         self.lbl_subtitle = QLabel("你的微信 AI 助手 · 聊天 / 图片识别 / 任务桥")
         self.lbl_subtitle.setObjectName("subtitle")
-        lay.addWidget(self.lbl_title)
-        lay.addWidget(self.lbl_subtitle)
+        title_row.addWidget(self.lbl_subtitle, 0, Qt.AlignmentFlag.AlignBottom)
+        lay.addLayout(title_row)
 
         # 状态 + 主按钮
         self.lbl_state = QLabel("尚未初始化")
@@ -1118,18 +1127,33 @@ class SettingsPage(QWidget):
 
         # 界面主题 + 壁纸
         g_theme = QGroupBox("界面主题与壁纸")
-        tfl = QFormLayout(g_theme)
-        self.cb_theme = QComboBox()
-        from . import THEMES
-        # 按分组插入（浅色 → 深色 → 氛围），分组标题为禁用项不可选
-        for g in ("浅色", "深色"):
-            items = [(k, t) for k, t in THEMES.items() if t.get("group") == g]
-            if not items:
-                continue
-            self.cb_theme.addItem(g)
-            self.cb_theme.model().item(self.cb_theme.count() - 1).setEnabled(False)
-            for key, t in items:
-                self.cb_theme.addItem(t["label"], key)
+        tv = QVBoxLayout(g_theme)
+        tv.setSpacing(8)
+        tip_theme = QLabel("点击缩略图切换主题（即时生效并保存）")
+        tip_theme.setObjectName("tip")
+        tv.addWidget(tip_theme)
+        from . import THEMES, render_theme_thumb
+        self.theme_grid = QListWidget()
+        self.theme_grid.setObjectName("themeGrid")
+        self.theme_grid.setViewMode(QListWidget.ViewMode.IconMode)
+        self.theme_grid.setIconSize(QSize(120, 76))
+        self.theme_grid.setGridSize(QSize(150, 110))
+        self.theme_grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.theme_grid.setMovement(QListWidget.Movement.Static)
+        self.theme_grid.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.theme_grid.setFlow(QListWidget.Flow.LeftToRight)
+        self.theme_grid.setWrapping(True)
+        self.theme_grid.setFixedHeight(236)
+        self._theme_keys = []
+        for key, t in THEMES.items():
+            item = QListWidgetItem(QIcon(render_theme_thumb(key)), t["label"])
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setSizeHint(QSize(120, 92))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            self.theme_grid.addItem(item)
+            self._theme_keys.append(key)
+        self.theme_grid.currentItemChanged.connect(self._on_theme_picked)
+        tv.addWidget(self.theme_grid)
         self.ed_wallpaper = QLineEdit()
         self.ed_wallpaper.setReadOnly(True)
         row_wp = QHBoxLayout()
@@ -1138,13 +1162,12 @@ class SettingsPage(QWidget):
         btn_wp.clicked.connect(self._pick_wallpaper)
         btn_wp_clear = QPushButton("清除壁纸")
         btn_wp_clear.clicked.connect(self._clear_wallpaper)
+        btn_wp_apply = QPushButton("应用壁纸")
+        btn_wp_apply.clicked.connect(self._apply_wallpaper)
         row_wp.addWidget(btn_wp)
         row_wp.addWidget(btn_wp_clear)
-        self.btn_theme_apply = QPushButton("应用主题")
-        self.btn_theme_apply.clicked.connect(self._apply_theme)
-        tfl.addRow("主题", self.cb_theme)
-        tfl.addRow("壁纸", row_wp)
-        tfl.addRow(self.btn_theme_apply)
+        row_wp.addWidget(btn_wp_apply)
+        tv.addLayout(row_wp)
         lay.addWidget(g_theme)
 
         # 记忆
@@ -1258,8 +1281,10 @@ class SettingsPage(QWidget):
         self.ed_files.setText(cfg.get("file_storage_path", ""))
         self.ed_tasks.setText(cfg.get("tasks_dir", ""))
         theme = cfg.get("theme", "blue")
-        ti = self.cb_theme.findData(theme)
-        self.cb_theme.setCurrentIndex(max(0, ti))
+        try:
+            self.theme_grid.setCurrentRow(self._theme_keys.index(theme))
+        except ValueError:
+            pass
         self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
         self._refresh_stems()
 
@@ -1273,18 +1298,34 @@ class SettingsPage(QWidget):
     def _clear_wallpaper(self):
         self.ed_wallpaper.clear()
 
-    def _apply_theme(self):
-        theme = self.cb_theme.currentData() or "blue"
-        wp = self.ed_wallpaper.text().strip()
-        self.ctx.cfg["theme"] = theme
-        self.ctx.cfg["wallpaper_path"] = wp
-        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+    def _apply_theme_qss(self, theme, wp):
+        """应用 QSS + 同步粒子背景层（主题或壁纸变化后统一入口）。"""
         from . import build_qss
         from PySide6.QtWidgets import QApplication
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_qss(theme, wp))
-        QMessageBox.information(self, "已应用", "主题已应用并保存")
+        win = getattr(self.ctx, "win", None)
+        if win is not None and hasattr(win, "apply_backdrop"):
+            win.apply_backdrop(theme, wp)
+
+    def _on_theme_picked(self, current, previous):
+        """点击主题缩略图：即时应用并保存（不弹窗）。"""
+        if current is None:
+            return
+        key = current.data(Qt.ItemDataRole.UserRole)
+        if not key:
+            return
+        self.ctx.cfg["theme"] = key
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self._apply_theme_qss(key, self.ed_wallpaper.text().strip())
+
+    def _apply_wallpaper(self):
+        """应用壁纸：写入配置 + 重绘背景层（主题不变）。"""
+        wp = self.ed_wallpaper.text().strip()
+        self.ctx.cfg["wallpaper_path"] = wp
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), wp)
 
     def _view_memory(self):
         cfg = self.ctx.cfg or {}
