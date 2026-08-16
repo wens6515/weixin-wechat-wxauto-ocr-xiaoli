@@ -136,7 +136,7 @@ THEMES = {
 # QSS 不再承担背景生成。
 
 _QSS_TEMPLATE = Template("""
-* { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+* { font-family: "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
     font-size: $fs_base; }
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
@@ -450,11 +450,12 @@ def render_wallpaper_thumb(path: str, width=120, height=76):
     return render_theme_thumb("blue", width, height)
 
 
-# 字号三档：小/中/大（设置页 font_scale 选择；用户嫌字小可调大）
+# 字号三档：小/中/大（设置页 font_scale 选择；值必须带 px 单位——
+# Qt QSS 不解析裸数字字号，缺单位会导致字号调节整体失效）
 _FONT_SCALES = {
-    "small":  {"fs_base": 12, "fs_nav": 15, "fs_title": 24, "fs_sub": 12},
-    "medium": {"fs_base": 14, "fs_nav": 19, "fs_title": 30, "fs_sub": 14},
-    "large":  {"fs_base": 16, "fs_nav": 23, "fs_title": 36, "fs_sub": 16},
+    "small":  {"fs_base": "13px", "fs_nav": "17px", "fs_title": "28px", "fs_sub": "13px"},
+    "medium": {"fs_base": "15px", "fs_nav": "21px", "fs_title": "34px", "fs_sub": "15px"},
+    "large":  {"fs_base": "17px", "fs_nav": "26px", "fs_title": "42px", "fs_sub": "17px"},
 }
 
 
@@ -517,6 +518,29 @@ def app_base_dir():
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def load_app_font():
+    """加载内置思源黑体（Noto Sans SC，fonts/ 目录）到应用字体表。
+
+    用 QFontDatabase.addApplicationFont 从文件加载（不依赖系统字体注册，
+    DirectWrite 扫描用户字体目录有滞后；也保证打包后随包可用）。
+    字体缺失时静默回退系统字体（微软雅黑）。返回是否加载成功。
+    """
+    from PySide6.QtGui import QFontDatabase
+    base = app_base_dir()
+    for d in (os.path.join(base, "fonts"), os.path.join(os.path.dirname(base), "fonts")):
+        if not os.path.isdir(d):
+            continue
+        added = False
+        for fname in ("NotoSansSC-Regular.otf", "NotoSansSC-Bold.otf"):
+            fp = os.path.join(d, fname)
+            if os.path.isfile(fp):
+                QFontDatabase.addApplicationFont(fp)
+                added = True
+        if added:
+            return True
+    return False
 
 
 class AppContext:

@@ -188,6 +188,9 @@ def main():
     _font = app.font()
     _font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(_font)
+    # 加载内置思源黑体（fonts/ 目录，缺失回退系统字体）——必须在 setStyleSheet 前
+    from xiaoli_app.ui import load_app_font
+    load_app_font()
     app.setStyleSheet(APP_QSS)
 
     ctx = AppContext()
