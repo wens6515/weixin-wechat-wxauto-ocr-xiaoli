@@ -467,6 +467,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
         "theme": "blue",  # 界面主题（THEMES 键：blue 兼容默认 + 11 套精选风格，见 ui/__init__.py）
+        "card_opacity": 0.88,  # 卡片不透明度 0.5~1.0（设置页滑块调节毛玻璃强度）
         "wallpaper_path": "",  # 背景壁纸图路径（空 = 主题纯色背景）
     }.items():
         if k not in cfg:
