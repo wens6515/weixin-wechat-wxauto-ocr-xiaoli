@@ -24,11 +24,6 @@ _BOT_LOG_PATH = os.path.join(
     "bot.log")
 
 
-def _key_display(key):
-    """显示用 key：遮蔽中间。"""
-    return config_store.mask_key(key)
-
-
 # =====================================================================
 # 首页：状态机主按钮 + 环境检查 + 一键安装 + 首轮提示词
 # =====================================================================
@@ -91,7 +86,7 @@ class HomePage(QWidget):
                            ("first_prompt", "首轮提示词")):
             r = QHBoxLayout()
             tag = QLabel("—")
-            tag.setStyleSheet("font-weight:600;")
+            tag.setObjectName("envTag")
             det = QLabel("检测中…")
             det.setWordWrap(True)
             r.addWidget(QLabel(title))
@@ -239,7 +234,7 @@ class HomePage(QWidget):
         self._env_report = None
         for tag, det in self.env_rows.values():
             tag.setText("…")
-            tag.setStyleSheet("font-weight:600; color:#9CA3AF;")
+            tag.setObjectName("envPending")
             det.setText("检测中…")
         threading.Thread(target=self._check_env_worker, daemon=True).start()
 
@@ -263,7 +258,7 @@ class HomePage(QWidget):
             item = report.get(key, {"ok": False, "detail": "无数据"})
             ok = bool(item.get("ok"))
             tag.setText("✓" if ok else "✗")
-            tag.setStyleSheet("font-weight:600; color:#10B981;" if ok else "font-weight:600; color:#EF4444;")
+            tag.setObjectName("envOk" if ok else "envBad")
             det.setText(str(item.get("detail", "")))
         tianshu_ok = bool(report.get("tianshu", {}).get("ok"))
         self.btn_install.setVisible(not tianshu_ok)
@@ -791,7 +786,7 @@ class ModelsPage(QWidget):
         mform.addRow("图片模型（识图）", row_v)
         tip_model = QLabel("提示：DeepSeek 不支持图片识别，图片模型请选智谱/通义等支持视觉的模型。")
         tip_model.setWordWrap(True)
-        tip_model.setStyleSheet("color:#9CA3AF; font-size:12px;")
+        tip_model.setObjectName("tip")
         mform.addRow(tip_model)
         self.btn_model_save = QPushButton("保存模型配置")
         self.btn_model_save.clicked.connect(self._save_model_config)
@@ -1126,8 +1121,15 @@ class SettingsPage(QWidget):
         tfl = QFormLayout(g_theme)
         self.cb_theme = QComboBox()
         from . import THEMES
-        for key, t in THEMES.items():
-            self.cb_theme.addItem(t["label"], key)
+        # 按分组插入（浅色 → 深色 → 氛围），分组标题为禁用项不可选
+        for g in ("浅色", "深色"):
+            items = [(k, t) for k, t in THEMES.items() if t.get("group") == g]
+            if not items:
+                continue
+            self.cb_theme.addItem(g)
+            self.cb_theme.model().item(self.cb_theme.count() - 1).setEnabled(False)
+            for key, t in items:
+                self.cb_theme.addItem(t["label"], key)
         self.ed_wallpaper = QLineEdit()
         self.ed_wallpaper.setReadOnly(True)
         row_wp = QHBoxLayout()
@@ -1181,7 +1183,6 @@ class SettingsPage(QWidget):
         sl = QHBoxLayout(g_send)
         self.cb_send = QComboBox()
         self.cb_send.addItem("剪贴板粘贴（主用）", "clipboard")
-        self.cb_send.addItem("wxauto SendFiles（兜底）", "wxauto")
         self.btn_send_save = QPushButton("保存")
         self.btn_send_save.clicked.connect(self._save_send_method)
         sl.addWidget(self.cb_send)

@@ -466,8 +466,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "image_click_offset": [-200, -130],  # 图片点击偏移（用户实测校准 2026-08-04：真人点击测 [-199,-131] 取整；位置偏了再到设置页调）
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
-        "avatar_template": "",  # 小漓头像模板图路径（首次启动用户上传，用于消息区识别自己发的消息）
-        "theme": "blue",  # 界面主题（THEMES 键：blue/dark/emerald/sunset/rose）
+        "theme": "blue",  # 界面主题（THEMES 键：blue 兼容默认 + 11 套精选风格，见 ui/__init__.py）
         "wallpaper_path": "",  # 背景壁纸图路径（空 = 主题纯色背景）
     }.items():
         if k not in cfg:
