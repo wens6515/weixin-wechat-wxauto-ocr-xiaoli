@@ -30,15 +30,15 @@ _NAV_ITEMS = (
 
 
 # 导航项字体：必须显式 setFont——Qt 不把 QSS 的 ::item font-size 应用到
-# item 渲染（item 继承 view 字体），QSS 写 42px 实际无效（实测 small/large
+# item 渲染（item 继承 view 字体），QSS 写 px 实际无效（实测 small/large
 # 档位下导航文字高度随 base 字号 13px→17px 变化）。setPixelSize 固定物理像素。
-# 用户反馈「导航过大 + 角色卡截断成'角···'」：字号 42→38（-10%）且改
-# 垂直排布（图标上/文字下），宽度不再受「图标+三字」横排限制。
-_NAV_FONT = QFont("Noto Sans SC", 19)  # 38px ≈ 19pt(96dpi)，较 42px 减 10%
-_NAV_FONT.setPixelSize(38)
+# 用户反馈链：42px 截断「角色卡→角···」→ 改垂直排布+38px → 用户再反馈
+# 「文字下方被吞一点点，缩小 15-20%」→ 38→31（约 -18%），图标 43→40。
+_NAV_FONT = QFont("Noto Sans SC", 15)  # 31px ≈ 15.5pt(96dpi)
+_NAV_FONT.setPixelSize(31)
 _NAV_FONT.setWeight(QFont.Weight.DemiBold)
-# 导航图标渲染尺寸（较 48px 减 10%）
-_NAV_ICON_SIZE = 43
+# 导航图标渲染尺寸（43→40，随文字缩小保持比例）
+_NAV_ICON_SIZE = 40
 
 
 def _load_nav_icon(name, normal_color="#94A3B8", selected_color="#FFFFFF",
@@ -77,7 +77,7 @@ class NavItemDelegate(QStyledItemDelegate):
     排布，宽度只受图标与单字宽度约束，任何导航名都不会截断。
     """
 
-    def __init__(self, parent=None, icon_size=43):
+    def __init__(self, parent=None, icon_size=40):
         super().__init__(parent)
         self.icon_size = icon_size
         self.font = _NAV_FONT
@@ -239,7 +239,7 @@ class MainWindow(QMainWindow):
         self._layout_nav()
 
     def _layout_nav(self):
-        """左侧导航项从上到下排满：6 项均分导航高度（最小 96px 容纳垂直排布）。"""
+        """左侧导航项从上到下排满：6 项均分导航高度（最小 88px 容纳垂直排布）。"""
         if getattr(self, "_nav_layouting", False):
             return
         self._nav_layouting = True
@@ -248,8 +248,8 @@ class MainWindow(QMainWindow):
             if n <= 0:
                 return
             # 用 nav.height()（布局后稳定）而非 viewport 高度——viewport 随
-            # item 高度变化导致收敛漂移；最小 96px 容纳 43px 图标 + 38px 文字
-            per = max(96, (self.nav.height() - 28) // n)
+            # item 高度变化导致收敛漂移；最小 88px 容纳 40px 图标 + 31px 文字
+            per = max(88, (self.nav.height() - 28) // n)
             for i in range(n):
                 self.nav.item(i).setSizeHint(QSize(0, per))
         finally:
@@ -287,13 +287,28 @@ class MainWindow(QMainWindow):
         btn_min.setObjectName("winBtn")
         btn_min.setToolTip("最小化")
         btn_min.clicked.connect(self.showMinimized)
+        self.btn_max = QPushButton("□")
+        self.btn_max.setObjectName("winBtn")
+        self.btn_max.setToolTip("最大化")
+        self.btn_max.clicked.connect(self._toggle_max)
         btn_close = QPushButton("✕")
         btn_close.setObjectName("winBtn")
         btn_close.setToolTip("关闭")
         btn_close.clicked.connect(self.close)  # 走 closeEvent 弹窗逻辑
         h.addWidget(btn_min)
+        h.addWidget(self.btn_max)
         h.addWidget(btn_close)
         shell_lay.addWidget(tb)
+        # 窗口最大化/还原时切换按钮图标
+        def _sync_max_btn(*_a):
+            if self.isMaximized():
+                self.btn_max.setText("❐")  # 还原
+                self.btn_max.setToolTip("还原")
+            else:
+                self.btn_max.setText("□")  # 最大化
+                self.btn_max.setToolTip("最大化")
+        self.btn_max.clicked.connect(_sync_max_btn)
+        self._sync_max_btn = _sync_max_btn
         # 拖拽移动：标题栏整条响应
         for w in (tb, logo, title, sub):
             w.mousePressEvent = lambda e: self._tb_press(e)
@@ -311,10 +326,24 @@ class MainWindow(QMainWindow):
             self.move(e.globalPosition().toPoint() - self._drag_offset)
 
     def _tb_dblclick(self, e):
+        self._toggle_max()
+
+    def _toggle_max(self):
         if self.isMaximized():
             self.showNormal()
         else:
             self.showMaximized()
+        sync = getattr(self, "_sync_max_btn", None)
+        if sync is not None:
+            sync()
+
+    def changeEvent(self, event):
+        """最大化/还原/最小化时同步标题栏按钮图标。"""
+        super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange:
+            sync = getattr(self, "_sync_max_btn", None)
+            if sync is not None:
+                sync()
 
     def _sync_shell_geometry(self):
         """shell 由 QMainWindow 布局管理（充满窗口），阴影空间依赖窗口透明边缘。

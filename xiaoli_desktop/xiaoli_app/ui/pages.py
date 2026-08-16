@@ -135,8 +135,10 @@ class HomePage(QWidget):
             self.env_rows[key] = (dot, det)
         ev.addLayout(env_cards)
         self.btn_check = QPushButton("重新检查环境")
+        self.btn_check.setProperty("compact", "true")  # 缩小：用户反馈与上方卡片靠太近
         self.btn_check.clicked.connect(self._check_env)
         self.btn_install = QPushButton("一键安装天枢")
+        self.btn_install.setProperty("compact", "true")
         self.btn_install.setVisible(False)
         self.btn_install.clicked.connect(self._install_tianshu)
         ev.addLayout(self._row(self.btn_check, self.btn_install))
@@ -545,8 +547,21 @@ class CardsPage(QWidget):
         form.addRow("视觉温度", self.sp_vtemp)
         form.addRow("视觉 max_tokens", self.sp_vmax)
         form.addRow("历史条数", self.sp_history)
+        # 用户反馈：聊天/视觉/分类的提供商+模型 6 行冗余（模型页已统一配置），
+        # 隐藏腾出空间给人格设定。控件保留（_collect/_on_select 仍读写，
+        # 不破坏角色卡数据），仅从表单隐藏——QFormLayout.setRowVisible。
+        for _row in range(4, 10):  # 聊天提供商..分类模型 = 第 4~9 行
+            form.setRowVisible(_row, False)
+        # 人格设定撑大：隐藏 6 行后占主导空间
+        self.ed_prompt.setMinimumHeight(220)
+        from PySide6.QtWidgets import QSizePolicy
+        self.ed_prompt.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                     QSizePolicy.Policy.Expanding)
         self.btn_save = QPushButton("保存")
         self.btn_activate = QPushButton("激活此卡")
+        # 缩小：用户反馈两按钮下边界被吞
+        self.btn_save.setProperty("compact", "true")
+        self.btn_activate.setProperty("compact", "true")
         self.btn_save.clicked.connect(self._save_card)
         self.btn_activate.clicked.connect(self._activate_card)
         form.addRow(self.btn_save, self.btn_activate)
