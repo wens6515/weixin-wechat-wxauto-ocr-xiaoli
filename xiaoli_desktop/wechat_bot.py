@@ -10,7 +10,6 @@ import requests
 import base64
 import pyautogui
 import tempfile
-from collections import deque
 from wx_backend import create_backend, BackendUnavailableError
 from wx_backend.models import MessageType
 from wx_backend.visual_backend import (
@@ -257,8 +256,6 @@ class WeChatBot:
         self._file_snapshot = self._load_file_snapshot()
         # 图片消息点击偏移校准（竖图点击偏位时手动校正，格式 [dx, dy]，存 config.json）
         self.image_click_offset = cfg.get("image_click_offset", [0, 0])
-        # 头像模板（首次启动用户上传，用于消息区识别自己发的消息）
-        self.avatar_template = cfg.get("avatar_template", "")
 
         self._model_lock = threading.RLock()
 
@@ -268,14 +265,8 @@ class WeChatBot:
         self._memory_dirty = False
         self._last_memory_save = 0.0
         self.last_reply_time = 0
-        self.recent_msg_ids = set()
         self.wx = None
         self._connect_wx()
-
-        # 持久化去重：用消息 id（每一条消息唯一）
-        self.processed_ids_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "processed_ids.json")
-        self.processed_ids = set()
-        self._load_processed_ids()
 
     def set_chat_temperature(self, value):
         with self._model_lock:
@@ -288,47 +279,6 @@ class WeChatBot:
     def set_vision_temperature(self, value):
         with self._model_lock:
             self.vision_temp = float(value)
-
-    def _load_processed_ids(self):
-        if os.path.exists(self.processed_ids_file):
-            try:
-                with open(self.processed_ids_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.processed_ids = set(data) if isinstance(data, list) else set()
-            except Exception as e:
-                logger.error(f"加载去重记录失败: {e}")
-                self.processed_ids = set()
-
-    def _save_processed_id(self, msg_id):
-        self.processed_ids.add(msg_id)
-        # 限界：持久化去重集合只增不减会无限膨胀（每次写盘全量 dump 变慢）。
-        # 超过上限时丢弃约一半（无序集合，丢哪些不重要——红圈驱动的监听
-        # 只看未读消息，已读历史消息本就不会被处理，去重不依赖历史全集）。
-        if len(self.processed_ids) > 10000:
-            self.processed_ids = set(list(self.processed_ids)[len(self.processed_ids) // 2:])
-        try:
-            with open(self.processed_ids_file, "w", encoding="utf-8") as f:
-                json.dump(list(self.processed_ids), f, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"保存去重记录失败: {e}")
-
-    # recent_msg_ids 上限：内存去重集合只增不减会无限增长。
-    # deque 记录插入顺序，超限时丢弃最旧的一半（保持 set 判重语义）。
-    _RECENT_MAX = 5000
-
-    def _remember_recent(self, key):
-        """登记最近处理过的消息 key（set + 顺序队列，超限丢最旧）。"""
-        if key in self.recent_msg_ids:
-            return
-        self.recent_msg_ids.add(key)
-        order = getattr(self, "_recent_order", None)
-        if order is None:
-            order = self._recent_order = deque()
-        order.append(key)
-        if len(order) > self._RECENT_MAX:
-            for _ in range(self._RECENT_MAX // 2):
-                old = order.popleft()
-                self.recent_msg_ids.discard(old)
 
     def _load_memory(self):
         if os.path.exists(self.memory_file):
@@ -359,7 +309,7 @@ class WeChatBot:
             if self._stop_event is not None and self._stop_event.is_set():
                 raise RuntimeError("微信连接已取消")
             try:
-                self.wx = create_backend("auto", avatar_template=getattr(self, "avatar_template", ""))
+                self.wx = create_backend("auto")
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:
@@ -509,39 +459,20 @@ class WeChatBot:
     def _process_image(self, chat_name, sender, msg_obj):
         """点击图片消息打开预览 → 截图 → 关预览 → 送视觉模型
 
-        兼容两种消息形态：
-        - wxauto 后端：wxauto4 消息对象（有 control/BoundingRectangle/roll_into_view）
-        - visual 后端：统一 WeChatMessage（无控件坐标）→ 整窗截图降级
+        visual 后端：统一 WeChatMessage（无控件坐标）→ 媒体矩形检测定位 / 整窗截图降级
         """
         msg_class = type(msg_obj).__name__
         logger.info(f"📷 收到 {sender} 的图片，开始识别...")
         logger.debug(f"[处理] sender={sender} chat={chat_name} msg_class={msg_class}")
         tmp_path = None
         try:
-            # 1. 获取图片屏幕坐标：wxauto 用控件矩形，visual 用媒体矩形检测
-            if hasattr(msg_obj, 'roll_into_view') and hasattr(msg_obj, 'control'):
-                # wxauto 路径：确保消息可见 + 取控件矩形
-                msg_obj.roll_into_view()
-                time.sleep(0.3)
-                control = getattr(msg_obj, 'control', None)
-                logger.debug(f"[处理] control 存在: {control is not None}, "
-                             f"类型: {type(control).__name__ if control else 'N/A'}")
-                if not control or not hasattr(control, 'BoundingRectangle'):
-                    logger.error("[处理] 无法定位图片消息控件")
-                    self._send_text("图片处理失败：无法定位消息", chat_name)
-                    return False
-                rect = control.BoundingRectangle
-                off = self.image_click_offset or [0, 0]
-                click_x = rect.left + rect.width() // 2 + int(off[0])
-                click_y = rect.top + rect.height() // 2 + int(off[1])
-            else:
-                # visual 路径：媒体矩形检测定位图片（替代整屏截图降级）。
-                # 检测不到时才回退整屏降级（空消息区/纯文字场景）。
-                centers = getattr(self.wx, 'media_screen_boxes', lambda: [])()
-                if not centers:
-                    logger.info("[处理] 视觉后端未检测到媒体矩形，整窗截图降级")
-                    return self._process_image_visual_fallback(chat_name, sender)
-                click_x, click_y = centers[-1]  # 最新一张图片
+            # 获取图片屏幕坐标：媒体矩形检测定位图片（替代整屏截图降级）。
+            # 检测不到时才回退整屏降级（空消息区/纯文字场景）。
+            centers = getattr(self.wx, 'media_screen_boxes', lambda: [])()
+            if not centers:
+                logger.info("[处理] 视觉后端未检测到媒体矩形，整窗截图降级")
+                return self._process_image_visual_fallback(chat_name, sender)
+            click_x, click_y = centers[-1]  # 最新一张图片
             logger.debug(f"[处理] 点击图片: ({click_x}, {click_y})")
             pyautogui.click(click_x, click_y)
             time.sleep(1.0)
@@ -608,10 +539,14 @@ class WeChatBot:
                     logger.warning(f"[处理] 清理临时文件失败: {e}")
 
     def _capture_latest_image(self, chat_name):
-        """点击最新图片 → 预览截图 → 保存临时文件 → 返回路径（不删，调用方负责）。
+        """点击最新图片 → Ctrl+C 复制 → 读剪贴板文件 → 返回原图路径。
 
-        复用 _process_image 的定位+点击+截图逻辑，但不调视觉模型、不回复——
-        供图片+文字的任务投递（截图作附件）与描述提取共用。
+        微信预览窗按 Ctrl+C 会把图片落盘成原图 jpg，并把文件路径放进剪贴板
+        （CF_HDROP）；PIL.ImageGrab.grabclipboard() 直接返回该文件路径列表。
+        拿第一个文件即原图（原始分辨率），替代旧的预览窗截屏——截屏受窗口
+        尺寸/DPI 缩放限制、且预览窗被遮挡会截到遮挡物。
+
+        微信 RWTemp 临时文件生命周期不受控，故复制一份到自己的临时文件再返回。
         """
         tmp_path = None
         try:
@@ -619,33 +554,42 @@ class WeChatBot:
             if not centers:
                 return None
             click_x, click_y = centers[-1]
-            import pyautogui
             pyautogui.click(click_x, click_y)
-            time.sleep(1.0)
-            preview_hwnd = find_window_by_title("图片和视频")
-            if preview_hwnd:
-                ensure_window_visible(preview_hwnd)
-            preview_rect = window_rect(preview_hwnd) if preview_hwnd else None
-            if preview_rect:
-                l, t, w, h = preview_rect
-                screenshot = pyautogui.screenshot(region=(l, t, w, h))
-                pyautogui.press('esc')
-                time.sleep(0.3)
-            else:
-                wechat_hwnd = find_window_by_title("微信")
-                if wechat_hwnd:
-                    ensure_window_visible(wechat_hwnd)
-                wr = window_rect(wechat_hwnd) if wechat_hwnd else None
-                if not wr:
+            time.sleep(1.0)  # 等预览窗打开
+            # Ctrl+C 复制：微信把原图落盘 + 文件路径进剪贴板
+            pyautogui.hotkey('ctrl', 'c')
+            time.sleep(0.5)
+            # 读剪贴板（文件路径列表，或兜底的位图 Image）
+            from PIL import ImageGrab
+            grabbed = ImageGrab.grabclipboard()
+            # 先关预览窗再处理剪贴板内容（读剪贴板不依赖预览窗）
+            pyautogui.press('esc')
+            time.sleep(0.3)
+            if grabbed is None:
+                logger.warning("[图片复制] 剪贴板为空（可能未复制成功）")
+                return None
+            if isinstance(grabbed, (list, tuple)):
+                files = [x for x in grabbed if isinstance(x, str)]
+                if not files:
+                    logger.warning("[图片复制] 剪贴板无文件路径")
                     return None
-                l, t, w, h = wr
-                screenshot = pyautogui.screenshot(region=(l, t, w, h))
+                src = files[0]
+                if not os.path.isfile(src):
+                    logger.warning(f"[图片复制] 剪贴板路径不存在: {src}")
+                    return None
+                # 复制到自己的临时文件（微信 RWTemp 临时文件生命周期不受控）
+                import shutil
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
+                    tmp_path = tmpfile.name
+                shutil.copyfile(src, tmp_path)
+                return tmp_path
+            # 兜底：剪贴板直接是位图（非文件路径），走压缩保存
             with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
                 tmp_path = tmpfile.name
-            self._save_screenshot_compressed(screenshot, tmp_path)
+            self._save_screenshot_compressed(grabbed, tmp_path)
             return tmp_path
         except Exception as e:
-            logger.error(f"[图片截图] 异常: {e}")
+            logger.error(f"[图片复制] 异常: {e}")
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.unlink(tmp_path)
@@ -872,26 +816,6 @@ class WeChatBot:
                                         sender_name=sender, is_group=is_group)
         self._send_text(final_reply, chat_name)
         return True
-
-    def _find_latest_file(self, directory):
-        """递归查找目录下最近修改的文件（显示名定位失败的兜底扫描）"""
-        latest_path = None
-        latest_mtime = 0
-        try:
-            for root, dirs, files in os.walk(directory):
-                for fname in files:
-                    full_path = os.path.join(root, fname)
-                    try:
-                        mtime = os.path.getmtime(full_path)
-                        if mtime > latest_mtime:
-                            latest_mtime = mtime
-                            latest_path = full_path
-                    except OSError:
-                        continue
-        except Exception as e:
-            logger.error(f"[文件] 遍历目录失败: {e}")
-            return None
-        return latest_path
 
     def _load_file_snapshot(self):
         """加载目录快照（{path: [size, mtime]}）；无文件/坏值返回 {}。"""
@@ -1316,12 +1240,12 @@ class WeChatBot:
                 win = analyze(chat_name) if analyze else None
                 bot_bottom = win.get("bot_bottom") if win else None
                 if win is not None:
-                    if not (win.get("has_text") or win.get("has_media")):
+                    if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                         continue
                     if win.get("has_media"):
                         time.sleep(10)  # 防对方话没说完
                         win = analyze(chat_name)
-                        if not (win.get("has_text") or win.get("has_media")):
+                        if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                             continue
                         bot_bottom = win.get("bot_bottom")
                 msgs = self.wx.get_messages(chat_name)

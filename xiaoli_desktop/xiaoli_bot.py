@@ -30,7 +30,7 @@ TASK_DEFAULTS = {
     "tianshu_window_title": "",            # 空 = 启动时交互选择
     "tianshu_trigger_command": "开始处理",
     "tianshu_poll_interval": 5,
-    "file_send_method": "clipboard",   # 成果文件发送方式: clipboard(剪贴板粘贴,主用) | wxauto(SendFiles,兜底)
+    "file_send_method": "clipboard",   # 成果文件发送方式（UI 保存；业务恒走剪贴板，wxauto 后端已移除）
     "listen_hold_seconds": 2,   # 任务完成后延迟恢复消息监听的秒数（缓冲文件发送，防止切窗打断）
 }
 
@@ -401,15 +401,21 @@ def poll_outbox(tasks_dir, deliver, sent_dir=None):
             except Exception:
                 pass
         archived_dir = os.path.join(sent_dir, name)
+        # 幂等守卫：sent 下已有同名目录 = 该任务之前已回传归档。顶层残留的
+        # task_dir 是上次 move 失败留下的残骸（deliver 已执行过），直接清理
+        # 跳过，绝不二次投递（真机根因：15:03 同一任务重复回传两次）。
+        if os.path.isdir(archived_dir):
+            try:
+                shutil.rmtree(task_dir)
+            except Exception:
+                pass
+            logger.warning(f"[回传] 任务 {name} 已在 sent 归档，跳过残留顶层目录")
+            continue
         try:
-            # 先归档（移入 sent），再发送：发送时文件路径稳定在 sent\<任务id>\ 下，
-            # 避免并发进程（如天枢侧移动/归档）在发送期间改动文件位置导致「文件路径不存在」
-            if os.path.isdir(task_dir):
-                try:
-                    shutil.move(task_dir, archived_dir)
-                except Exception as move_e:
-                    if not os.path.isdir(archived_dir):
-                        raise move_e
+            # 先归档（移入 sent）再发送：move 是幂等标记，只有 move 成功
+            # （任务真正离开顶层）才 deliver。move 失败必须抛异常回滚重试，
+            # 不得吞异常继续发送（旧逻辑吞异常导致任务残留顶层、重复投递）。
+            shutil.move(task_dir, archived_dir)
             deliver(archived_dir, task_info, result)
             handled.append(name)
             logger.info(f"[回传] 任务 {name} 已回传并归档")
@@ -568,7 +574,6 @@ class AgentBot(WeChatBot):
         self.tianshu_poll_interval = cfg.get("tianshu_poll_interval", 5)
         self._last_poll_time = 0
         self._sending_lock = False  # 成果回传期间置 True，暂停消息轮询防发错联系人
-        self.file_send_method = cfg.get("file_send_method", "clipboard")
         self._listen_hold_seconds = cfg.get("listen_hold_seconds", 10)
         self._task_was_active = False  # 是否曾因任务暂停监听（用于任务完成后的缓冲期）
         self._task_end_time = None     # 最后一次任务完成（归档）的时刻
@@ -742,42 +747,24 @@ class AgentBot(WeChatBot):
         logger.warning(f"[切换] 后端无 _switch_chat 能力，无法切到会话 {chat!r}")
         return False
 
-    def _activate_wechat_window(self):
-        """把微信主窗口激活到前台（uiautomation SetActive + SetForegroundWindow）。
-        必须在前台才能保证 pyautogui 的 Ctrl+V/回车 发到微信而不是别的窗口"""
-        import uiautomation as auto
-        try:
-            win = auto.WindowControl(Name="微信", ClassName="mmui::MainWindow")
-            if win.Exists(0, 0):
-                win.SetActive()
-                time.sleep(0.4)
-                try:
-                    import ctypes
-                    user32 = ctypes.windll.user32
-                    user32.SetForegroundWindow(win.NativeWindowHandle)
-                    time.sleep(0.2)
-                except Exception:
-                    pass
-                return True
-            logger.error("[回传] 未找到微信主窗口")
-        except Exception as e:
-            logger.error(f"[回传] 激活微信窗口失败: {e}")
-        return False
-
     def _send_file_clipboard(self, fpath, chat):
-        """剪贴板 CF_HDROP + Ctrl+V 发送文件（wxauto SendFiles UI 自动化失效时的替代方案）。
-        关键：必须先激活微信窗口到前台，否则 Ctrl+V 会发到当前前台窗口（如天枢 CLI）"""
-        # 先激活微信到前台
-        if not self._activate_wechat_window():
-            logger.warning("[回传] 未能激活微信窗口，发送可能发到错误窗口")
+        """剪贴板 CF_HDROP + Ctrl+V 发送文件（SendFiles UI 自动化失效时的替代方案）。
+
+        置前微信走 visual 后端 _foreground（Win32 SetForegroundWindow，不依赖
+        UIA 窗口类名，微信 4.x 下可靠）；无 _foreground 能力时兜底不阻塞发送。
+        """
+        fg = getattr(self.wx, "_foreground", None)
+        if fg is not None:
+            fg()
         if chat:
             try:
                 self._switch_to_chat(chat)
                 time.sleep(0.3)
             except Exception as e:
                 logger.warning(f"[回传] 切换聊天窗口失败 {chat}: {e}")
-        # ChatWith 后再确保微信前台（ChatWith 内部操作可能改变前台）
-        self._activate_wechat_window()
+        # 切会话后再确保微信前台（_switch_chat 内部操作可能改变前台）
+        if fg is not None:
+            fg()
         if not set_clipboard_files([fpath]):
             logger.error(f"[回传] 剪贴板设置文件失败: {fpath}")
             return False
@@ -815,14 +802,13 @@ class AgentBot(WeChatBot):
                     fpath = resolve_result_file(task_dir, os.path.join(self.tasks_dir, "sent"), fname)
                     if os.path.isfile(fpath):
                         sent = False
-                        if self.file_send_method != "wxauto":
-                            # 剪贴板 CF_HDROP 主用（SendFiles 实测不可用）
-                            try:
-                                sent = self._send_file_clipboard(fpath, chat)
-                            except Exception as e:
-                                logger.warning(f"[回传] 剪贴板发送异常: {e}")
+                        # 剪贴板 CF_HDROP 主用（wxauto SendFiles 在新版微信实测不可用）
+                        try:
+                            sent = self._send_file_clipboard(fpath, chat)
+                        except Exception as e:
+                            logger.warning(f"[回传] 剪贴板发送异常: {e}")
                         if not sent:
-                            # 协议 send_file 兜底（wxauto 后端可用；visual 未实现返回 False）
+                            # 协议 send_file 兜底（visual 后端未实现返回 False）
                             try:
                                 sent = self.wx.send_file(fpath, chat)
                                 if sent:
@@ -875,41 +861,12 @@ class AgentBot(WeChatBot):
             self._last_poll_time = now
             self._poll_outbox()
 
-    def _process_file_with_task(self, chat_name, sender, msg_obj):
-        """文件消息：提取文本 → LLM 判断 → 是任务则投递（文件入 attachments）。非任务返回 False 走原路线"""
-        file_dir = self.file_storage_path
-        if not file_dir or not os.path.isdir(file_dir):
-            return False
-        time.sleep(3)  # 等微信下载完成
-        latest_file = self._find_file_by_display_name(self._extract_file_display_name(msg_obj))
-        if latest_file is None:
-            latest_file = self._find_latest_file(file_dir)  # 兜底：最新文件扫描
-        if not latest_file:
-            return False
-        filename = os.path.basename(latest_file)
-        text_content = self._extract_file_text(latest_file)
-        if text_content is None:
-            return False
-        probe = f"[文件 {filename}]\n{text_content[:2000]}"
-        cls = self._classify_task(probe)
-        if not cls["is_task"]:
-            return False
-        logger.info(f"[任务桥] 文件消息判定为任务: {cls['task'][:60]}")
-        self._add_history(chat_name, "user", f"[任务] 文件 {filename}: {text_content[:200]}")
-        self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
-        self._dispatch_and_notify(
-            chat_name, sender, cls["task"],
-            attachment_paths=[latest_file],
-            extra={
-                "msg_id": getattr(msg_obj, "id", None),
-                "raw_message": filename,
-                "file_text": text_content[:5000],
-            },
-        )
-        return True
+    def _process_file_with_instruction(self, chat_name, sender, filepath, filename, user_instruction, extra_attachments=None):
+        """根据用户指令处理文件：LLM 判断指令是否任务 → 天枢投递 或 原文件识别。
 
-    def _process_file_with_instruction(self, chat_name, sender, filepath, filename, text_content, user_instruction):
-        """根据用户指令处理文件：LLM 判断指令是否任务 → 天枢投递 或 原文件识别（附带用户指令）"""
+        任务分支只投文件本体（天枢 CLI 自行读附件），不提取文件文字、不写
+        file_text；只有非任务分支（把文件内容喂给 AI 生成回复）才提取文字。
+        """
         is_group = is_group_chat(chat_name)
         instruction = user_instruction
         if is_group:
@@ -926,25 +883,26 @@ class AgentBot(WeChatBot):
             cls = self._classify_task(f"[文件]{filename} {instruction}")
             if cls["is_task"]:
                 logger.info(f"[任务桥] 文件+指令判定为任务: {cls['task'][:60]}")
-                self._add_history(chat_name, "user", f"[任务] 文件 {filename}: {text_content[:200]}")
+                self._add_history(chat_name, "user", f"[任务] 文件 {filename}: {instruction[:200]}")
                 self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
+                atts = [filepath] + (extra_attachments or [])
                 self._dispatch_and_notify(
                     chat_name, sender, cls["task"],
-                    attachment_paths=[filepath],
-                    extra={
-                        "msg_id": None,
-                        "raw_message": filename,
-                        "file_text": text_content[:5000],
-                    },
+                    attachment_paths=atts,
+                    extra={"msg_id": None, "raw_message": filename},
                 )
                 return True
 
-        # 非任务 → 原文件识别流程，但把用户指令一同发给 bot
+        # 非任务 → 此时才提取文件文字，连同用户指令一起喂给 AI
         logger.info(f"[文件] 非任务，走文件识别流程，附带用户指令: {instruction[:60]}")
-        self._add_history(chat_name, "assistant", f"[文件内容: {filename}] {text_content}")
+        file_content = self._extract_file_text(filepath)
+        if file_content is None:
+            self._send_text(f"收到文件「{filename}」，但这个格式我看不懂呢～", chat_name)
+            return True
+        self._add_history(chat_name, "assistant", f"[文件内容: {filename}] {file_content}")
         refine_prompt = (
             f"用户发来一个文件（{filename}），内容如下：\n\n"
-            f"{text_content}\n\n"
+            f"{file_content}\n\n"
             f"用户对文件处理的要求是：{instruction}\n\n"
             f"请根据文件内容和用户的要求，以{self.nickname}的身份回复用户。"
         )
@@ -971,28 +929,6 @@ class AgentBot(WeChatBot):
         except Exception as e:
             logger.error(f"[回传] 持久化成果登记失败: {e}")
 
-
-    def _acquire_received_file(self, timeout=3, msg=None):
-        """获取用户本次接收的文件：优先按文件消息中的文件名精确定位
-        （微信下载保留源文件时间戳，时间戳扫描不可靠）；
-        拿不到消息对象时回退 sleep + 目录扫描（排除 bot 回传成果）。
-        返回 (filepath, filename, text_content) 或 None"""
-        file_dir = self.file_storage_path
-        if not file_dir or not os.path.isdir(file_dir):
-            return None
-        latest_file = None
-        if msg is not None:
-            display = self._extract_file_display_name(msg)
-            latest_file = self._find_file_by_display_name(display)
-        if latest_file is None:
-            time.sleep(timeout)
-            latest_file = self._find_user_file(file_dir)
-        if not latest_file:
-            return None
-        text_content = self._extract_file_text(latest_file)
-        if text_content is None:
-            return None
-        return (latest_file, os.path.basename(latest_file), text_content)
 
     def _handle_text(self, chat_name, sender, content, msg_id=None):
         """文本消息统一处理：任务判断 → 天枢投递 或 普通聊天。
@@ -1071,7 +1007,7 @@ class AgentBot(WeChatBot):
             logger.error(f"Message processing error: {e}\n{traceback.format_exc()}")
 
     def _handle_unread_session(self, chat_name):
-        """处理一个未读会话：窗口边界（bot 最后回复之后的对方消息）+ 四分类分发。
+        """处理一个未读会话：窗口边界（bot 最后回复之后的对方消息）+ 分类分发。
 
         返回 True = 已处理（回复/投递）；False = 无待处理（回到红点监听）。
         """
@@ -1079,25 +1015,33 @@ class AgentBot(WeChatBot):
         if is_group is None:
             is_group = is_group_chat(chat_name)
         at_tag = f"@{self.nickname}"
+
+        def _window_msgs(win):
+            msgs = self.wx.get_messages(chat_name)
+            return [
+                m for m in msgs
+                if m.sender not in (None, "self", self.nickname)
+                and (win.get("bot_bottom") is None
+                     or _looks_like_file_text(m.content)
+                     or (m.y is not None and m.y >= win.get("bot_bottom")))
+            ]
+
         # D/R: 截图 + 气泡/媒体分析（无 OCR）
         win = self.wx.analyze_window(chat_name)
-        if not (win.get("has_text") or win.get("has_media")):
+        if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
             logger.info(f"[跳过] {chat_name} 窗口空（bot 已回复或无对方消息）")
             return False
-        # F: 有媒体（图/文件/表情）→ sleep 10s 防话没说完
-        if win.get("has_media"):
+        # 先读一次窗口内文字，判断是否有文件（OCR 扩展名）。文件卡片在视觉层
+        # 被判普通气泡（has_text 而非 has_media），但文件下载/渲染同样需防抖。
+        window_msgs = _window_msgs(win)
+        has_file_initial = any(_looks_like_file_text(m.content) for m in window_msgs)
+        # F/H: 有图片（媒体）或有文件 → sleep 10s 防话没说完/文件没下载完，再分析
+        if win.get("has_media") or has_file_initial:
             time.sleep(10)
             win = self.wx.analyze_window(chat_name)
-            if not (win.get("has_text") or win.get("has_media")):
+            if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                 return False
-        bot_bottom = win.get("bot_bottom")
-        # 读窗口内文字（get_messages 带 y，过滤 bot 最后回复之后的对方消息）
-        msgs = self.wx.get_messages(chat_name)
-        window_msgs = [
-            m for m in msgs
-            if m.sender not in (None, "self", self.nickname)
-            and (bot_bottom is None or (m.y is not None and m.y >= bot_bottom))
-        ]
+            window_msgs = _window_msgs(win)
         # 群聊 @ 过滤：只有 @小漓 的消息才处理
         if is_group:
             window_msgs = [m for m in window_msgs if at_tag in m.content]
@@ -1122,11 +1066,19 @@ class AgentBot(WeChatBot):
             logger.info(f"[文件] {sender} 发来处理指令，关联到待处理文件 {pending['filename']}")
             return self._process_file_with_instruction(
                 pending["chat_name"], sender, pending["file_path"],
-                pending["filename"], pending["file_content"], text_content)
-        # ============ 四分类分发 ============
+                pending["filename"], text_content)
+        # ============ 分类分发 ============
         if file_text:
+            # 文件（可能同时有图片）：有图片则截图一并投递，不再被文件分支吞掉
+            extra_attachments = []
+            if has_media:
+                img_path = self._capture_latest_image(chat_name)
+                if img_path:
+                    extra_attachments.append(img_path)
             logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
-            return self._handle_file_message(chat_name, sender, file_text, text_content)
+            return self._handle_file_message(
+                chat_name, sender, file_text, text_content,
+                extra_attachments=extra_attachments)
         if has_media and text_content:
             # 图片 + 文字 → 文字 LLM 判任务，任务投递（图截图），非任务组装
             logger.info(f"🖼💬 判断为图片+文字消息：{chat_name}")
@@ -1141,11 +1093,11 @@ class AgentBot(WeChatBot):
             return self._handle_text(chat_name, sender, text_content, None)
         return False
 
-    def _handle_file_message(self, chat_name, sender, file_text, text_content):
-        """文件消息处理：按显示名/快照增量定位 → 提取文本 → 回复收到并询问。
+    def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None):
+        """文件消息处理：按显示名/快照增量定位 → 回复收到并询问。
 
-        Wave 1：有伴随文字走指令处理；无伴随文字存 pending（停摆语义，
-        Wave 2 改不停摆 + sender 关联）。
+        文字提取延迟到真正需要时（非任务分支喂 AI）才做，任务分支只投
+        文件本体——避免对任务文件做多余的 _extract_file_text。
         """
         file_dir = self.file_storage_path
         if not file_dir or not os.path.isdir(file_dir):
@@ -1162,20 +1114,16 @@ class AgentBot(WeChatBot):
             self._send_text("文件下载失败，请重试～", chat_name)
             return True
         filename = os.path.basename(file_path)
-        file_content = self._extract_file_text(file_path)
-        if file_content is None:
-            self._send_text(f"收到文件「{filename}」，但这个格式我看不懂呢～", chat_name)
-            return True
         if text_content:
             # 文件 + 伴随文字 → 按指令处理（任务判断 or 文件识别附带指令）
             return self._process_file_with_instruction(
-                chat_name, sender, file_path, filename, file_content, text_content)
+                chat_name, sender, file_path, filename, text_content,
+                extra_attachments=extra_attachments)
         # 无伴随文字 → 回复收到 + 记录 sender 关联（不停摆，等该 sender 后续指令）
         self._pending_files[sender] = {
             "chat_name": chat_name,
             "file_path": file_path,
             "filename": filename,
-            "file_content": file_content,
         }
         self._send_text("文件已收到～请告诉我需要怎么处理呢？", chat_name)
         return True
@@ -1549,17 +1497,6 @@ def run_self_test():
         check("T13 从 content 提取显示名", display == "企业账户-投递人数2078758432532791296.txt", str(display))
         got_e = bot_e._find_file_by_display_name(display)
         check("T13 按显示名定位用户文件（不中成果副本）", got_e == user_file, str(got_e))
-        # 完整链路：_acquire_received_file(msg=...) 命中（不 sleep 等待）
-        got_f = bot_e._acquire_received_file(timeout=0, msg=fake_msg)
-        check("T13 完整链路命中用户文件",
-              got_f is not None and got_f[0] == user_file and got_f[1] == os.path.basename(user_file),
-              str(got_f))
-        # 兜底：显示名不匹配任何文件 → 回退 _find_user_file（时间戳扫描 + 成果排除）
-        fake_msg2 = SimpleNamespace(content="文件\n不存在.xlsx\n1KB\n微信电脑版", repattern=None)
-        bot_e._register_sent_back(result_file)  # 成果已登记（真实流程中发送时即登记）
-        got_g = bot_e._acquire_received_file(timeout=0, msg=fake_msg2)
-        check("T13 显示名不匹配时回退扫描（排除成果后选中用户文件）",
-              got_g is not None and got_g[0] == user_file, str(got_g))
 
         # ---- T14: 成果登记持久化（重启后仍排除）+ 文件名前缀变体排除 ----
         # 前缀变体：登记"成果报告"，目录里"成果报告-美化版"（ctime 在发送时刻附近）也应被排除
