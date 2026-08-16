@@ -141,6 +141,12 @@ QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
 /* 背景由 ParticleBackdrop 绘制（渐变+粒子）；QMainWindow 纯 bg 兜底 */
 QMainWindow { background: $bg; }
+/* 顶层对话框：深色系统 palette 下会漏出黑底（欢迎窗/确认框）——显式覆盖 */
+QDialog { background: $bg; }
+QMessageBox { background: $bg; }
+/* 滚动区/页面容器：viewport 透出背景层，避免深色 palette 大黑边 */
+QScrollArea, QStackedWidget { background: transparent; border: none; }
+QScrollArea > QWidget > QWidget { background: transparent; }
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar::tab { background: transparent; padding: 10px 22px; margin-right: 8px;
                border-radius: 10px; color: $muted; font-size: 13px; font-weight: 500; }
@@ -221,7 +227,7 @@ QHeaderView::section { background: $header; border: none;
                        border-bottom: 2px solid $border; padding: 9px;
                        font-weight: 600; color: $text; }
 QGroupBox { border: 1px solid $border; border-radius: 12px; margin-top: 12px;
-            padding-top: 10px; background: $frame; font-weight: 600; color: $text; }
+            padding-top: 10px; background: $card; font-weight: 600; color: $text; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px;
                    color: $p1; }
 QStatusBar { background: transparent; color: $muted; }
