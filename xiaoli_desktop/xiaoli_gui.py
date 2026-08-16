@@ -199,6 +199,7 @@ def main():
     _theme = ctx.cfg.get("theme", "blue")
     _wp = ctx.cfg.get("wallpaper_path", "")
     _opacity = ctx.cfg.get("card_opacity", 0.88)
+    _p_opacity = ctx.cfg.get("panel_opacity", 0.85)
     # 首次启动兜底：无壁纸配置 → 内置默认壁纸（「壁纸」目录里的默认款）
     if not _wp:
         _wp = default_wallpaper_path()
@@ -208,8 +209,9 @@ def main():
                 config_store.save_config(ctx.cfg, ctx.cfg_path)
             except OSError:
                 pass
-    if _theme != "blue" or _wp or abs(_opacity - 0.88) > 0.001:
-        app.setStyleSheet(build_qss(_theme, _wp, card_opacity=_opacity))
+    if _theme != "blue" or _wp or abs(_opacity - 0.88) > 0.001 or abs(_p_opacity - 0.85) > 0.001:
+        app.setStyleSheet(build_qss(_theme, _wp, card_opacity=_opacity,
+                                    panel_opacity=_p_opacity))
     # 首次启动（config 文件不存在）或任务目录/微信文件目录未配置 → 引导选择，
     # 避免默认 D:\ 盘缺失崩溃、以及旧 config 升级后任务桥目录为空静默失效
     if needs_first_run(ctx.cfg_path, ctx.cfg):

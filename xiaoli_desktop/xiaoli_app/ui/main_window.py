@@ -26,7 +26,7 @@ _NAV_ITEMS = (
 
 
 def _load_nav_icon(name, normal_color="#94A3B8", selected_color="#FFFFFF",
-                   size=20) -> QIcon:
+                   size=24) -> QIcon:
     """运行时渲染 Lucide SVG 图标并着色，返回 normal/selected 双态 QIcon。
 
     Lucide 图标 stroke=currentColor——QSvgRenderer 渲染时以 QPainter 的 pen
