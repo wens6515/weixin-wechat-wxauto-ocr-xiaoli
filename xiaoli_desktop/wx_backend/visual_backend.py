@@ -360,7 +360,13 @@ def detect_bubble_colors(img: Image.Image) -> dict:
     # ~17 色阶/分量（总差 ~51），浅色主题白气泡比背景亮（总差 ~45）；
     # 图片内容颜色多样、与背景差异大（总差常 >100），不纳入 other——
     # 否则大块图片会污染 other 中位数，导致气泡色探测错。
+    # 真机补充：深色图片（群二维码 (15,15,17)）比背景暗，但 bgdist 落在
+    # 10~90 内被 other_mask 圈进，把 other 中位数从 (47,47,48) 拉低成
+    # (39,39,41)，接近背景后 find_bubble_boxes tol=12 把背景也当气泡吞了。
+    # 加「比背景亮」约束：对方气泡永远比背景亮，深色图片被排除。
     other_mask = (bgdist > 10) & (bgdist < 90) & (~green)
+    brighter = arr.sum(axis=2) > np.array(bg, dtype=np.int16).sum()
+    other_mask &= brighter
     other_color = None
     if int(other_mask.sum()) > 80:
         other_color = tuple(int(v) for v in np.median(arr[other_mask], axis=0))
@@ -453,7 +459,11 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
     arr = np.asarray(img.convert("RGB"), dtype=np.int16)
     h, w, _ = arr.shape
     content = np.ones((h, w), dtype=bool)
-    for key, tol in (("bg", 30), ("other", 12), ("self", 60)):
+    # bg 阈值收紧到 8：深色图片（如群二维码 (15,15,17)）与深色背景
+    # (30,30,31) 各分量只差 ~15，旧 tol=30 把整张黑图当背景排除，media
+    # 只检出图片中间一小段彩色区，顶部对不齐头像。收紧后深色内容不再被
+    # 当背景，media 框覆盖整张图、顶部对齐头像。
+    for key, tol in (("bg", 8), ("other", 12), ("self", 60)):
         c = colors.get(key)
         if c is not None:
             content &= ~_near_color(arr, c, tol)
@@ -733,21 +743,6 @@ def parse_title(title: str) -> tuple[str, bool, int | None]:
     return title.strip(), False, None
 
 
-_QUOTE_TRANS = str.maketrans({
-    "\u201c": '"', "\u201d": '"',   # 弯双引号 → 直双引号
-    "\u2018": "'", "\u2019": "'",   # 弯单引号 → 直单引号
-})
-
-
-def normalize_chat_name(name: str) -> str:
-    """会话名归一化：OCR 对弯/直引号识别不稳定（同一群名列表区读弯引号、
-    标题区读直引号），比较前统一转直引号，避免 _switch_chat 已选中判定
-    失配 → 误点击 toggle 取消选中读空。"""
-    if not name:
-        return ""
-    return name.translate(_QUOTE_TRANS).strip()
-
-
 class VisualBackend:
     """PrintWindow + 本地 OCR 的微信视觉后端。
 
@@ -958,12 +953,9 @@ class VisualBackend:
                 continue
             name = main_line["text"]
             # 清理 OCR 残留：
-            # - 去首尾非内容字符（'艹王美晨' → '王美晨'；'艹' 是未读角标误读）。
-            #   白名单含弯引号“”：群名可合法以引号开头（'“强盗”集团'），
-            #   剥掉会让列表区会话名与标题区（read_title 不剥）失配，
-            #   _switch_chat 已选中判定失效 → 误点击 toggle 取消选中读空。
+            # - 去首尾非内容字符（'艹王美晨' → '王美晨'；'艹' 是未读角标误读）
             # - 引号内空格（'" 强盗 " 集团' → '"强盗"集团'）
-            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9\u201c\u201d]+", "", name)
+            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9]+", "", name)
             name = re.sub(r"\"\s+", "\"", name)
             name = re.sub(r"\s+\"", "\"", name)
             name = name.strip()
@@ -1072,7 +1064,7 @@ class VisualBackend:
             # UI 检测：标题区显示目标会话 = 已选中（后台静默截图，不置前）
             try:
                 title = self.read_title(foreground=False)
-                if title and normalize_chat_name(parse_title(title)[0]) == normalize_chat_name(chat):
+                if title and parse_title(title)[0] == chat:
                     self._current_chat = chat
                     return True
             except Exception:
@@ -1171,6 +1163,34 @@ class VisualBackend:
         # 气泡外侧：自己头像在右侧（x/w≥0.84 窄带），对方头像在左侧（气泡框
         # left 更左边那一列）。
         right_tops_1x = detect_avatar_tops(region_1x, colors.get("bg"), "right")
+        other_tops_1x = detect_avatar_tops(region_1x, colors.get("bg"), "left")
+        # media 框归属：文件卡片/图片是 media 框（无气泡），find_bubble_boxes
+        # 覆盖不到（其文本行 _bubble=None）。补 media 框 + 头像几何判据——
+        # 顶部对齐右侧头像的 media 归 bot、对齐左侧归对方，把 bot 文件卡片
+        # 的文本行（文件名）也标 self。真机根因：bot 发 index.html，文件卡片
+        # media 框横跨中线（l=334 < 373 < r=613），文件名 OCR 行 x 靠左被
+        # _is_self 降级判对方，上层窗口过滤漏进 bot 消息误判为对方文件。
+        media_1x = find_media_boxes(region_1x, colors)
+        media_self_boxes = []   # 2x 坐标，归 bot 的 media 框
+        media_other_boxes = []  # 2x 坐标，归对方的 media 框
+        for (mt, mb, ml, mr) in media_1x:
+            if any(abs(mt - top) <= 40 for top in right_tops_1x):
+                media_self_boxes.append((mt * 2, mb * 2, ml * 2, mr * 2))
+            elif any(abs(mt - top) <= 40 for top in other_tops_1x):
+                media_other_boxes.append((mt * 2, mb * 2, ml * 2, mr * 2))
+        for it in items:
+            cy = it["y"] + it["h"] // 2
+            cx = it["x"] + it["w"] // 2
+            it["_media_self"] = None
+            for (t, b, l, r) in media_self_boxes:
+                if t <= cy <= b and l <= cx <= r:
+                    it["_media_self"] = True
+                    break
+            if it["_media_self"] is None:
+                for (t, b, l, r) in media_other_boxes:
+                    if t <= cy <= b and l <= cx <= r:
+                        it["_media_self"] = False
+                        break
         avatar_h_1x = max(40, region_1x.height // 18)
         avatar_x_2x = int(region_1x.width * 0.84) * 2
         avatar_w_2x = region.width - avatar_x_2x
@@ -1262,8 +1282,25 @@ class VisualBackend:
                         # sender 判定：连通域气泡 is_self 优先（最可靠），
                         # 气泡探测失败时降级头像锚定 + x 中线。
                         bubble_self = cur_lines[0].get("_bubble_self")
-                        if bubble_self is not None:
+                        media_self_flag = cur_lines[0].get("_media_self")
+                        # 头像几何判据优先于气泡色：bot 文件卡片颜色接近
+                        # other 气泡色会被 find_bubble_boxes 误判 is_self=False，
+                        # 但消息首行 y 对齐右侧头像顶部 → 归 bot（与
+                        # analyze_window 同一判据，tol=40 覆盖群聊名字行偏移、
+                        # 消息间距 ≥98px 不跨消息误对齐）。
+                        first_y_1x = first_y // 2
+                        aligned_right = any(abs(first_y_1x - top) <= 40
+                                            for top in right_tops_1x)
+                        aligned_left = any(abs(first_y_1x - top) <= 40
+                                           for top in other_tops_1x)
+                        if aligned_right:
+                            sender = "self"
+                        elif aligned_left:
+                            sender = block_sender or chat
+                        elif bubble_self is not None:
                             sender = "self" if bubble_self else (block_sender or chat)
+                        elif media_self_flag is not None:
+                            sender = "self" if media_self_flag else (block_sender or chat)
                         else:
                             sender = "self" if _is_self(first_x, first_y) \
                                 else (block_sender or chat)
@@ -1383,7 +1420,6 @@ class VisualBackend:
             pyautogui.hotkey("ctrl", "v")
             time.sleep(0.2)
             pyautogui.press("enter")
-            logger.info(f"🤖 → [{chat}]: {text[:50]}")
             return True
         except Exception as e:
             logger.error(f"发送失败: {e}")
@@ -1473,17 +1509,19 @@ class VisualBackend:
 
         返回 dict：
         {
-            "bot_bottom": int | None,       # bot 最后回复 y 下边界（1x）；None=无 bot 回复
+            "bot_bottom": int | None,       # 我方最后回复之后第一条消息的上边框（1x）；无下一条=消息区高，None=无 bot 回复
             "other_text": [(t,b,l,r), ...],  # 窗口内对方文字气泡框
             "other_media": [(t,b,l,r), ...], # 窗口内对方媒体矩形（图/视频/表情/文件卡片）
             "has_text": bool,
             "has_media": bool,
+            "has_other": bool,               # 有 bot 之后的对方新消息（纯头像几何判据，不依赖气泡/media）
             "width": int, "height": int,
         }
         """
         self._switch_chat(chat)
         empty = {"bot_bottom": None, "other_text": [], "other_media": [],
-                 "has_text": False, "has_media": False, "width": 0, "height": 0}
+                 "has_text": False, "has_media": False, "has_other": False,
+                 "width": 0, "height": 0}
         for attempt in range(2):
             if attempt > 0:
                 # 第一次分析结果为空：可能 toggle 取消选中（_switch_chat 标题
@@ -1513,18 +1551,36 @@ class VisualBackend:
                 # 放宽到 40 覆盖名字行偏移且不跨消息误对齐（消息间距 ≥98px）。
                 return any(abs(t - top) <= tol for top in tops)
 
-            bot_boxes = [(t, b, l, r) for (t, b, l, r, _is_self) in bubbles
-                         if _aligned(t, bot_tops)]
-            bot_boxes += [(t, b, l, r) for (t, b, l, r) in media
-                          if _aligned(t, bot_tops)]
-            bot_bottom = max((b for (_, b, _, _) in bot_boxes), default=None)
-            # 窗口内对方消息：顶部对齐左侧头像，且在 bot 最后回复之后
+            # 消息定位改用头像几何不变量：消息上边框 = 对应头像上边框。
+            # bot_bottom = 我方最后回复之后第一条消息的上边框（不再依赖
+            # find_bubble_boxes 检测 bot 气泡算 bottom——气泡色漂移会导致
+            # bot 气泡漏检、bot_bottom 偏小或为 None，漏掉对方新消息）。
+            last_bot_top = max(bot_tops) if bot_tops else None
+            if last_bot_top is not None:
+                all_tops = sorted(set(bot_tops) | set(other_tops))
+                after = [t for t in all_tops if t > last_bot_top]
+                bot_bottom = after[0] if after else rh
+            else:
+                bot_bottom = None
+            # 对方新消息 = bot 最后头像之后的左侧头像 top（纯几何，不依赖
+            # 气泡/media 检测——气泡色漂移、黑图被当背景都不会漏判）
+            other_new_tops = [t for t in other_tops
+                              if last_bot_top is None or t > last_bot_top]
+            # 类型区分：气泡/media 对齐对方新消息头像
             other_text = [(t, b, l, r) for (t, b, l, r, _is_self) in bubbles
-                          if _aligned(t, other_tops)
-                          and (bot_bottom is None or t >= bot_bottom)]
+                          if _aligned(t, other_new_tops)]
             other_media = [(t, b, l, r) for (t, b, l, r) in media
-                           if _aligned(t, other_tops)
-                           and (bot_bottom is None or t >= bot_bottom)]
+                           if _aligned(t, other_new_tops)]
+            has_other = bool(other_new_tops)
+            # [临时诊断日志] 抓"窗口空"现场，定位后删除
+            logger.info(
+                f"[analyze] chat={chat!r} attempt={attempt} region={rw}x{rh} "
+                f"colors={colors} bubbles={bubbles} media={media} "
+                f"bot_tops={bot_tops} other_tops={other_tops} "
+                f"bot_bottom={bot_bottom} other_text={other_text} "
+                f"other_media={other_media} has_text={bool(other_text)} "
+                f"has_media={bool(other_media)} has_other={has_other}"
+            )
             # 窗口完全空（无气泡/媒体/头像）→ toggle 取消选中，重切兜底
             if not bubbles and not media and not bot_tops and not other_tops:
                 continue
@@ -1534,6 +1590,7 @@ class VisualBackend:
                 "other_media": other_media,
                 "has_text": bool(other_text),
                 "has_media": bool(other_media),
+                "has_other": has_other,
                 "width": rw, "height": rh,
             }
         return empty

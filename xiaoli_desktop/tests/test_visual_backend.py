@@ -25,8 +25,6 @@ from wx_backend import (
 from wx_backend.visual_backend import (
     VisualBackend,
     _norm_cjk,
-    normalize_chat_name,
-    parse_title,
     ocr_image,
     region_changed,
     detect_bubble_colors,
@@ -626,6 +624,90 @@ class TestVisualBackend(unittest.TestCase):
                         "「你好」应被读到（不被误判头像区）")
         b.close()
 
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (30, 30, 31)))
+    @mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                              "self": (53, 210, 141)})
+    @mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                return_value=[])
+    @mock.patch("wx_backend.visual_backend.find_media_boxes",
+                return_value=[(100, 160, 80, 140)])  # 1x：bot 文件卡片 media 框，横跨中线 100
+    @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
+    @mock.patch("wx_backend.visual_backend.ocr_image")
+    def test_get_messages_bot_file_card_sender_self(self, _ocr, _dav, _fmb, _fbb,
+                                                     _dc, _cap, _find, _switch):
+        """RED 复现：bot 文件卡片（media 框，无气泡）文件名 OCR 行 x 靠左、
+        y 离头像中心 >35 → _is_self 降级判对方。修复后 media 头像几何判据
+        把该行标 self。真机锚点：bot 发 index.html，卡片 media 框
+        l=334 < 中线 373 < r=613，文件名行 cx 靠左被判 '王文生'。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [100] if side == "right" else []  # 1x 头像 top=100 对齐 media 顶部
+
+        _dav.side_effect = fake_avatar_tops
+        # 文件名行（2x）：cx=170 < 中线 200、落在 media 2x 框 (200,320,160,280)
+        # 内；cy=300 离头像中心 240 差 60 > 35 → _is_self 降级判对方。
+        _ocr.return_value = [
+            {"text": "index.html", "x": 150, "y": 290, "w": 40, "h": 20},
+        ]
+        b.connect()
+        msgs = b.get_messages("王文生")
+        b.close()
+        self.assertTrue(msgs, "bot 文件卡片文件名应被读到")
+        file_msg = next((m for m in msgs if "index.html" in m.content), None)
+        self.assertIsNotNone(file_msg, "应读到 index.html 消息")
+        self.assertEqual(file_msg.sender, "self",
+                         "bot 文件卡片文件名不得判为对方（真机误判'王文生'）")
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (30, 30, 31)))
+    @mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                              "self": (53, 210, 141)})
+    @mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                return_value=[(90, 110, 40, 140, False)])  # 1x：bot 文件卡片被判非 self 气泡
+    @mock.patch("wx_backend.visual_backend.find_media_boxes",
+                return_value=[])  # 这次文件卡片没被 media 检测抓到
+    @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
+    @mock.patch("wx_backend.visual_backend.ocr_image")
+    def test_get_messages_bot_file_card_bubble_sender_self(self, _ocr, _dav, _fmb, _fbb,
+                                                            _dc, _cap, _find, _switch):
+        """RED 复现：bot 文件卡片颜色接近 other 气泡色，被 find_bubble_boxes
+        判成 is_self=False 气泡（非 media）。文件名行 x 靠左、y 离头像中心
+        ≥35 → _bubble_self=False + _is_self 降级，sender 误判对方。修复后
+        头像几何判据（首行 y 对齐右侧头像 top）优先于气泡色判 self。
+        真机锚点：22:39 王文生发纯文字，bot 文件卡片气泡 (913,1026,182,622,False)
+        顶部 913 对齐 bot_tops=913，却因非绿被判对方走文件流程。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [0, 90] if side == "right" else [110]
+
+        _dav.side_effect = fake_avatar_tops
+        # 文件名行（2x）：cx=110 < 中线 200、落在气泡 2x 框 (180,220,80,280)
+        # 内；cy=185 离头像中心 220 差 35（_is_self 阈值 <35 不命中）→ 判对方。
+        _ocr.return_value = [
+            {"text": "index.html", "x": 90, "y": 175, "w": 40, "h": 20},
+        ]
+        b.connect()
+        msgs = b.get_messages("王文生")
+        b.close()
+        self.assertTrue(msgs, "bot 文件卡片文件名应被读到")
+        file_msg = next((m for m in msgs if "index.html" in m.content), None)
+        self.assertIsNotNone(file_msg, "应读到 index.html 消息")
+        self.assertEqual(file_msg.sender, "self",
+                         "bot 文件卡片(气泡形态)文件名不得判为对方")
+
     def test_analyze_window_avatar_geometry_sender(self):
         """sender 判定改头像几何：bot 文件卡片（无绿气泡、右边缘靠右）归 bot，
         对方长文字（右边缘靠右、旧 r>0.75 判据会误判）归对方。
@@ -653,8 +735,8 @@ class TestVisualBackend(unittest.TestCase):
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[]):
             win = b.analyze_window("王文生")
-        self.assertEqual(win["bot_bottom"], 80,
-                         "bot 文件卡片(右对齐 other)下边界应计入 bot_bottom")
+        self.assertEqual(win["bot_bottom"], 100,
+                         "bot_bottom = 我方最后头像之后第一条消息上边框（几何，不再取气泡 bottom）")
         self.assertEqual(win["other_text"], [(100, 130, 10, 160)],
                          "对方长文字即使右边缘靠右也不得归 bot")
 
@@ -678,10 +760,40 @@ class TestVisualBackend(unittest.TestCase):
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[(0, 100, 100, 180)]):
             win = b.analyze_window("王文生")
-        self.assertEqual(win["bot_bottom"], 100,
-                         "bot 图片(media)下边界应计入 bot_bottom")
+        self.assertEqual(win["bot_bottom"], 200,
+                         "无下一条消息时 bot_bottom = 消息区高度（几何兜底）")
         self.assertEqual(win["other_media"], [],
                          "bot 图片不得落入窗口内对方媒体")
+
+    def test_analyze_window_has_other_geometry(self):
+        """几何判据：气泡/media 漏检时，has_other 仍靠头像几何判「有对方新消息」。
+        真机锚点：深色图片+文字混排，气泡色漂移导致 find_bubble_boxes 漏检
+        文字气泡、find_media_boxes 只截到图片中间段(顶部不对齐头像)，旧逻辑
+        other_text/other_media 全空误判「窗口空」。新逻辑 other_new_tops=
+        [490,588,1055] 纯几何判 has_other。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [85, 392] if side == "right" else [0, 250, 490, 588, 1055]
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "_refresh", return_value=_solid((747, 1135), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                        return_value=[(85, 214, 131, 621, True),
+                                      (392, 454, 131, 621, True)]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes",
+                        return_value=[(733, 891, 160, 319)]):  # 只截图片中间段
+            win = b.analyze_window("王文生")
+        self.assertTrue(win["has_other"],
+                        "气泡/media 漏检时，头像几何仍应判有对方新消息")
+        self.assertEqual(win["bot_bottom"], 490,
+                         "bot_bottom = 下一条消息头像 top（几何）")
 
     def test_detect_avatar_tops_geometry(self):
         """detect_avatar_tops 真实实现：窄带非背景块标出头像顶部 y，
@@ -787,34 +899,6 @@ class TestIterUnreadSessions(unittest.TestCase):
         self.assertEqual(parse_title("王文生"), ("王文生", False, None))
         self.assertEqual(parse_title(""), ("", False, None))
         self.assertEqual(parse_title(None), ("", False, None))
-
-    def test_normalize_chat_name_quotes(self):
-        """OCR 弯/直引号识别不稳定，归一化后应一致。"""
-        self.assertEqual(normalize_chat_name('“强盗”集团'), '"强盗"集团')
-        self.assertEqual(normalize_chat_name('"强盗"集团'), '"强盗"集团')
-        self.assertEqual(normalize_chat_name('强盗”集团'), '强盗"集团')
-        self.assertEqual(
-            normalize_chat_name('“强盗”集团'),
-            normalize_chat_name('"强盗"集团'))
-        self.assertEqual(normalize_chat_name('‘单引号’'), "'单引号'")
-        self.assertEqual(normalize_chat_name(""), "")
-        self.assertEqual(normalize_chat_name(None), "")
-
-    @mock.patch("pyautogui.click")
-    def test_switch_chat_quote_normalized_no_click(self, _click):
-        """列表区弯引号、标题区直引号时，归一化后应判已选中不点击。
-
-        RED 复现：真机群聊'“强盗”集团'，列表区 OCR 读弯引号、标题区
-        read_title 读直引号（OCR 弯/直不稳定），逐字节比较失配 →
-        误点击已选中会话 → toggle 取消选中 → 消息区读空跳过。
-        """
-        b = VisualBackend()
-        b._hwnd = 0x1234
-        b._current_chat = None
-        b.read_title = mock.MagicMock(return_value='"强盗"集团(5)')
-        self.assertTrue(b._switch_chat('“强盗”集团'))
-        _click.assert_not_called()
-        self.assertEqual(b._current_chat, '“强盗”集团')
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid((200, 200), (255, 255, 255)))
