@@ -226,6 +226,7 @@ QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;
                        border-bottom: 2px solid $border; padding: 9px;
                        font-weight: 600; color: $text; }
+QHeaderView { background: $header; }
 QGroupBox { border: 1px solid $border; border-radius: 12px; margin-top: 12px;
             padding-top: 10px; background: $card; font-weight: 600; color: $text; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px;
@@ -447,14 +448,32 @@ def render_wallpaper_thumb(path: str, width=120, height=76):
     return render_theme_thumb("blue", width, height)
 
 
-def build_qss(theme: str = "blue", wallpaper: str = "") -> str:
+def _with_alpha(card_spec: str, opacity: float) -> str:
+    """把卡片色 rgba/hex 统一为指定不透明度 rgba(r,g,b,opacity)。"""
+    m = re.match(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*[\d.]+\)", card_spec.strip())
+    if m:
+        return f"rgba({m.group(1)}, {m.group(2)}, {m.group(3)}, {opacity})"
+    h = card_spec.strip().lstrip("#")
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except ValueError:
+        return f"rgba(255, 255, 255, {opacity})"
+    return f"rgba({r}, {g}, {b}, {opacity})"
+
+
+def build_qss(theme: str = "blue", wallpaper: str = "", card_opacity=None) -> str:
     """按主题名 + 可选壁纸路径生成 QSS。
 
     背景（渐变/粒子/壁纸）由 ParticleBackdrop 运行时绘制，QSS 只负责控件；
     这里为 QMainWindow 提供纯 bg 兜底。动态派生 hover 提亮主色与导航悬停色。
+    card_opacity：卡片不透明度 0.5~1.0（None = 用主题原始 card 值），
+    设置页「卡片透明度」滑块实时调节，让半透明卡片透出背景的程度可控。
     """
     t = dict(_DEFAULTS)
     t.update(THEMES.get(theme, THEMES["blue"]))
+    if card_opacity is not None:
+        t["card"] = _with_alpha(t.get("card", _DEFAULTS["card"]),
+                                max(0.5, min(1.0, card_opacity)))
     # hover 主色：主题可自定义 p1_hi/p2_hi，缺省自动提亮 16%
     t["p1_hi"] = _lighten(t.get("p1_hi", t["p1"]), 0.16)
     t["p2_hi"] = _lighten(t.get("p2_hi", t["p2"]), 0.16)

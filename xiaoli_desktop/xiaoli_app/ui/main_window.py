@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
 
         def _sync_backdrop(e):
             self.backdrop.setGeometry(0, 0, e.size().width(), e.size().height())
+            self._layout_nav()
         central.resizeEvent = _sync_backdrop
 
         content = QWidget(central)
@@ -123,6 +124,29 @@ class MainWindow(QMainWindow):
 
         # 背景层应用当前主题/壁纸（粒子系统随主题重建）
         self.apply_backdrop()
+        self._layout_nav()
+
+    def _layout_nav(self):
+        """左侧导航项从上到下排满：6 项均分导航高度（最小 44px）。"""
+        if getattr(self, "_nav_layouting", False):
+            return
+        self._nav_layouting = True
+        try:
+            n = self.nav.count()
+            if n <= 0:
+                return
+            # 用 nav.height()（布局后稳定）而非 viewport 高度——viewport 随
+            # item 高度变化导致收敛漂移
+            per = max(44, (self.nav.height() - 28) // n)
+            for i in range(n):
+                self.nav.item(i).setSizeHint(QSize(0, per))
+        finally:
+            self._nav_layouting = False
+
+    def showEvent(self, event):
+        """首次显示后布局稳定，重算导航排满（构造时 nav 高度未定）。"""
+        super().showEvent(event)
+        self._layout_nav()
 
     # ---------- 刷新 ----------
 

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
     QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox, QSpinBox,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QFrame,
-    QProgressBar, QScrollArea,
+    QProgressBar, QScrollArea, QSlider,
 )
 
 from xiaoli_app import card_store, config_store
@@ -738,6 +738,8 @@ class ModelsPage(QWidget):
         self.ctx = ctx
         lay = QVBoxLayout(self)
         self.table = QTableWidget(0, 5)
+        # 隐藏行号列：深色 palette 下垂直表头漏深色成「竖黑条」，且行号无实用价值
+        self.table.verticalHeader().setVisible(False)
         self.table.setHorizontalHeaderLabels(["名称", "Base URL", "API Key", "模型", "ID"])
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setColumnWidth(0, 100)
@@ -1025,6 +1027,8 @@ class TasksPage(QWidget):
         self.ctx = ctx
         lay = QVBoxLayout(self)
         self.table = QTableWidget(0, 4)
+        # 隐藏行号列（同 ModelsPage：防深色 palette 竖黑条）
+        self.table.verticalHeader().setVisible(False)
         self.table.setHorizontalHeaderLabels(["任务 ID", "状态", "描述", "更新时间"])
         self.table.horizontalHeader().setStretchLastSection(True)
         self.btn_refresh = QPushButton("刷新")
@@ -1201,6 +1205,20 @@ class SettingsPage(QWidget):
         row_wp.addWidget(btn_wp)
         row_wp.addWidget(btn_wp_clear)
         tv.addLayout(row_wp)
+        # 卡片透明度（毛玻璃强度）：滑块 50%~100%，实时生效并保存
+        op_row = QHBoxLayout()
+        op_row.setSpacing(8)
+        op_row.addWidget(QLabel("卡片透明度"))
+        self.sl_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.sl_opacity.setRange(50, 100)
+        self.sl_opacity.setValue(int((self.ctx.cfg or {}).get("card_opacity", 0.88) * 100))
+        self.lbl_op_val = QLabel()
+        self.lbl_op_val.setObjectName("tip")
+        self.sl_opacity.valueChanged.connect(self._on_opacity_changed)
+        op_row.addWidget(self.sl_opacity, 1)
+        op_row.addWidget(self.lbl_op_val)
+        tv.addLayout(op_row)
+        self._update_op_label(self.sl_opacity.value())
         lay.addWidget(g_theme)
 
         # 记忆
@@ -1320,6 +1338,7 @@ class SettingsPage(QWidget):
             pass
         self._select_wallpaper_item(cfg.get("wallpaper_path", ""))
         self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
+        self.sl_opacity.setValue(int(cfg.get("card_opacity", 0.88) * 100))
         self._refresh_stems()
 
     def _select_wallpaper_item(self, path):
@@ -1373,15 +1392,28 @@ class SettingsPage(QWidget):
         self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), "")
 
     def _apply_theme_qss(self, theme, wp):
-        """应用 QSS + 同步粒子背景层（主题或壁纸变化后统一入口）。"""
+        """应用 QSS + 同步粒子背景层（主题/壁纸/透明度变化后统一入口）。"""
         from . import build_qss
         from PySide6.QtWidgets import QApplication
+        opacity = (self.ctx.cfg or {}).get("card_opacity", 0.88)
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(build_qss(theme, wp))
+            app.setStyleSheet(build_qss(theme, wp, card_opacity=opacity))
         win = getattr(self.ctx, "win", None)
         if win is not None and hasattr(win, "apply_backdrop"):
             win.apply_backdrop(theme, wp)
+
+    def _update_op_label(self, val):
+        self.lbl_op_val.setText(f"{val}%")
+
+    def _on_opacity_changed(self, val):
+        """透明度滑块：实时重建 QSS（毛玻璃强度）并保存。"""
+        opacity = val / 100.0
+        self._update_op_label(val)
+        self.ctx.cfg["card_opacity"] = opacity
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"),
+                              self.ed_wallpaper.text().strip())
 
     def _on_theme_picked(self, current, previous):
         """点击主题缩略图：即时应用并保存（不弹窗）。"""
