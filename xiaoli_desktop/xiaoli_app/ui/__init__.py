@@ -209,9 +209,9 @@ QListWidget::item:selected { background: $hover; color: $text; }
 /* 左侧导航栏：窄侧边 + 竖排导航项，选中态渐变背景 + 白字白图标 */
 QListWidget#navList { background: transparent; border: none;
                       border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
-QListWidget#navList::item { padding: 12px 14px; border-radius: 10px;
-                            margin: 3px 6px; color: $muted; font-size: $fs_nav;
-                            font-weight: 500; letter-spacing: 1px; }
+QListWidget#navList::item { padding: 8px 10px; border-radius: 10px;
+                            margin: 3px 6px; color: $muted; font-size: 34px;
+                            font-weight: 600; letter-spacing: 2px; }
 QListWidget#navList::item:hover { background: $nav_hover; color: $text; }
 QListWidget#navList::item:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 $p1, stop:1 $p2);
