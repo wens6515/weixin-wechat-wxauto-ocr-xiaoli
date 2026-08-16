@@ -62,6 +62,14 @@ class HomePage(QWidget):
         title_row.addWidget(self.lbl_logo)
         self.lbl_title = QLabel("小漓")
         self.lbl_title.setObjectName("title")
+        # 标题淡主题色光晕（增强文字质感；随卡片透明度滑块调节全局半透明时仍清晰）
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        _sh = QGraphicsDropShadowEffect(self.lbl_title)
+        _sh.setBlurRadius(18)
+        _sh.setOffset(0, 2)
+        _sh.setColor(QColor(91, 140, 255, 90))
+        self.lbl_title.setGraphicsEffect(_sh)
         title_row.addWidget(self.lbl_title)
         title_row.addStretch(1)
         self.lbl_subtitle = QLabel("你的微信 AI 助手 · 聊天 / 图片识别 / 任务桥")
@@ -1219,6 +1227,20 @@ class SettingsPage(QWidget):
         op_row.addWidget(self.lbl_op_val)
         tv.addLayout(op_row)
         self._update_op_label(self.sl_opacity.value())
+        # 面板/输入区透明度（日志区/表格/输入框等大白块，与卡片独立）
+        pn_row = QHBoxLayout()
+        pn_row.setSpacing(8)
+        pn_row.addWidget(QLabel("面板透明度"))
+        self.sl_panel = QSlider(Qt.Orientation.Horizontal)
+        self.sl_panel.setRange(50, 100)
+        self.sl_panel.setValue(int((self.ctx.cfg or {}).get("panel_opacity", 0.85) * 100))
+        self.lbl_panel_val = QLabel()
+        self.lbl_panel_val.setObjectName("tip")
+        self.sl_panel.valueChanged.connect(self._on_panel_changed)
+        pn_row.addWidget(self.sl_panel, 1)
+        pn_row.addWidget(self.lbl_panel_val)
+        tv.addLayout(pn_row)
+        self._update_panel_label(self.sl_panel.value())
         lay.addWidget(g_theme)
 
         # 记忆
@@ -1339,6 +1361,7 @@ class SettingsPage(QWidget):
         self._select_wallpaper_item(cfg.get("wallpaper_path", ""))
         self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
         self.sl_opacity.setValue(int(cfg.get("card_opacity", 0.88) * 100))
+        self.sl_panel.setValue(int(cfg.get("panel_opacity", 0.85) * 100))
         self._refresh_stems()
 
     def _select_wallpaper_item(self, path):
@@ -1395,10 +1418,12 @@ class SettingsPage(QWidget):
         """应用 QSS + 同步粒子背景层（主题/壁纸/透明度变化后统一入口）。"""
         from . import build_qss
         from PySide6.QtWidgets import QApplication
-        opacity = (self.ctx.cfg or {}).get("card_opacity", 0.88)
+        cfg = self.ctx.cfg or {}
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(build_qss(theme, wp, card_opacity=opacity))
+            app.setStyleSheet(build_qss(theme, wp,
+                                        card_opacity=cfg.get("card_opacity", 0.88),
+                                        panel_opacity=cfg.get("panel_opacity", 0.85)))
         win = getattr(self.ctx, "win", None)
         if win is not None and hasattr(win, "apply_backdrop"):
             win.apply_backdrop(theme, wp)
@@ -1407,10 +1432,22 @@ class SettingsPage(QWidget):
         self.lbl_op_val.setText(f"{val}%")
 
     def _on_opacity_changed(self, val):
-        """透明度滑块：实时重建 QSS（毛玻璃强度）并保存。"""
+        """卡片透明度滑块：实时重建 QSS（毛玻璃强度）并保存。"""
         opacity = val / 100.0
         self._update_op_label(val)
         self.ctx.cfg["card_opacity"] = opacity
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"),
+                              self.ed_wallpaper.text().strip())
+
+    def _update_panel_label(self, val):
+        self.lbl_panel_val.setText(f"{val}%")
+
+    def _on_panel_changed(self, val):
+        """面板透明度滑块：控制日志区/表格/输入框等大白块的透出程度。"""
+        opacity = val / 100.0
+        self._update_panel_label(val)
+        self.ctx.cfg["panel_opacity"] = opacity
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"),
                               self.ed_wallpaper.text().strip())

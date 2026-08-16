@@ -136,7 +136,8 @@ THEMES = {
 # QSS 不再承担背景生成。
 
 _QSS_TEMPLATE = Template("""
-* { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
+* { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    font-size: 14px; }
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
 /* 背景由 ParticleBackdrop 绘制（渐变+粒子）；QMainWindow 纯 bg 兜底 */
@@ -149,13 +150,13 @@ QScrollArea, QStackedWidget { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar::tab { background: transparent; padding: 10px 22px; margin-right: 8px;
-               border-radius: 10px; color: $muted; font-size: 13px; font-weight: 500; }
+               border-radius: 10px; color: $muted; font-size: 14px; font-weight: 500; }
 QTabBar::tab:hover { background: $hover; color: $text; }
 QTabBar::tab:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                        stop:0 $p1, stop:1 $p2);
                        color: #FFFFFF; font-weight: 600; }
-QLabel#title { font-size: 26px; font-weight: 700; color: $p1; }
-QLabel#subtitle { font-size: 13px; color: $muted; }
+QLabel#title { font-size: 28px; font-weight: 800; color: $p1; letter-spacing: 2px; }
+QLabel#subtitle { font-size: 14px; color: $muted; letter-spacing: 1px; }
 QLabel#stateLabel { font-size: 14px; color: $muted; }
 /* 环境检测标签（HomePage）：tag 状态色跟随主题，不再散落硬编码 */
 QLabel#envTag { font-weight: 600; }
@@ -183,7 +184,8 @@ QProgressBar { border: none; border-radius: 8px; background: $border; height: 12
 QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); border-radius: 8px; }
 QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 10px;
-              padding: 8px 20px; min-height: 32px; color: $text; font-size: 13px; font-weight: 500; }
+              padding: 8px 20px; min-height: 32px; color: $text; font-size: 14px; font-weight: 500;
+              letter-spacing: 1px; }
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
 QPushButton:pressed { background: $hover; border-top: 2px solid rgba(0,0,0,0.12); }
 QPushButton:disabled { color: $muted; background: $frame; border-color: $border; }
@@ -208,8 +210,8 @@ QListWidget::item:selected { background: $hover; color: $text; }
 QListWidget#navList { background: transparent; border: none;
                       border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
 QListWidget#navList::item { padding: 12px 14px; border-radius: 10px;
-                            margin: 3px 6px; color: $muted; font-size: 14px;
-                            font-weight: 500; }
+                            margin: 3px 6px; color: $muted; font-size: 16px;
+                            font-weight: 500; letter-spacing: 1px; }
 QListWidget#navList::item:hover { background: $nav_hover; color: $text; }
 QListWidget#navList::item:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 $p1, stop:1 $p2);
@@ -461,19 +463,25 @@ def _with_alpha(card_spec: str, opacity: float) -> str:
     return f"rgba({r}, {g}, {b}, {opacity})"
 
 
-def build_qss(theme: str = "blue", wallpaper: str = "", card_opacity=None) -> str:
+def build_qss(theme: str = "blue", wallpaper: str = "", card_opacity=None,
+              panel_opacity=None) -> str:
     """按主题名 + 可选壁纸路径生成 QSS。
 
     背景（渐变/粒子/壁纸）由 ParticleBackdrop 运行时绘制，QSS 只负责控件；
     这里为 QMainWindow 提供纯 bg 兜底。动态派生 hover 提亮主色与导航悬停色。
     card_opacity：卡片不透明度 0.5~1.0（None = 用主题原始 card 值），
-    设置页「卡片透明度」滑块实时调节，让半透明卡片透出背景的程度可控。
+    panel_opacity：面板/输入区不透明度（日志区、表格、输入框等 input_bg
+    底色），与卡片透明度独立可调——两个滑块分别控制「毛玻璃卡片」与
+    「面板大色块」的透出程度。
     """
     t = dict(_DEFAULTS)
     t.update(THEMES.get(theme, THEMES["blue"]))
     if card_opacity is not None:
         t["card"] = _with_alpha(t.get("card", _DEFAULTS["card"]),
                                 max(0.5, min(1.0, card_opacity)))
+    if panel_opacity is not None:
+        t["input_bg"] = _with_alpha(t.get("input_bg", _DEFAULTS["input_bg"]),
+                                    max(0.5, min(1.0, panel_opacity)))
     # hover 主色：主题可自定义 p1_hi/p2_hi，缺省自动提亮 16%
     t["p1_hi"] = _lighten(t.get("p1_hi", t["p1"]), 0.16)
     t["p2_hi"] = _lighten(t.get("p2_hi", t["p2"]), 0.16)
