@@ -124,7 +124,8 @@ class TestUiSmoke(unittest.TestCase):
             self.assertNotEqual(it.font().pixelSize(), -1,
                                 "导航项必须显式 setFont，不能依赖 QSS ::item font-size")
         # 三档字号下导航字体引用同一固定字体（不随 config 重建）
-        self.assertEqual(_NAV_FONT.pixelSize(), 38)
+        # 31px = 42→38（-10%）→31（-18%）：用户反馈「文字下方被吞，缩小 15-20%」
+        self.assertEqual(_NAV_FONT.pixelSize(), 31)
         win.close()
 
     def test_prompt_flow_sends_first_prompt_directly(self):
