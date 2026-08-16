@@ -92,27 +92,48 @@ class HomePage(QWidget):
         row.addWidget(self.btn_main)
         lay.addLayout(row)
 
-        # 环境检查卡片
+        # 环境检查仪表盘：三张状态卡片横排（微信/天枢/首轮提示词），
+        # 每张卡片 = 状态圆点(绿/红/灰) + 大标题 + 检测详情。
+        # 从「三行平铺标签」升级为「仪表盘卡片」，首页更有质感。
         self.env_frame = QFrame()
         self.env_frame.setObjectName("card")
         ev = QVBoxLayout(self.env_frame)
-        ev.setContentsMargins(16, 12, 16, 12)
-        ev.setSpacing(8)
-        ev.addWidget(QLabel("环境检查"))
+        ev.setContentsMargins(16, 14, 16, 14)
+        ev.setSpacing(12)
+        ev_header = QHBoxLayout()
+        ev_header.addWidget(QLabel("环境检查"))
+        ev_header.addStretch(1)
+        ev.addLayout(ev_header)
         self.env_rows = {}
-        for key, title in (("wechat", "微信 PC 版"), ("tianshu", "天枢 CLI"),
-                           ("first_prompt", "首轮提示词")):
-            r = QHBoxLayout()
-            tag = QLabel("—")
-            tag.setObjectName("envTag")
+        env_cards = QHBoxLayout()
+        env_cards.setSpacing(10)
+        for key, title, sub in (("wechat", "微信 PC 版", "微信客户端连接状态"),
+                                ("tianshu", "天枢 CLI", "任务桥命令行就绪"),
+                                ("first_prompt", "首轮提示词", "初始化自动发送")):
+            card = QFrame()
+            card.setObjectName("card")
+            card.setMinimumHeight(92)
+            cv = QVBoxLayout(card)
+            cv.setContentsMargins(14, 12, 14, 12)
+            cv.setSpacing(6)
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            dot = QLabel("●")
+            dot.setObjectName("envTag")
+            dot.setStyleSheet("font-size: 14px;")  # 圆点大小
+            t_lbl = QLabel(title)
+            t_lbl.setStyleSheet("font-weight: 700; font-size: 15px;")
+            row.addWidget(dot)
+            row.addWidget(t_lbl)
+            row.addStretch(1)
+            cv.addLayout(row)
             det = QLabel("检测中…")
+            det.setObjectName("tip")
             det.setWordWrap(True)
-            r.addWidget(QLabel(title))
-            r.addStretch(1)
-            r.addWidget(tag)
-            r.addWidget(det)
-            ev.addLayout(r)
-            self.env_rows[key] = (tag, det)
+            cv.addWidget(det)
+            env_cards.addWidget(card, 1)
+            self.env_rows[key] = (dot, det)
+        ev.addLayout(env_cards)
         self.btn_check = QPushButton("重新检查环境")
         self.btn_check.clicked.connect(self._check_env)
         self.btn_install = QPushButton("一键安装天枢")
@@ -262,9 +283,10 @@ class HomePage(QWidget):
             return
         self._env_running = True
         self._env_report = None
-        for tag, det in self.env_rows.values():
-            tag.setText("…")
-            tag.setObjectName("envPending")
+        for dot, det in self.env_rows.values():
+            dot.setObjectName("envPending")
+            dot.style().unpolish(dot)
+            dot.style().polish(dot)
             det.setText("检测中…")
         threading.Thread(target=self._check_env_worker, daemon=True).start()
 
@@ -284,11 +306,13 @@ class HomePage(QWidget):
             return
         self._env_report = None
         for key in ("wechat", "tianshu", "first_prompt"):
-            tag, det = self.env_rows[key]
+            dot, det = self.env_rows[key]
             item = report.get(key, {"ok": False, "detail": "无数据"})
             ok = bool(item.get("ok"))
-            tag.setText("✓" if ok else "✗")
-            tag.setObjectName("envOk" if ok else "envBad")
+            # 圆点状态色：✓ 绿 / ✗ 红（objectName 切换后需 repolish 生效）
+            dot.setObjectName("envOk" if ok else "envBad")
+            dot.style().unpolish(dot)
+            dot.style().polish(dot)
             det.setText(str(item.get("detail", "")))
         tianshu_ok = bool(report.get("tianshu", {}).get("ok"))
         self.btn_install.setVisible(not tianshu_ok)
@@ -451,17 +475,23 @@ class CardsPage(QWidget):
         self.btn_del = QPushButton("删除")
         self.btn_export = QPushButton("导出")
         self.btn_import = QPushButton("导入")
-        self.btn_new.clicked.connect(self._new_card)
-        self.btn_dup.clicked.connect(self._duplicate_card)
-        self.btn_del.clicked.connect(self._delete_card)
-        self.btn_export.clicked.connect(self._export_card)
-        self.btn_import.clicked.connect(self._import_card)
+        # 紧凑按钮：5 个按钮横排，左栏限宽下默认 padding(8px 20px) 会让
+        # 每个按钮只分到 ~44px 而文字需 ~72px，文字被裁剪成碎点（用户反馈
+        # 「五个空白框+小点」）。用 compact 变体缩小 padding 让文字完整。
         for b in (self.btn_new, self.btn_dup, self.btn_del, self.btn_export, self.btn_import):
+            b.setProperty("compact", "true")
+            b.clicked.connect({
+                self.btn_new: self._new_card,
+                self.btn_dup: self._duplicate_card,
+                self.btn_del: self._delete_card,
+                self.btn_export: self._export_card,
+                self.btn_import: self._import_card,
+            }[b])
             btn_row.addWidget(b)
         left.addLayout(btn_row)
         left_w = QWidget()
         left_w.setLayout(left)
-        left_w.setMaximumWidth(260)
+        left_w.setMaximumWidth(320)
         lay.addWidget(left_w)
 
         # 右：编辑表单
@@ -1164,9 +1194,18 @@ class SettingsPage(QWidget):
         g_theme = QGroupBox("界面主题与壁纸")
         tv = QVBoxLayout(g_theme)
         tv.setSpacing(8)
-        tip_theme = QLabel("点击缩略图切换主题（即时生效并保存）")
+        tip_theme = QLabel("点击缩略图切换主题（即时生效并保存）；右侧壁纸库「壁纸」文件夹自动收录")
         tip_theme.setObjectName("tip")
+        tip_theme.setWordWrap(True)
         tv.addWidget(tip_theme)
+        # 两列布局：主题网格 | 壁纸网格 并排（原来上下排列滚动太深）
+        duo = QHBoxLayout()
+        duo.setSpacing(10)
+        col_theme = QVBoxLayout()
+        col_theme.setSpacing(6)
+        lbl_t = QLabel("主题")
+        lbl_t.setObjectName("tip")
+        col_theme.addWidget(lbl_t)
         from . import THEMES, render_theme_thumb
         self.theme_grid = QListWidget()
         self.theme_grid.setObjectName("themeGrid")
@@ -1188,11 +1227,14 @@ class SettingsPage(QWidget):
             self.theme_grid.addItem(item)
             self._theme_keys.append(key)
         self.theme_grid.currentItemChanged.connect(self._on_theme_picked)
-        tv.addWidget(self.theme_grid)
+        col_theme.addWidget(self.theme_grid)
+        duo.addLayout(col_theme, 1)
         # 壁纸库：内置「壁纸」目录 + 无壁纸 + 用户自定义
-        tip_wp = QLabel("点击壁纸应用（「壁纸」文件夹自动收录；也可导入自定义壁纸）")
-        tip_wp.setObjectName("tip")
-        tv.addWidget(tip_wp)
+        col_wp = QVBoxLayout()
+        col_wp.setSpacing(6)
+        lbl_w = QLabel("壁纸")
+        lbl_w.setObjectName("tip")
+        col_wp.addWidget(lbl_w)
         from . import list_wallpapers, wallpaper_short_name, render_wallpaper_thumb
         self.wp_grid = QListWidget()
         self.wp_grid.setObjectName("wpGrid")
@@ -1224,7 +1266,9 @@ class SettingsPage(QWidget):
             self.wp_grid.addItem(item)
             self._wp_items.append((item, path))
         self.wp_grid.currentItemChanged.connect(self._on_wp_picked)
-        tv.addWidget(self.wp_grid)
+        col_wp.addWidget(self.wp_grid)
+        duo.addLayout(col_wp, 1)
+        tv.addLayout(duo)
         self.ed_wallpaper = QLineEdit()
         self.ed_wallpaper.setReadOnly(True)
         row_wp = QHBoxLayout()

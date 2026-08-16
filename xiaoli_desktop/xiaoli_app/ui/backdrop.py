@@ -11,7 +11,8 @@
 性能：30 个圆 30fps + 抗锯齿，QPainter 开销可忽略。
 """
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import QColor, QPainter, QPixmap, QRadialGradient, QLinearGradient, QBrush
+from PySide6.QtGui import (QColor, QPainter, QPixmap, QRadialGradient,
+                           QLinearGradient, QBrush, QPainterPath)
 from PySide6.QtWidgets import QWidget
 
 from . import THEMES
@@ -38,10 +39,16 @@ class ParticleBackdrop(QWidget):
         self._particles = []  # [x, y, r, vx, vy, alpha, color]
         self._theme = None   # 当前主题 dict（缓存避免每次查）
         self._wallpaper = QPixmap()  # 壁纸（空 = 纯渐变背景）
+        self._corner_radius = 16  # 圆角裁剪（配合无边框圆角窗口）
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(33)  # ~30fps
+
+    def set_corner_radius(self, radius: int):
+        """设置圆角半径（圆角窗口时背景按圆角裁剪）。"""
+        self._corner_radius = radius
+        self.update()
 
     def set_wallpaper(self, path: str):
         """设置壁纸图（空路径清除）。壁纸上叠加半透明遮罩 + 粒子，保证可读。"""
@@ -119,6 +126,11 @@ class ParticleBackdrop(QWidget):
         w, h = self.width(), self.height()
         if w <= 0 or h <= 0:
             return
+        # 圆角裁剪（圆角窗口）：先按圆角路径裁剪，再绘制壁纸/渐变/粒子
+        if self._corner_radius > 0:
+            clip = QPainterPath()
+            clip.addRoundedRect(QRectF(0, 0, w, h), self._corner_radius, self._corner_radius)
+            p.setClipPath(clip)
 
         # 1. 壁纸铺底（所有主题共用，包括 aurora——之前 aurora 分支漏画壁纸导致
         #    「背景被剔除」）
