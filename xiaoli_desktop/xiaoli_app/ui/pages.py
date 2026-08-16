@@ -1218,8 +1218,8 @@ class SettingsPage(QWidget):
         op_row.setSpacing(8)
         op_row.addWidget(QLabel("卡片透明度"))
         self.sl_opacity = QSlider(Qt.Orientation.Horizontal)
-        self.sl_opacity.setRange(50, 100)
-        self.sl_opacity.setValue(int((self.ctx.cfg or {}).get("card_opacity", 0.88) * 100))
+        self.sl_opacity.setRange(0, 100)
+        self.sl_opacity.setValue(int((self.ctx.cfg or {}).get("card_opacity", 0.5) * 100))
         self.lbl_op_val = QLabel()
         self.lbl_op_val.setObjectName("tip")
         self.sl_opacity.valueChanged.connect(self._on_opacity_changed)
@@ -1232,8 +1232,8 @@ class SettingsPage(QWidget):
         pn_row.setSpacing(8)
         pn_row.addWidget(QLabel("面板透明度"))
         self.sl_panel = QSlider(Qt.Orientation.Horizontal)
-        self.sl_panel.setRange(50, 100)
-        self.sl_panel.setValue(int((self.ctx.cfg or {}).get("panel_opacity", 0.85) * 100))
+        self.sl_panel.setRange(0, 100)
+        self.sl_panel.setValue(int((self.ctx.cfg or {}).get("panel_opacity", 0.5) * 100))
         self.lbl_panel_val = QLabel()
         self.lbl_panel_val.setObjectName("tip")
         self.sl_panel.valueChanged.connect(self._on_panel_changed)
@@ -1241,6 +1241,18 @@ class SettingsPage(QWidget):
         pn_row.addWidget(self.lbl_panel_val)
         tv.addLayout(pn_row)
         self._update_panel_label(self.sl_panel.value())
+        # 全局字号：小/中/大三档
+        fs_row = QHBoxLayout()
+        fs_row.setSpacing(8)
+        fs_row.addWidget(QLabel("字号大小"))
+        self.cb_font = QComboBox()
+        for label, key in (("小", "small"), ("中", "medium"), ("大", "large")):
+            self.cb_font.addItem(label, key)
+        _fi = self.cb_font.findData((self.ctx.cfg or {}).get("font_scale", "medium"))
+        self.cb_font.setCurrentIndex(max(0, _fi))
+        self.cb_font.currentIndexChanged.connect(self._on_font_changed)
+        fs_row.addWidget(self.cb_font, 1)
+        tv.addLayout(fs_row)
         lay.addWidget(g_theme)
 
         # 记忆
@@ -1259,32 +1271,6 @@ class SettingsPage(QWidget):
         gl.addWidget(self.btn_mem_clear)
         gl.addWidget(self.mem_view)
         lay.addWidget(g_mem)
-
-        # 图片偏移
-        g_img = QGroupBox("图片点击偏移（已按常见版本校准，点击图片位置偏了再调）")
-        fl = QFormLayout(g_img)
-        self.sp_off_x = QSpinBox()
-        self.sp_off_x.setRange(-200, 200)
-        self.sp_off_y = QSpinBox()
-        self.sp_off_y.setRange(-200, 200)
-        fl.addRow("偏移 X", self.sp_off_x)
-        fl.addRow("偏移 Y", self.sp_off_y)
-        self.btn_img_save = QPushButton("保存偏移")
-        self.btn_img_save.clicked.connect(self._save_image_offset)
-        fl.addRow(self.btn_img_save)
-        lay.addWidget(g_img)
-
-        # 发送方式
-        g_send = QGroupBox("成果文件发送方式")
-        sl = QHBoxLayout(g_send)
-        self.cb_send = QComboBox()
-        self.cb_send.addItem("剪贴板粘贴（主用）", "clipboard")
-        self.btn_send_save = QPushButton("保存")
-        self.btn_send_save.clicked.connect(self._save_send_method)
-        sl.addWidget(self.cb_send)
-        sl.addWidget(self.btn_send_save)
-        sl.addStretch(1)
-        lay.addWidget(g_send)
 
         # 微信文件目录（任务附件识别源）
         g_files = QGroupBox("微信文件目录（收到的文件下载位置）")
@@ -1346,11 +1332,6 @@ class SettingsPage(QWidget):
                 self.mem_summary.setText("记忆文件读取失败")
         else:
             self.mem_summary.setText("无记忆文件")
-        off = cfg.get("image_click_offset", [0, 0])
-        self.sp_off_x.setValue(int(off[0]))
-        self.sp_off_y.setValue(int(off[1]))
-        idx = self.cb_send.findData(cfg.get("file_send_method", "clipboard"))
-        self.cb_send.setCurrentIndex(max(0, idx))
         self.ed_files.setText(cfg.get("file_storage_path", ""))
         self.ed_tasks.setText(cfg.get("tasks_dir", ""))
         theme = cfg.get("theme", "blue")
@@ -1360,8 +1341,10 @@ class SettingsPage(QWidget):
             pass
         self._select_wallpaper_item(cfg.get("wallpaper_path", ""))
         self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
-        self.sl_opacity.setValue(int(cfg.get("card_opacity", 0.88) * 100))
-        self.sl_panel.setValue(int(cfg.get("panel_opacity", 0.85) * 100))
+        self.sl_opacity.setValue(int(cfg.get("card_opacity", 0.5) * 100))
+        self.sl_panel.setValue(int(cfg.get("panel_opacity", 0.5) * 100))
+        _fi = self.cb_font.findData(cfg.get("font_scale", "medium"))
+        self.cb_font.setCurrentIndex(max(0, _fi))
         self._refresh_stems()
 
     def _select_wallpaper_item(self, path):
@@ -1415,18 +1398,27 @@ class SettingsPage(QWidget):
         self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), "")
 
     def _apply_theme_qss(self, theme, wp):
-        """应用 QSS + 同步粒子背景层（主题/壁纸/透明度变化后统一入口）。"""
+        """应用 QSS + 同步粒子背景层（主题/壁纸/透明度/字号变化后统一入口）。"""
         from . import build_qss
         from PySide6.QtWidgets import QApplication
         cfg = self.ctx.cfg or {}
         app = QApplication.instance()
         if app is not None:
             app.setStyleSheet(build_qss(theme, wp,
-                                        card_opacity=cfg.get("card_opacity", 0.88),
-                                        panel_opacity=cfg.get("panel_opacity", 0.85)))
+                                        card_opacity=cfg.get("card_opacity", 0.5),
+                                        panel_opacity=cfg.get("panel_opacity", 0.5),
+                                        font_scale=cfg.get("font_scale", "medium")))
         win = getattr(self.ctx, "win", None)
         if win is not None and hasattr(win, "apply_backdrop"):
             win.apply_backdrop(theme, wp)
+
+    def _on_font_changed(self, idx):
+        """字号档位切换：重建 QSS 并保存。"""
+        scale = self.cb_font.currentData() or "medium"
+        self.ctx.cfg["font_scale"] = scale
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"),
+                              self.ed_wallpaper.text().strip())
 
     def _update_op_label(self, val):
         self.lbl_op_val.setText(f"{val}%")
@@ -1493,16 +1485,6 @@ class SettingsPage(QWidget):
                 json.dump({}, f, ensure_ascii=False, indent=2)
         self.refresh()
         QMessageBox.information(self, "已清空", "记忆已清空")
-
-    def _save_image_offset(self):
-        self.ctx.cfg["image_click_offset"] = [self.sp_off_x.value(), self.sp_off_y.value()]
-        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-        QMessageBox.information(self, "已保存", "图片偏移已保存")
-
-    def _save_send_method(self):
-        self.ctx.cfg["file_send_method"] = self.cb_send.currentData()
-        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-        QMessageBox.information(self, "已保存", "发送方式已保存")
 
     def _pick_files_dir(self):
         p = QFileDialog.getExistingDirectory(
