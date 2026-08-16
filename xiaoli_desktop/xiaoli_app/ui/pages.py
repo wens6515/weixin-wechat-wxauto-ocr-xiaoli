@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
     QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox, QSpinBox,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QFrame,
-    QProgressBar, QScrollArea, QSlider,
+    QProgressBar, QScrollArea, QSlider, QHeaderView,
 )
 
 from xiaoli_app import card_store, config_store
@@ -749,12 +749,15 @@ class ModelsPage(QWidget):
         # 隐藏行号列：深色 palette 下垂直表头漏深色成「竖黑条」，且行号无实用价值
         self.table.verticalHeader().setVisible(False)
         self.table.setHorizontalHeaderLabels(["名称", "Base URL", "API Key", "模型", "ID"])
-        # 末列（ID）拉伸填满视口右缘，前四列固定宽度——消除水平滚动条 + ID 贴右边
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setColumnWidth(0, 90)
-        self.table.setColumnWidth(1, 260)
-        self.table.setColumnWidth(2, 190)
-        self.table.setColumnWidth(3, 160)
+        # 列宽布局：模型列 stretch 拉长（内容长），ID 固定窄（内容短），
+        # Key 加长；末列不 stretch（ID 应短而非拉满右缘）
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.setColumnWidth(0, 90)   # 名称
+        self.table.setColumnWidth(1, 240)  # Base URL
+        self.table.setColumnWidth(2, 230)  # API Key（加长）
+        self.table.setColumnWidth(4, 70)   # ID（固定短）
+        self.table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch)  # 模型列拉满剩余
         # 禁止单元格换行（长内容单行截断，避免行高不足内容溢出下边框）
         self.table.setWordWrap(False)
         # 单击即进入编辑（key 框可直接 Ctrl+V 粘贴，不用先敲字符）

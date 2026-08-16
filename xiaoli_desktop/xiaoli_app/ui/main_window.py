@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.pages = {}
         # 导航字号/图标固定（不随字号档位变化）：用户要求导航始终大且居中
-        _icon_size = 40
+        _icon_size = 48
         for cls, name, icon_name in _NAV_ITEMS:
             page = cls(ctx)
             self.pages[name] = page

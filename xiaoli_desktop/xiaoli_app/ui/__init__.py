@@ -145,6 +145,10 @@ QMainWindow { background: $bg; }
 /* 顶层对话框：深色系统 palette 下会漏出黑底（欢迎窗/确认框）——显式覆盖 */
 QDialog { background: $bg; }
 QMessageBox { background: $bg; }
+/* 提示框/确认框固定大字（不随字号档位）：用户要求弹窗始终清晰可读 */
+QMessageBox, QDialog { font-size: 18px; }
+QMessageBox QLabel { font-size: 16px; }
+QDialogButtonBox QPushButton { font-size: 16px; min-height: 38px; padding: 8px 26px; }
 /* 滚动区/页面容器：viewport 透出背景层，避免深色 palette 大黑边 */
 QScrollArea, QStackedWidget { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
@@ -210,7 +214,7 @@ QListWidget::item:selected { background: $hover; color: $text; }
 QListWidget#navList { background: transparent; border: none;
                       border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
 QListWidget#navList::item { padding: 8px 10px; border-radius: 10px;
-                            margin: 3px 6px; color: $muted; font-size: 34px;
+                            margin: 3px 6px; color: $muted; font-size: 42px;
                             font-weight: 600; letter-spacing: 2px; }
 QListWidget#navList::item:hover { background: $nav_hover; color: $text; }
 QListWidget#navList::item:selected {
