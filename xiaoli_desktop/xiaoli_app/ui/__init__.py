@@ -2,37 +2,140 @@
 """PySide6 控制面板：托盘（tray.py）+ 主窗口（main_window.py）+ 页面（pages.py）。
 
 AppContext：引擎/总线/配置的轻量容器，页面与入口共享。
-主题系统：THEMES 定义 5 套配色，build_qss 按主题 + 可选壁纸生成 QSS；
-毛玻璃用半透明卡片（rgba）透过壁纸/背景实现（Qt QSS 无真高斯模糊）。
+主题系统：THEMES 定义 12 套主题（11 套精选风格 + blue 兼容默认），
+build_qss 按主题 + 可选壁纸生成 QSS；毛玻璃用半透明卡片（rgba）透过
+壁纸/背景实现（Qt QSS 无真高斯模糊）。组件语言统一现代规范：
+大圆角卡片、渐变主按钮、focus 高亮环、圆角滚动条、tooltip/菜单样式。
 """
 import os
 import sys
 from string import Template
 
-# 5 套主题配色。p1/p2 为渐变主色两端；bg 背景；card 卡片（半透明=毛玻璃）；
-# text/muted 文字；border/hover/input_bg 边框/悬停/输入框底色。
-THEMES = {
-    "blue":    {"label": "蓝紫（默认）", "bg": "#F4F7FC", "p1": "#5B8CFF", "p2": "#8B5CF6",
-                "card": "rgba(255,255,255,0.88)", "text": "#374151", "muted": "#94A3B8",
-                "border": "#E8EDF5", "hover": "#EAF0FE", "input_bg": "#FFFFFF",
-                "frame": "#FBFCFE", "header": "#F4F7FC"},
-    "dark":    {"label": "暗夜深色", "bg": "#16161F", "p1": "#6366F1", "p2": "#8B5CF6",
-                "card": "rgba(34,34,50,0.82)", "text": "#E2E8F0", "muted": "#7C8AA0",
-                "border": "#2D2D3F", "hover": "#3B3B5C", "input_bg": "#22222E",
-                "frame": "#1F1F2E", "header": "#1A1A28"},
-    "emerald": {"label": "翡翠绿", "bg": "#F0FDF4", "p1": "#10B981", "p2": "#059669",
-                "card": "rgba(255,255,255,0.88)", "text": "#374151", "muted": "#94A3B8",
-                "border": "#D1FAE5", "hover": "#D1FAE5", "input_bg": "#FFFFFF",
-                "frame": "#F0FDF4", "header": "#ECFDF5"},
-    "sunset":  {"label": "落日橙", "bg": "#FFF7ED", "p1": "#F59E0B", "p2": "#EF4444",
-                "card": "rgba(255,255,255,0.88)", "text": "#374151", "muted": "#94A3B8",
-                "border": "#FED7AA", "hover": "#FFEDD5", "input_bg": "#FFFFFF",
-                "frame": "#FFF7ED", "header": "#FFFBEB"},
-    "rose":    {"label": "樱花粉", "bg": "#FDF2F8", "p1": "#EC4899", "p2": "#8B5CF6",
-                "card": "rgba(255,255,255,0.88)", "text": "#374151", "muted": "#94A3B8",
-                "border": "#FBCFE8", "hover": "#FCE7F3", "input_bg": "#FFFFFF",
-                "frame": "#FDF2F8", "header": "#FDF2F8"},
+# 基础色板：所有主题的兜底字段。主题 dict 覆盖需要的字段，缺失的用这里补，
+# 保证未来新增主题缺字段也不会 KeyError（substitute 前合并）。
+_DEFAULTS = {
+    "bg": "#F4F7FC", "p1": "#5B8CFF", "p2": "#8B5CF6",
+    "card": "rgba(255,255,255,0.88)", "text": "#374151", "muted": "#94A3B8",
+    "border": "#E8EDF5", "hover": "#EAF0FE", "input_bg": "#FFFFFF",
+    "frame": "#FBFCFE", "header": "#F4F7FC",
+    "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B",
+    "accent": "#5B8CFF", "focus": "#5B8CFF", "glow": "#8B5CF6",
+    "scrollbar": "#CBD5E1", "card_alt": "#F8FAFC",
 }
+
+# 12 套主题。字段语义：
+#   label 显示名 / group 设置页分组（浅色/深色/氛围）
+#   p1/p2 渐变主色两端；bg 背景；card 卡片（半透明=毛玻璃）；
+#   text/muted 文字/次要文字；border/hover/input_bg 边框/悬停/输入框底色；
+#   frame/header 面板/表头底色；success/danger/warning 状态色（环境检测/进度）；
+#   accent 次强调色；focus 输入框聚焦环色；glow 发光/光晕色（霓虹、弥散渐变）；
+#   scrollbar 滚动条滑块色；card_alt 次级卡片底色。
+THEMES = {
+    # ---- 浅色系 ----
+    "blue": {"label": "蓝紫·默认（兼容保底）", "group": "浅色",
+             "bg": "#F4F7FC", "p1": "#5B8CFF", "p2": "#8B5CF6",
+             "card": "rgba(255,255,255,0.88)", "text": "#374151", "muted": "#94A3B8",
+             "border": "#E8EDF5", "hover": "#EAF0FE", "input_bg": "#FFFFFF",
+             "frame": "#FBFCFE", "header": "#F4F7FC",
+             "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B",
+             "accent": "#5B8CFF", "focus": "#5B8CFF", "glow": "#8B5CF6",
+             "scrollbar": "#CBD5E1", "card_alt": "#F8FAFC"},
+    "fluent": {"label": "Fluent 亚克力", "group": "浅色",
+               "bg": "#F3F3F3", "p1": "#0067C0", "p2": "#2B7CD3",
+               "card": "rgba(255,255,255,0.72)", "text": "#1B1B1B", "muted": "#757575",
+               "border": "#E0E0E0", "hover": "#E5F1FB", "input_bg": "#FFFFFF",
+               "frame": "#F7F7F7", "header": "#F3F3F3",
+               "success": "#107C10", "danger": "#C42B1C", "warning": "#C73E1D",
+               "accent": "#0067C0", "focus": "#0067C0", "glow": "#4CC2FF",
+               "scrollbar": "#C7C7C7", "card_alt": "#FAFAFA"},
+    "m3": {"label": "Material You", "group": "浅色",
+           "bg": "#FEF7FF", "p1": "#6750A4", "p2": "#7D5260",
+           "card": "rgba(255,255,255,0.90)", "text": "#1C1B1F", "muted": "#79747E",
+           "border": "#E6E0E9", "hover": "#E8DEF8", "input_bg": "#F7F2FA",
+           "frame": "#FDF8FD", "header": "#FEF7FF",
+           "success": "#386A20", "danger": "#B3261E", "warning": "#7A5900",
+           "accent": "#6750A4", "focus": "#6750A4", "glow": "#EADDFF",
+           "scrollbar": "#CAC4D0", "card_alt": "#F7F2FA"},
+    "linear": {"label": "极简 Linear", "group": "浅色",
+               "bg": "#FFFFFF", "p1": "#5E6AD2", "p2": "#5E6AD2",
+               "card": "#FFFFFF", "text": "#1F2328", "muted": "#6E6E6E",
+               "border": "#E4E4E7", "hover": "#F4F4F5", "input_bg": "#FAFAFA",
+               "frame": "#FCFCFC", "header": "#FFFFFF",
+               "success": "#4DAC37", "danger": "#E5484D", "warning": "#F5A524",
+               "accent": "#5E6AD2", "focus": "#5E6AD2", "glow": "#EFEFFF",
+               "scrollbar": "#D4D4D8", "card_alt": "#FAFAFA"},
+    "aurora": {"label": "弥散渐变 Aurora", "group": "浅色",
+               "bg": "#F5F7FF", "p1": "#667EEA", "p2": "#F093FB",
+               "card": "rgba(255,255,255,0.68)", "text": "#2D3350", "muted": "#8A90B0",
+               "border": "#E3E7F5", "hover": "#ECEEFF", "input_bg": "#FFFFFF",
+               "frame": "#F8FAFF", "header": "#F5F7FF",
+               "success": "#34D399", "danger": "#F87171", "warning": "#FBBF24",
+               "accent": "#A78BFA", "focus": "#667EEA", "glow": "#C084FC",
+               "scrollbar": "#C7CDE8", "card_alt": "#FFFFFF"},
+    "ink": {"label": "中国风水墨", "group": "浅色",
+            "bg": "#F7F3EA", "p1": "#C0402F", "p2": "#7A5C3E",
+            "card": "rgba(255,252,245,0.88)", "text": "#2C2A26", "muted": "#8B847A",
+            "border": "#E2DAC8", "hover": "#EFE7D8", "input_bg": "#FDFAF3",
+            "frame": "#FAF6EE", "header": "#F7F3EA",
+            "success": "#5B7B5A", "danger": "#A63D2F", "warning": "#B8860B",
+            "accent": "#8C3B2E", "focus": "#C0402F", "glow": "#C0402F",
+            "scrollbar": "#CFC5B0", "card_alt": "#FDFAF3"},
+    # ---- 深色系 ----
+    "dracula": {"label": "Dracula 德古拉", "group": "深色",
+                "bg": "#282A36", "p1": "#BD93F9", "p2": "#FF79C6",
+                "card": "rgba(40,42,54,0.85)", "text": "#F8F8F2", "muted": "#8A8FA3",
+                "border": "#44475A", "hover": "#3B3E4D", "input_bg": "#1F2129",
+                "frame": "#232530", "header": "#282A36",
+                "success": "#50FA7B", "danger": "#FF5555", "warning": "#F1FA8C",
+                "accent": "#8BE9FD", "focus": "#BD93F9", "glow": "#FF79C6",
+                "scrollbar": "#5A5E6E", "card_alt": "#2F3242"},
+    "nord": {"label": "Nord 北极", "group": "深色",
+             "bg": "#2E3440", "p1": "#88C0D0", "p2": "#81A1C1",
+             "card": "rgba(46,52,64,0.85)", "text": "#ECEFF4", "muted": "#7B88A1",
+             "border": "#434C5E", "hover": "#3B4252", "input_bg": "#272C36",
+             "frame": "#2B303B", "header": "#2E3440",
+             "success": "#A3BE8C", "danger": "#BF616A", "warning": "#EBCB8B",
+             "accent": "#8FBCBB", "focus": "#88C0D0", "glow": "#88C0D0",
+             "scrollbar": "#616E88", "card_alt": "#3B4252"},
+    "onedark": {"label": "One Dark", "group": "深色",
+                "bg": "#282C34", "p1": "#61AFEF", "p2": "#C678DD",
+                "card": "rgba(40,44,52,0.85)", "text": "#ABB2BF", "muted": "#6F7683",
+                "border": "#3E4452", "hover": "#31363F", "input_bg": "#23262D",
+                "frame": "#262A31", "header": "#282C34",
+                "success": "#98C379", "danger": "#E06C75", "warning": "#E5C07B",
+                "accent": "#56B6C2", "focus": "#61AFEF", "glow": "#C678DD",
+                "scrollbar": "#4B5263", "card_alt": "#2F343D"},
+    "catppuccin": {"label": "Catppuccin", "group": "深色",
+                   "bg": "#1E1E2E", "p1": "#89B4FA", "p2": "#CBA6F7",
+                   "card": "rgba(30,30,46,0.85)", "text": "#CDD6F4", "muted": "#9399B2",
+                   "border": "#45475A", "hover": "#313244", "input_bg": "#181825",
+                   "frame": "#1B1B29", "header": "#1E1E2E",
+                   "success": "#A6E3A1", "danger": "#F38BA8", "warning": "#F9E2AF",
+                   "accent": "#94E2D5", "focus": "#89B4FA", "glow": "#CBA6F7",
+                   "scrollbar": "#585B70", "card_alt": "#313244"},
+    "cyberpunk": {"label": "赛博朋克", "group": "深色",
+                  "bg": "#0D0221", "p1": "#00F0FF", "p2": "#FF00FF",
+                  "card": "rgba(18,8,46,0.85)", "text": "#E6E1FF", "muted": "#8B7CC8",
+                  "border": "#3D2E63", "hover": "#1E1240", "input_bg": "#150A2E",
+                  "frame": "#12072B", "header": "#0D0221",
+                  "success": "#00FF9D", "danger": "#FF3860", "warning": "#FFD700",
+                  "accent": "#00F0FF", "focus": "#00F0FF", "glow": "#FF00FF",
+                  "scrollbar": "#4A3A7A", "card_alt": "#1A0E38"},
+    "tokyonight": {"label": "Tokyo Night", "group": "深色",
+                   "bg": "#1A1B26", "p1": "#7AA2F7", "p2": "#BB9AF7",
+                   "card": "rgba(26,27,38,0.85)", "text": "#C0CAF5", "muted": "#6B7390",
+                   "border": "#2F354D", "hover": "#292E42", "input_bg": "#16161E",
+                   "frame": "#1C1D29", "header": "#1A1B26",
+                   "success": "#9ECE6A", "danger": "#F7768E", "warning": "#E0AF68",
+                   "accent": "#7DCFFF", "focus": "#7AA2F7", "glow": "#BB9AF7",
+                   "scrollbar": "#3B4261", "card_alt": "#24283B"},
+}
+
+# Aurora 弥散渐变：斜向三段色彩过渡（紫→淡紫→粉），背景色由主题字段生成
+_AURORA_BG = (
+    "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+    "stop:0 {glow_a}, stop:0.45 {glow_b}, stop:0.75 {glow_c}, stop:1 {bg});"
+)
 
 _QSS_TEMPLATE = Template("""
 * { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
@@ -49,38 +152,47 @@ QTabBar::tab:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
 QLabel#title { font-size: 26px; font-weight: 700; color: $p1; }
 QLabel#subtitle { font-size: 13px; color: $muted; }
 QLabel#stateLabel { font-size: 14px; color: $muted; }
-QFrame#card { background: $card; border: 1px solid $border; border-radius: 14px; }
-QPushButton#btnMain { color: white; border: none; border-radius: 12px;
+/* 环境检测标签（HomePage）：tag 状态色跟随主题，不再散落硬编码 */
+QLabel#envTag { font-weight: 600; }
+QLabel#envOk { font-weight: 600; color: $success; }
+QLabel#envBad { font-weight: 600; color: $danger; }
+QLabel#envPending { font-weight: 600; color: $muted; }
+/* 页内提示文字（ModelsPage tip_model 等） */
+QLabel#tip { color: $muted; font-size: 12px; }
+QFrame#card { background: $card; border: 1px solid $border; border-radius: 16px; }
+QPushButton#btnMain { color: white; border: none; border-radius: 14px;
                       font-size: 16px; font-weight: 600; padding: 12px 36px;
                       background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); }
 QPushButton#btnMain[tone="primary"]:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); }
 QPushButton#btnMain[tone="primary"]:pressed { background: $p2; }
-QPushButton#btnMain[tone="primary"]:disabled { background: #B7C7F5; }
+QPushButton#btnMain[tone="primary"]:disabled { background: $muted; }
 QPushButton#btnMain[tone="warn"] { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 #FBBF24, stop:1 #F59E0B); }
 QPushButton#btnMain[tone="warn"]:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 #FCD34D, stop:1 #FBBF24); }
 QPushButton#btnMain[tone="warn"]:pressed { background: #D97706; }
-QProgressBar { border: none; border-radius: 7px; background: $border; height: 12px; }
+QProgressBar { border: none; border-radius: 8px; background: $border; height: 12px; }
 QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                      stop:0 $p1, stop:1 $p2); border-radius: 7px; }
-QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 9px;
+                      stop:0 $p1, stop:1 $p2); border-radius: 8px; }
+QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 10px;
               padding: 8px 20px; min-height: 32px; color: $text; font-size: 13px; font-weight: 500; }
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
 QPushButton:pressed { background: $hover; }
 QPushButton:disabled { color: $muted; background: $frame; border-color: $border; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-    background: $input_bg; border: 1px solid $border; border-radius: 8px;
+    background: $input_bg; border: 1px solid $border; border-radius: 10px;
     padding: 5px 10px; }
 /* 下拉弹层（QComboBox 弹出的列表）：深色系统主题下 palette 文字是白色，
    必须显式设深灰文字 + 白底，否则浅色界面上下拉项白字看不清 */
 QComboBox QAbstractItemView {
     color: $text; background: $input_bg; border: 1px solid $border;
-    border-radius: 8px; selection-background-color: $hover; selection-color: $text; }
+    border-radius: 10px; padding: 4px; selection-background-color: $hover; selection-color: $text; }
+QComboBox QAbstractItemView::item { padding: 6px 10px; border-radius: 6px; }
+QComboBox QAbstractItemView::item:selected { background: $hover; color: $text; }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
-QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid $p1; background: $input_bg; }
+QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid $focus; background: $input_bg; }
 QListWidget, QTableWidget { background: $input_bg; border: 1px solid $border;
                             border-radius: 12px; }
 QListWidget::item { padding: 7px 10px; border-radius: 8px; margin: 2px 4px; }
@@ -106,7 +218,41 @@ QGroupBox { border: 1px solid $border; border-radius: 12px; margin-top: 12px;
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px;
                    color: $p1; }
 QStatusBar { background: transparent; color: $muted; }
+/* 滚动条：细圆角滑块，替代 Windows 原生大滚动条（丑的重要来源） */
+QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
+QScrollBar::handle:vertical { background: $scrollbar; border-radius: 4px;
+                              min-height: 30px; }
+QScrollBar::handle:vertical:hover { background: $muted; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:horizontal { background: $scrollbar; border-radius: 4px;
+                                min-width: 30px; }
+QScrollBar::handle:horizontal:hover { background: $muted; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+/* 悬浮提示 */
+QToolTip { background: $card; color: $text; border: 1px solid $border;
+           border-radius: 8px; padding: 5px 10px; font-size: 12px; }
+/* 右键/下拉菜单 */
+QMenu { background: $card; border: 1px solid $border; border-radius: 12px;
+        padding: 6px; }
+QMenu::item { padding: 7px 20px; border-radius: 7px; color: $text; }
+QMenu::item:selected { background: $hover; }
+QMenu::item:disabled { color: $muted; }
+QMenu::separator { height: 1px; background: $border; margin: 5px 8px; }
+/* 复选/单选指示器：胶囊圆角，选中渐变填充 */
+QCheckBox::indicator, QRadioButton::indicator { width: 18px; height: 18px;
+    border: 1px solid $border; border-radius: 5px; background: $input_bg; }
+QCheckBox::indicator:hover, QRadioButton::indicator:hover { border-color: $p1; }
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 $p1, stop:1 $p2);
+    border: none; }
+QRadioButton::indicator { border-radius: 9px; }
+QRadioButton::indicator:checked { border-radius: 9px; }
 """)
+
+# 各主题背景光晕透明度（浅色 0.16 柔和；深色 0.22 更明显）
+_GLOW_ALPHA = {"浅色": 0.16, "深色": 0.22}
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -120,14 +266,26 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def build_qss(theme: str = "blue", wallpaper: str = "") -> str:
-    """按主题名 + 可选壁纸路径生成 QSS。壁纸为空时用主题色径向光晕背景。"""
-    t = THEMES.get(theme, THEMES["blue"])
+    """按主题名 + 可选壁纸路径生成 QSS。壁纸为空时用主题色渐变背景。
+
+    aurora 主题用斜向三段弥散渐变（紫→淡紫→粉）；其余主题用顶部主题色
+    光晕 → 底部背景色（深色主题光晕更明显）。
+    """
+    t = dict(_DEFAULTS)
+    t.update(THEMES.get(theme, THEMES["blue"]))
     if wallpaper and os.path.isfile(wallpaper):
         wp = wallpaper.replace("\\", "/")
         bg_rule = f'background-image: url("{wp}"); background-position: center;'
+    elif theme == "aurora":
+        bg_rule = _AURORA_BG.format(
+            glow_a=_hex_to_rgba(t["p1"], 0.40),
+            glow_b=_hex_to_rgba(t["glow"], 0.32),
+            glow_c=_hex_to_rgba(t["p2"], 0.30),
+            bg=t["bg"])
     else:
         # 顶部主题色淡光晕 → 底部背景色，比纯色更有层次
-        soft = _hex_to_rgba(t["p1"], 0.16)
+        alpha = _GLOW_ALPHA.get(t.get("group", "浅色"), 0.16)
+        soft = _hex_to_rgba(t["p1"], alpha)
         bg_rule = (f"background: qradialgradient(cx:0.5, cy:0, radius:1.3, "
                    f"fx:0.5, fy:0, stop:0 {soft}, stop:1 {t['bg']});")
     return _QSS_TEMPLATE.substitute(**t, bg_rule=bg_rule)
