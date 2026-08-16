@@ -197,13 +197,15 @@ def main():
 
     # 1. 配置：加载/迁移/投影（不连微信、不启动引擎）
     ctx.cfg = config_store.load_config_store(ctx.cfg_path, ctx.cards_dir)
-    # 应用持久化主题/壁纸（默认 blue 已随 APP_QSS 应用，非默认或带壁纸时覆盖）
+    # 应用持久化主题/壁纸/字号（config_store 已迁移默认：theme=tokyonight、
+    # font_scale=small；壁纸空时兜底内置默认款）。总是按 config 重建——
+    # APP_QSS 是 blue 向后兼容快照，不能作为新默认主题的落点。
     from xiaoli_app.ui import build_qss, default_wallpaper_path
-    _theme = ctx.cfg.get("theme", "blue")
+    _theme = ctx.cfg.get("theme", "tokyonight")
     _wp = ctx.cfg.get("wallpaper_path", "")
     _opacity = ctx.cfg.get("card_opacity", 0.5)
     _p_opacity = ctx.cfg.get("panel_opacity", 0.5)
-    _font = ctx.cfg.get("font_scale", "medium")
+    _font = ctx.cfg.get("font_scale", "small")
     # 首次启动兜底：无壁纸配置 → 内置默认壁纸（「壁纸」目录里的默认款）
     if not _wp:
         _wp = default_wallpaper_path()
@@ -213,9 +215,8 @@ def main():
                 config_store.save_config(ctx.cfg, ctx.cfg_path)
             except OSError:
                 pass
-    if _theme != "blue" or _wp or abs(_opacity - 0.5) > 0.001 or abs(_p_opacity - 0.5) > 0.001:
-        app.setStyleSheet(build_qss(_theme, _wp, card_opacity=_opacity,
-                                    panel_opacity=_p_opacity, font_scale=_font))
+    app.setStyleSheet(build_qss(_theme, _wp, card_opacity=_opacity,
+                                panel_opacity=_p_opacity, font_scale=_font))
     # 首次启动（config 文件不存在）或任务目录/微信文件目录未配置 → 引导选择，
     # 避免默认 D:\ 盘缺失崩溃、以及旧 config 升级后任务桥目录为空静默失效
     if needs_first_run(ctx.cfg_path, ctx.cfg):

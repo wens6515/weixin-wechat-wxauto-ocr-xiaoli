@@ -33,6 +33,15 @@ _DEFAULTS = {
 #   accent 次强调色；focus 输入框聚焦环色；glow 发光/光晕色（霓虹、弥散渐变）；
 #   scrollbar 滚动条滑块色；card_alt 次级卡片底色。
 THEMES = {
+    # Tokyo Night 置顶（用户指定：默认主题，排序第一个展示）
+    "tokyonight": {"label": "Tokyo Night", "group": "深色",
+                   "bg": "#1A1B26", "p1": "#7AA2F7", "p2": "#BB9AF7",
+                   "card": "rgba(26,27,38,0.85)", "text": "#C0CAF5", "muted": "#6B7390",
+                   "border": "#2F354D", "hover": "#292E42", "input_bg": "#16161E",
+                   "frame": "#1C1D29", "header": "#1A1B26",
+                   "success": "#9ECE6A", "danger": "#F7768E", "warning": "#E0AF68",
+                   "accent": "#7DCFFF", "focus": "#7AA2F7", "glow": "#BB9AF7",
+                   "scrollbar": "#3B4261", "card_alt": "#24283B"},
     # ---- 浅色系 ----
     "blue": {"label": "蓝紫·默认（兼容保底）", "group": "浅色",
              "bg": "#F4F7FC", "p1": "#5B8CFF", "p2": "#8B5CF6",
@@ -123,14 +132,6 @@ THEMES = {
                   "success": "#00FF9D", "danger": "#FF3860", "warning": "#FFD700",
                   "accent": "#00F0FF", "focus": "#00F0FF", "glow": "#FF00FF",
                   "scrollbar": "#4A3A7A", "card_alt": "#1A0E38"},
-    "tokyonight": {"label": "Tokyo Night", "group": "深色",
-                   "bg": "#1A1B26", "p1": "#7AA2F7", "p2": "#BB9AF7",
-                   "card": "rgba(26,27,38,0.85)", "text": "#C0CAF5", "muted": "#6B7390",
-                   "border": "#2F354D", "hover": "#292E42", "input_bg": "#16161E",
-                   "frame": "#1C1D29", "header": "#1A1B26",
-                   "success": "#9ECE6A", "danger": "#F7768E", "warning": "#E0AF68",
-                   "accent": "#7DCFFF", "focus": "#7AA2F7", "glow": "#BB9AF7",
-                   "scrollbar": "#3B4261", "card_alt": "#24283B"},
 }
 
 # Aurora 弥散渐变由 ParticleBackdrop 运行时绘制（斜向三段色彩过渡），
@@ -399,8 +400,9 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 # ---------- 内置壁纸库 ----------
 
 _WALLPAPER_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
-# 默认壁纸文件名关键词（匹配「壁纸」目录里的默认款）
-_DEFAULT_WALLPAPER_KEY = "活力少女"
+# 默认壁纸文件名关键词（匹配「壁纸」目录里的默认款）——
+# 用户指定：启动默认用【哲风壁纸】二次元角色-动漫.png
+_DEFAULT_WALLPAPER_KEY = "二次元角色-动漫"
 
 
 def wallpapers_dir() -> str:
@@ -437,7 +439,7 @@ def list_wallpapers():
 
 
 def default_wallpaper_path() -> str:
-    """默认壁纸：文件名含「活力少女」的那张；找不到回退第一张；目录空返回空串。"""
+    """默认壁纸：文件名含「二次元角色-动漫」的那张；找不到回退第一张；目录空返回空串。"""
     items = list_wallpapers()
     for p, f in items:
         if _DEFAULT_WALLPAPER_KEY in f:

@@ -466,14 +466,22 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "image_click_offset": [-200, -130],  # 图片点击偏移（用户实测校准 2026-08-04：真人点击测 [-199,-131] 取整；位置偏了再到设置页调）
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
-        "theme": "blue",  # 界面主题（THEMES 键：blue 兼容默认 + 11 套精选风格，见 ui/__init__.py）
+        "theme": "tokyonight",  # 界面主题（用户指定：默认用最后一套 Tokyo Night，排序提到最前见 ui/__init__.py THEMES）
         "card_opacity": 0.5,  # 卡片不透明度 0~1.0（设置页滑块调节毛玻璃强度，默认 50%）
         "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
-        "font_scale": "medium",  # 全局字号档位：small/medium/large（设置页三档选择）
-        "wallpaper_path": "",  # 背景壁纸图路径（空 = 主题纯色背景）
+        "font_scale": "small",  # 全局字号档位：small/medium/large（用户指定：启动默认小字号）
+        "wallpaper_path": "",  # 背景壁纸图路径（空 = 启动时兜底内置默认壁纸【二次元角色-动漫】）
     }.items():
         if k not in cfg:
             cfg[k] = v
+    # UI 新默认迁移（用户指定 2026-08-17）：旧默认主题 blue → tokyonight、
+    # 字号 medium → small、壁纸空 → 二次元角色动漫（启动兜底解析）。
+    # 仅当值仍是「出厂默认」时迁移——用户已在设置页手动改过的（如换成
+    # 其他主题/字号）不覆盖，尊重用户选择。
+    if cfg.get("theme") in ("blue", None):
+        cfg["theme"] = "tokyonight"
+    if cfg.get("font_scale") in ("medium", None):
+        cfg["font_scale"] = "small"
     # 任务目录：用户显式设置的路径一律保留（引导/设置页的选择即事实），
     # 为空时给便携默认。天枢 CLI 路径检查基于 cwd——tianshu_workdir 跟随
     # tasks_dir 父目录（sync_workdir_to_tasks），用户选任意目录都能工作，

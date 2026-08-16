@@ -299,9 +299,10 @@ class MainWindow(QMainWindow):
         h.addWidget(self.btn_max)
         h.addWidget(btn_close)
         shell_lay.addWidget(tb)
+        self._max_state = False  # 最大化标志（isMaximized 异步不可靠，自维护）
         # 窗口最大化/还原时切换按钮图标
         def _sync_max_btn(*_a):
-            if self.isMaximized():
+            if self._max_state:
                 self.btn_max.setText("❐")  # 还原
                 self.btn_max.setToolTip("还原")
             else:
@@ -329,10 +330,24 @@ class MainWindow(QMainWindow):
         self._toggle_max()
 
     def _toggle_max(self):
-        if self.isMaximized():
-            self.showNormal()
-        else:
+        """最大化 ⇄ 还原。
+
+        ⚠ 不能用 isMaximized() 判断状态：showMaximized() 后该值异步才变
+        True（offscreen 实测：showMaximized 后立即查仍 False）——会导致
+        「点一次最大化、再点一次还原无反应，要点两次才还原」。
+        用内部标志位 self._max_state 自维护；changeEvent 在本轮事件循环
+        内（QTimer.singleShot 延迟清除防抖）跳过覆盖，仅同步外部触发的
+        状态变更（Win+方向键/任务栏）。
+        """
+        self._max_state = not getattr(self, "_max_state", False)
+        self._suppress_max_sync = True  # 防抖：本轮 toggle 引发的状态变更不反向覆盖
+        # 防抖标志延迟清除：changeEvent 可能在 showMaximized 之后异步触发
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: setattr(self, "_suppress_max_sync", False))
+        if self._max_state:
             self.showMaximized()
+        else:
+            self.showNormal()
         sync = getattr(self, "_sync_max_btn", None)
         if sync is not None:
             sync()
@@ -341,6 +356,9 @@ class MainWindow(QMainWindow):
         """最大化/还原/最小化时同步标题栏按钮图标。"""
         super().changeEvent(event)
         if event.type() == event.Type.WindowStateChange:
+            if not getattr(self, "_suppress_max_sync", False):
+                # 外部触发（Win+方向键、任务栏右键、双击等）→ 以真实状态为准
+                self._max_state = self.isMaximized()
             sync = getattr(self, "_sync_max_btn", None)
             if sync is not None:
                 sync()

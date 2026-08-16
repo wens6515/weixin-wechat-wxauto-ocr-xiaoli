@@ -552,8 +552,11 @@ class CardsPage(QWidget):
         # 不破坏角色卡数据），仅从表单隐藏——QFormLayout.setRowVisible。
         for _row in range(4, 10):  # 聊天提供商..分类模型 = 第 4~9 行
             form.setRowVisible(_row, False)
-        # 人格设定撑大：隐藏 6 行后占主导空间
-        self.ed_prompt.setMinimumHeight(220)
+        # 人格设定撑大：隐藏 6 行后占主导空间。⚠ 不能用固定 min-height 220——
+        # 窗口缩小时硬占位会把下方行（温度/top_p）挤出重叠（用户实测「人格设定
+        # 下边框和 top_p 重叠」）。改为：小最小高 + Expanding 策略，靠布局伸展
+        # 吃剩余空间，窗口缩小时自适应压缩。
+        self.ed_prompt.setMinimumHeight(100)
         from PySide6.QtWidgets import QSizePolicy
         self.ed_prompt.setSizePolicy(QSizePolicy.Policy.Expanding,
                                      QSizePolicy.Policy.Expanding)
