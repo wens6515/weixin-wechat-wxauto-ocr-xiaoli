@@ -120,8 +120,23 @@ class ParticleBackdrop(QWidget):
         if w <= 0 or h <= 0:
             return
 
+        # 1. 壁纸铺底（所有主题共用，包括 aurora——之前 aurora 分支漏画壁纸导致
+        #    「背景被剔除」）
+        has_wp = not self._wallpaper.isNull()
+        if has_wp:
+            p.drawPixmap(0, 0, self._wallpaper.scaled(
+                w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation))
+            veil = _hex_rgb(t["bg"])
+            veil.setAlphaF(0.45)
+            p.fillRect(QRectF(0, 0, w, h), QBrush(veil))
+        else:
+            # 无壁纸：兜底纯 bg
+            p.fillRect(QRectF(0, 0, w, h), _hex_rgb(t["bg"]))
+
+        # 2. 主题背景层
         if self._theme_key == "aurora":
-            # 斜向三段弥散渐变（紫→淡紫→粉），整窗覆盖
+            # 斜向三段弥散渐变（紫→淡紫→粉），半透明叠加在壁纸上
             grad = QLinearGradient(QPointF(0, 0), QPointF(w, h))
             p1 = _hex_rgb(t["p1"])
             glow = _hex_rgb(t.get("glow", t["p2"]))
@@ -135,17 +150,6 @@ class ParticleBackdrop(QWidget):
             grad.setColorAt(1.0, _hex_rgb(t["bg"]))
             p.fillRect(QRectF(0, 0, w, h), QBrush(grad))
         else:
-            # 壁纸：整窗缩放铺底 + 半透明 bg 遮罩（保证前景可读）
-            if not self._wallpaper.isNull():
-                p.drawPixmap(0, 0, self._wallpaper.scaled(
-                    w, h, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation))
-                veil = _hex_rgb(t["bg"])
-                veil.setAlphaF(0.45)
-                p.fillRect(QRectF(0, 0, w, h), QBrush(veil))
-            else:
-                # 兜底纯 bg
-                p.fillRect(QRectF(0, 0, w, h), _hex_rgb(t["bg"]))
             # 大半径柔和径向光晕：中心偏上、半径=0.9 倍对角 → 过渡平滑不形成色带
             grad = QRadialGradient(QPointF(w * 0.5, h * 0.32),
                                    max(w, h) * 0.9)
