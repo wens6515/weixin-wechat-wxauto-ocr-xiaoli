@@ -62,13 +62,14 @@ class HomePage(QWidget):
         title_row.addWidget(self.lbl_logo)
         self.lbl_title = QLabel("小漓")
         self.lbl_title.setObjectName("title")
-        # 标题淡主题色光晕（增强文字质感；随卡片透明度滑块调节全局半透明时仍清晰）
+        # 标题淡主题色光晕（增强文字质感；颜色随主题主色，切主题时 apply_theme 更新）
         from PySide6.QtGui import QColor
         from PySide6.QtWidgets import QGraphicsDropShadowEffect
         _sh = QGraphicsDropShadowEffect(self.lbl_title)
         _sh.setBlurRadius(18)
         _sh.setOffset(0, 2)
         _sh.setColor(QColor(91, 140, 255, 90))
+        self._title_shadow = _sh
         self.lbl_title.setGraphicsEffect(_sh)
         title_row.addWidget(self.lbl_title)
         title_row.addStretch(1)
@@ -168,6 +169,18 @@ class HomePage(QWidget):
             r.addWidget(w)
         r.addStretch(1)
         return r
+
+    def apply_theme(self, theme_key):
+        """切主题时更新标题光晕颜色（主窗口 apply_backdrop 遍历调用）。"""
+        from . import THEMES
+        from PySide6.QtGui import QColor
+        t = THEMES.get(theme_key, THEMES["blue"])
+        p1 = t.get("p1", "#5B8CFF")
+        c = QColor(p1)
+        c.setAlpha(90)
+        shadow = getattr(self, "_title_shadow", None)
+        if shadow is not None:
+            shadow.setColor(c)
 
     # ---------- 主按钮状态机 ----------
 
@@ -748,14 +761,15 @@ class ModelsPage(QWidget):
         self.table = QTableWidget(0, 5)
         # 隐藏行号列：深色 palette 下垂直表头漏深色成「竖黑条」，且行号无实用价值
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)  # 交替行色（配合 QSS alternate-background-color）
         self.table.setHorizontalHeaderLabels(["名称", "Base URL", "API Key", "模型", "ID"])
-        # 列宽布局：模型列 stretch 拉长（内容长），ID 固定窄（内容短），
-        # Key 加长；末列不 stretch（ID 应短而非拉满右缘）
+        # 列宽布局：模型列 stretch 拉长（内容长），Key/Base URL 加长，
+        # ID 适度拉长（用户反馈 70px 太短，拉到 110 可读）；末列不 stretch
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setColumnWidth(0, 90)   # 名称
         self.table.setColumnWidth(1, 240)  # Base URL
-        self.table.setColumnWidth(2, 230)  # API Key（加长）
-        self.table.setColumnWidth(4, 70)   # ID（固定短）
+        self.table.setColumnWidth(2, 240)  # API Key（加长）
+        self.table.setColumnWidth(4, 110)  # ID（拉长，用户反馈原来太短）
         self.table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch)  # 模型列拉满剩余
         # 禁止单元格换行（长内容单行截断，避免行高不足内容溢出下边框）
@@ -1042,6 +1056,7 @@ class TasksPage(QWidget):
         self.table = QTableWidget(0, 4)
         # 隐藏行号列（同 ModelsPage：防深色 palette 竖黑条）
         self.table.verticalHeader().setVisible(False)
+        self.table.setAlternatingRowColors(True)  # 交替行色（配合 QSS alternate-background-color）
         self.table.setHorizontalHeaderLabels(["任务 ID", "状态", "描述", "更新时间"])
         # 末列拉伸填满视口右缘 + 禁止换行（长内容单行截断）
         self.table.horizontalHeader().setStretchLastSection(True)
