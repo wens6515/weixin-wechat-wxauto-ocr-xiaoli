@@ -89,11 +89,13 @@ class MainWindow(QMainWindow):
         # 右侧内容区
         self.stack = QStackedWidget()
         self.pages = {}
+        _icon_size = {"small": 24, "medium": 28, "large": 32}.get(
+            (ctx.cfg or {}).get("font_scale", "medium"), 28)
         for cls, name, icon_name in _NAV_ITEMS:
             page = cls(ctx)
             self.pages[name] = page
             self.stack.addWidget(page)
-            item = QListWidgetItem(_load_nav_icon(icon_name), name)
+            item = QListWidgetItem(_load_nav_icon(icon_name, size=_icon_size), name)
             item.setSizeHint(QSize(0, 46))
             self.nav.addItem(item)
         self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)

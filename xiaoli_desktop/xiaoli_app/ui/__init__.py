@@ -137,7 +137,7 @@ THEMES = {
 
 _QSS_TEMPLATE = Template("""
 * { font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
-    font-size: 14px; }
+    font-size: $fs_base; }
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
 /* 背景由 ParticleBackdrop 绘制（渐变+粒子）；QMainWindow 纯 bg 兜底 */
@@ -150,21 +150,21 @@ QScrollArea, QStackedWidget { background: transparent; border: none; }
 QScrollArea > QWidget > QWidget { background: transparent; }
 QTabWidget::pane { border: none; background: transparent; }
 QTabBar::tab { background: transparent; padding: 10px 22px; margin-right: 8px;
-               border-radius: 10px; color: $muted; font-size: 14px; font-weight: 500; }
+               border-radius: 10px; color: $muted; font-size: $fs_base; font-weight: 500; }
 QTabBar::tab:hover { background: $hover; color: $text; }
 QTabBar::tab:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                        stop:0 $p1, stop:1 $p2);
                        color: #FFFFFF; font-weight: 600; }
-QLabel#title { font-size: 28px; font-weight: 800; color: $p1; letter-spacing: 2px; }
-QLabel#subtitle { font-size: 14px; color: $muted; letter-spacing: 1px; }
+QLabel#title { font-size: $fs_title; font-weight: 800; color: $p1; letter-spacing: 2px; }
+QLabel#subtitle { font-size: $fs_sub; color: $muted; letter-spacing: 1px; }
 QLabel#stateLabel { font-size: 14px; color: $muted; }
 /* 环境检测标签（HomePage）：tag 状态色跟随主题，不再散落硬编码 */
 QLabel#envTag { font-weight: 600; }
 QLabel#envOk { font-weight: 600; color: $success; }
 QLabel#envBad { font-weight: 600; color: $danger; }
 QLabel#envPending { font-weight: 600; color: $muted; }
-/* 页内提示文字（ModelsPage tip_model 等） */
-QLabel#tip { color: $muted; font-size: 12px; }
+/* 页内提示文字（ModelsPage tip_model 等）：text 80% 透明度，浅于正文深于 muted */
+QLabel#tip { color: $tip; font-size: 13px; }
 QFrame#card { background: $card; border: 1px solid $border; border-radius: 16px; }
 QPushButton#btnMain { color: white; border: none; border-radius: 14px;
                       font-size: 16px; font-weight: 600; padding: 12px 36px;
@@ -184,7 +184,7 @@ QProgressBar { border: none; border-radius: 8px; background: $border; height: 12
 QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); border-radius: 8px; }
 QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 10px;
-              padding: 8px 20px; min-height: 32px; color: $text; font-size: 14px; font-weight: 500;
+              padding: 8px 20px; min-height: 32px; color: $text; font-size: $fs_base; font-weight: 500;
               letter-spacing: 1px; }
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
 QPushButton:pressed { background: $hover; border-top: 2px solid rgba(0,0,0,0.12); }
@@ -210,7 +210,7 @@ QListWidget::item:selected { background: $hover; color: $text; }
 QListWidget#navList { background: transparent; border: none;
                       border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
 QListWidget#navList::item { padding: 12px 14px; border-radius: 10px;
-                            margin: 3px 6px; color: $muted; font-size: 16px;
+                            margin: 3px 6px; color: $muted; font-size: $fs_nav;
                             font-weight: 500; letter-spacing: 1px; }
 QListWidget#navList::item:hover { background: $nav_hover; color: $text; }
 QListWidget#navList::item:selected {
@@ -450,6 +450,14 @@ def render_wallpaper_thumb(path: str, width=120, height=76):
     return render_theme_thumb("blue", width, height)
 
 
+# 字号三档：小/中/大（设置页 font_scale 选择；用户嫌字小可调大）
+_FONT_SCALES = {
+    "small":  {"fs_base": 12, "fs_nav": 15, "fs_title": 24, "fs_sub": 12},
+    "medium": {"fs_base": 14, "fs_nav": 19, "fs_title": 30, "fs_sub": 14},
+    "large":  {"fs_base": 16, "fs_nav": 23, "fs_title": 36, "fs_sub": 16},
+}
+
+
 def _with_alpha(card_spec: str, opacity: float) -> str:
     """把卡片色 rgba/hex 统一为指定不透明度 rgba(r,g,b,opacity)。"""
     m = re.match(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*[\d.]+\)", card_spec.strip())
@@ -464,28 +472,33 @@ def _with_alpha(card_spec: str, opacity: float) -> str:
 
 
 def build_qss(theme: str = "blue", wallpaper: str = "", card_opacity=None,
-              panel_opacity=None) -> str:
+              panel_opacity=None, font_scale: str = "medium") -> str:
     """按主题名 + 可选壁纸路径生成 QSS。
 
     背景（渐变/粒子/壁纸）由 ParticleBackdrop 运行时绘制，QSS 只负责控件；
     这里为 QMainWindow 提供纯 bg 兜底。动态派生 hover 提亮主色与导航悬停色。
-    card_opacity：卡片不透明度 0.5~1.0（None = 用主题原始 card 值），
+    card_opacity：卡片不透明度 0~1.0（None = 用主题原始 card 值），
     panel_opacity：面板/输入区不透明度（日志区、表格、输入框等 input_bg
     底色），与卡片透明度独立可调——两个滑块分别控制「毛玻璃卡片」与
-    「面板大色块」的透出程度。
+    「面板大色块」的透出程度，0 = 完全透明。
+    font_scale：small/medium/large 字号档位。
     """
     t = dict(_DEFAULTS)
     t.update(THEMES.get(theme, THEMES["blue"]))
     if card_opacity is not None:
         t["card"] = _with_alpha(t.get("card", _DEFAULTS["card"]),
-                                max(0.5, min(1.0, card_opacity)))
+                                max(0.0, min(1.0, card_opacity)))
     if panel_opacity is not None:
         t["input_bg"] = _with_alpha(t.get("input_bg", _DEFAULTS["input_bg"]),
-                                    max(0.5, min(1.0, panel_opacity)))
+                                    max(0.0, min(1.0, panel_opacity)))
     # hover 主色：主题可自定义 p1_hi/p2_hi，缺省自动提亮 16%
     t["p1_hi"] = _lighten(t.get("p1_hi", t["p1"]), 0.16)
     t["p2_hi"] = _lighten(t.get("p2_hi", t["p2"]), 0.16)
     t["nav_hover"] = _hex_to_rgba(t["p1"], 0.12)
+    # 提示文字（tip）：text 的 80% 透明度，比 muted 更清晰可读
+    t["tip"] = _hex_to_rgba(t["text"], 0.8)
+    # 字号档位
+    t.update(_FONT_SCALES.get(font_scale, _FONT_SCALES["medium"]))
     bg_rule = f"background: {t['bg']};"
     return _QSS_TEMPLATE.substitute(**t, bg_rule=bg_rule)
 

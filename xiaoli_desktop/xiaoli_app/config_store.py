@@ -467,8 +467,9 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
         "theme": "blue",  # 界面主题（THEMES 键：blue 兼容默认 + 11 套精选风格，见 ui/__init__.py）
-        "card_opacity": 0.88,  # 卡片不透明度 0.5~1.0（设置页滑块调节毛玻璃强度）
-        "panel_opacity": 0.85,  # 面板/输入区不透明度（日志区/表格/输入框等大白块）
+        "card_opacity": 0.5,  # 卡片不透明度 0~1.0（设置页滑块调节毛玻璃强度，默认 50%）
+        "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
+        "font_scale": "medium",  # 全局字号档位：small/medium/large（设置页三档选择）
         "wallpaper_path": "",  # 背景壁纸图路径（空 = 主题纯色背景）
     }.items():
         if k not in cfg:
