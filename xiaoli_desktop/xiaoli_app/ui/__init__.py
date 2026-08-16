@@ -207,6 +207,7 @@ QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid $focus; background: $input_bg; }
 QListWidget, QTableWidget { background: $input_bg; border: 1px solid $border;
                             border-radius: 12px; }
+QTableWidget { alternate-background-color: $card_alt; gridline-color: transparent; }
 QListWidget::item { padding: 7px 10px; border-radius: 8px; margin: 2px 4px; }
 QListWidget::item:hover { background: $hover; }
 QListWidget::item:selected { background: $hover; color: $text; }
@@ -227,10 +228,11 @@ QListWidget#themeGrid::item, QListWidget#wpGrid::item { border: 2px solid transp
 QListWidget#themeGrid::item:hover, QListWidget#wpGrid::item:hover { background: $hover; }
 QListWidget#themeGrid::item:selected, QListWidget#wpGrid::item:selected { background: $hover;
                               color: $text; border: 2px solid $p1; }
-QTableWidget::item:selected { background: $hover; color: $text; }
+QTableWidget::item { padding: 9px 8px; }
+QTableWidget::item:selected { background: $sel_row; color: $text; }
 QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;
-                       border-bottom: 2px solid $border; padding: 9px;
+                       border-bottom: 2px solid $border; padding: 10px 8px;
                        font-weight: 600; color: $text; }
 QHeaderView { background: $header; }
 QGroupBox { border: 1px solid $border; border-radius: 12px; margin-top: 12px;
@@ -500,6 +502,8 @@ def build_qss(theme: str = "blue", wallpaper: str = "", card_opacity=None,
     t["p1_hi"] = _lighten(t.get("p1_hi", t["p1"]), 0.16)
     t["p2_hi"] = _lighten(t.get("p2_hi", t["p2"]), 0.16)
     t["nav_hover"] = _hex_to_rgba(t["p1"], 0.12)
+    # 表格选中行：主色 18% 透明（比 hover 更浓，可辨识选中态）
+    t["sel_row"] = _hex_to_rgba(t["p1"], 0.18)
     # 提示文字（tip）：text 的 80% 透明度，比 muted 更清晰可读
     t["tip"] = _hex_to_rgba(t["text"], 0.8)
     # 字号档位

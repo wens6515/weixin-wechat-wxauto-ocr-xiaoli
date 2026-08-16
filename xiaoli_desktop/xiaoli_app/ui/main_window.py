@@ -3,7 +3,7 @@
 import os
 
 from PySide6.QtCore import QTimer, Qt, QSize, QByteArray
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QMainWindow, QListWidget, QListWidgetItem, QLabel,
                                QSystemTrayIcon, QMessageBox, QHBoxLayout, QWidget,
@@ -23,6 +23,14 @@ _NAV_ITEMS = (
     (LogPage, "日志", "file-text"),
     (SettingsPage, "设置", "settings"),
 )
+
+
+# 导航项字体：必须显式 setFont——Qt 不把 QSS 的 ::item font-size 应用到
+# item 渲染（item 继承 view 字体），QSS 写 42px 实际无效（实测 small/large
+# 档位下导航文字高度随 base 字号 13px→17px 变化）。setPixelSize 固定物理像素。
+_NAV_FONT = QFont("Noto Sans SC", 21)  # 42px ≈ 21pt(96dpi)
+_NAV_FONT.setPixelSize(42)
+_NAV_FONT.setWeight(QFont.Weight.DemiBold)
 
 
 def _load_nav_icon(name, normal_color="#94A3B8", selected_color="#FFFFFF",
@@ -89,13 +97,17 @@ class MainWindow(QMainWindow):
         # 右侧内容区
         self.stack = QStackedWidget()
         self.pages = {}
-        # 导航字号/图标固定（不随字号档位变化）：用户要求导航始终大且居中
+        # 导航字号/图标固定（不随字号档位变化）：用户要求导航始终大且居中。
+        # 关键：必须 setIconSize 显式对齐渲染尺寸，否则 QListWidget 按 Qt 默认
+        # 小图标（16px）绘制，48px pixmap 被钳制缩小——「SVG 很小」根因。
         _icon_size = 48
+        self.nav.setIconSize(QSize(_icon_size, _icon_size))
         for cls, name, icon_name in _NAV_ITEMS:
             page = cls(ctx)
             self.pages[name] = page
             self.stack.addWidget(page)
             item = QListWidgetItem(_load_nav_icon(icon_name, size=_icon_size), name)
+            item.setFont(_NAV_FONT)  # 显式固定导航字号（QSS ::item font-size 不生效）
             item.setSizeHint(QSize(0, 46))
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.nav.addItem(item)
@@ -139,8 +151,8 @@ class MainWindow(QMainWindow):
             if n <= 0:
                 return
             # 用 nav.height()（布局后稳定）而非 viewport 高度——viewport 随
-            # item 高度变化导致收敛漂移
-            per = max(44, (self.nav.height() - 28) // n)
+            # item 高度变化导致收敛漂移；最小 52px 容纳 48px 图标不被裁剪
+            per = max(52, (self.nav.height() - 28) // n)
             for i in range(n):
                 self.nav.item(i).setSizeHint(QSize(0, per))
         finally:
@@ -183,9 +195,18 @@ class MainWindow(QMainWindow):
 
     def apply_backdrop(self, theme=None, wallpaper=None):
         """主题/壁纸切换时同步背景层（设置页/入口调用）。"""
-        self.backdrop.set_theme(theme if theme is not None else self.ctx.theme())
-        self.backdrop.set_wallpaper(
-            wallpaper if wallpaper is not None else self.ctx.wallpaper())
+        theme = theme if theme is not None else self.ctx.theme()
+        wallpaper = wallpaper if wallpaper is not None else self.ctx.wallpaper()
+        self.backdrop.set_theme(theme)
+        self.backdrop.set_wallpaper(wallpaper)
+        # 页面级主题钩子（首页标题光晕等随主题主色刷新）
+        for p in self.pages.values():
+            hook = getattr(p, "apply_theme", None)
+            if hook is not None:
+                try:
+                    hook(theme)
+                except Exception:
+                    pass
 
     # ---------- 托盘联动 ----------
 
