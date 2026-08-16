@@ -749,12 +749,14 @@ class ModelsPage(QWidget):
         # 隐藏行号列：深色 palette 下垂直表头漏深色成「竖黑条」，且行号无实用价值
         self.table.verticalHeader().setVisible(False)
         self.table.setHorizontalHeaderLabels(["名称", "Base URL", "API Key", "模型", "ID"])
-        self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.setColumnWidth(0, 100)
-        self.table.setColumnWidth(1, 300)
-        self.table.setColumnWidth(2, 200)
-        self.table.setColumnWidth(3, 220)
-        self.table.setColumnWidth(4, 90)
+        # 末列（ID）拉伸填满视口右缘，前四列固定宽度——消除水平滚动条 + ID 贴右边
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setColumnWidth(0, 90)
+        self.table.setColumnWidth(1, 260)
+        self.table.setColumnWidth(2, 190)
+        self.table.setColumnWidth(3, 160)
+        # 禁止单元格换行（长内容单行截断，避免行高不足内容溢出下边框）
+        self.table.setWordWrap(False)
         # 单击即进入编辑（key 框可直接 Ctrl+V 粘贴，不用先敲字符）
         self.table.setEditTriggers(
             QTableWidget.EditTrigger.SelectedClicked
@@ -1038,6 +1040,9 @@ class TasksPage(QWidget):
         # 隐藏行号列（同 ModelsPage：防深色 palette 竖黑条）
         self.table.verticalHeader().setVisible(False)
         self.table.setHorizontalHeaderLabels(["任务 ID", "状态", "描述", "更新时间"])
+        # 末列拉伸填满视口右缘 + 禁止换行（长内容单行截断）
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setWordWrap(False)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.btn_refresh = QPushButton("刷新")
         self.btn_open = QPushButton("打开任务目录")
