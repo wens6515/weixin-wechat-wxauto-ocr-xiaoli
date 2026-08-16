@@ -1154,19 +1154,52 @@ class SettingsPage(QWidget):
             self._theme_keys.append(key)
         self.theme_grid.currentItemChanged.connect(self._on_theme_picked)
         tv.addWidget(self.theme_grid)
+        # 壁纸库：内置「壁纸」目录 + 无壁纸 + 用户自定义
+        tip_wp = QLabel("点击壁纸应用（「壁纸」文件夹自动收录；也可导入自定义壁纸）")
+        tip_wp.setObjectName("tip")
+        tv.addWidget(tip_wp)
+        from . import list_wallpapers, wallpaper_short_name, render_wallpaper_thumb
+        self.wp_grid = QListWidget()
+        self.wp_grid.setObjectName("wpGrid")
+        self.wp_grid.setViewMode(QListWidget.ViewMode.IconMode)
+        self.wp_grid.setIconSize(QSize(120, 76))
+        self.wp_grid.setGridSize(QSize(150, 110))
+        self.wp_grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.wp_grid.setMovement(QListWidget.Movement.Static)
+        self.wp_grid.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.wp_grid.setFlow(QListWidget.Flow.LeftToRight)
+        self.wp_grid.setWrapping(True)
+        self.wp_grid.setFixedHeight(236)
+        self._wp_items = []  # [(item, path)]
+        # 无壁纸项（data=""）
+        item = QListWidgetItem(QIcon(render_theme_thumb("blue")), "无壁纸")
+        item.setData(Qt.ItemDataRole.UserRole, "")
+        item.setSizeHint(QSize(120, 92))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+        self.wp_grid.addItem(item)
+        self._wp_items.append((item, ""))
+        # 内置壁纸目录
+        self._builtin_wp = [p for p, _f in list_wallpapers()]
+        for path, fname in list_wallpapers():
+            item = QListWidgetItem(QIcon(render_wallpaper_thumb(path)),
+                                   wallpaper_short_name(fname))
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setSizeHint(QSize(120, 92))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            self.wp_grid.addItem(item)
+            self._wp_items.append((item, path))
+        self.wp_grid.currentItemChanged.connect(self._on_wp_picked)
+        tv.addWidget(self.wp_grid)
         self.ed_wallpaper = QLineEdit()
         self.ed_wallpaper.setReadOnly(True)
         row_wp = QHBoxLayout()
         row_wp.addWidget(self.ed_wallpaper, 1)
-        btn_wp = QPushButton("选择壁纸…")
+        btn_wp = QPushButton("导入壁纸…")
         btn_wp.clicked.connect(self._pick_wallpaper)
         btn_wp_clear = QPushButton("清除壁纸")
         btn_wp_clear.clicked.connect(self._clear_wallpaper)
-        btn_wp_apply = QPushButton("应用壁纸")
-        btn_wp_apply.clicked.connect(self._apply_wallpaper)
         row_wp.addWidget(btn_wp)
         row_wp.addWidget(btn_wp_clear)
-        row_wp.addWidget(btn_wp_apply)
         tv.addLayout(row_wp)
         lay.addWidget(g_theme)
 
@@ -1285,18 +1318,59 @@ class SettingsPage(QWidget):
             self.theme_grid.setCurrentRow(self._theme_keys.index(theme))
         except ValueError:
             pass
+        self._select_wallpaper_item(cfg.get("wallpaper_path", ""))
         self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
         self._refresh_stems()
 
+    def _select_wallpaper_item(self, path):
+        """按路径高亮壁纸网格项（当前壁纸；不在内置列表则不选中）。"""
+        for row, (item, wp_path) in enumerate(self._wp_items):
+            if wp_path == path:
+                self.wp_grid.setCurrentRow(row)
+                return
+        self.wp_grid.clearSelection()
+
+    def _on_wp_picked(self, current, previous):
+        """点击壁纸缩略图：即时应用并保存（data 为 '' = 无壁纸）。"""
+        if current is None:
+            return
+        path = current.data(Qt.ItemDataRole.UserRole) or ""
+        self.ctx.cfg["wallpaper_path"] = path
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self.ed_wallpaper.setText(path)
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), path)
+
     def _pick_wallpaper(self):
         p, _f = QFileDialog.getOpenFileName(
-            self, "选择背景壁纸", self.ed_wallpaper.text(),
-            "图片 (*.png *.jpg *.jpeg *.bmp)")
-        if p:
-            self.ed_wallpaper.setText(p)
+            self, "导入壁纸", self.ed_wallpaper.text(),
+            "图片 (*.png *.jpg *.jpeg *.bmp *.webp)")
+        if not p:
+            return
+        self.ctx.cfg["wallpaper_path"] = p
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        self.ed_wallpaper.setText(p)
+        # 网格加一项并选中（不在内置列表时）
+        if p not in self._builtin_wp:
+            from . import render_wallpaper_thumb, wallpaper_short_name
+            item = QListWidgetItem(QIcon(render_wallpaper_thumb(p)),
+                                   "自定义: " + wallpaper_short_name(os.path.basename(p)))
+            item.setData(Qt.ItemDataRole.UserRole, p)
+            item.setSizeHint(QSize(120, 92))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            self.wp_grid.addItem(item)
+            self._wp_items.append((item, p))
+            self.wp_grid.setCurrentItem(item)
+        else:
+            self._select_wallpaper_item(p)
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), p)
 
     def _clear_wallpaper(self):
+        """清除壁纸：恢复纯渐变背景。"""
+        self.ctx.cfg["wallpaper_path"] = ""
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         self.ed_wallpaper.clear()
+        self._select_wallpaper_item("")
+        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), "")
 
     def _apply_theme_qss(self, theme, wp):
         """应用 QSS + 同步粒子背景层（主题或壁纸变化后统一入口）。"""
@@ -1319,13 +1393,6 @@ class SettingsPage(QWidget):
         self.ctx.cfg["theme"] = key
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         self._apply_theme_qss(key, self.ed_wallpaper.text().strip())
-
-    def _apply_wallpaper(self):
-        """应用壁纸：写入配置 + 重绘背景层（主题不变）。"""
-        wp = self.ed_wallpaper.text().strip()
-        self.ctx.cfg["wallpaper_path"] = wp
-        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-        self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"), wp)
 
     def _view_memory(self):
         cfg = self.ctx.cfg or {}

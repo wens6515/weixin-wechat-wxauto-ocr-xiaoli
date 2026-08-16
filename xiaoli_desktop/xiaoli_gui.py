@@ -195,9 +195,18 @@ def main():
     # 1. 配置：加载/迁移/投影（不连微信、不启动引擎）
     ctx.cfg = config_store.load_config_store(ctx.cfg_path, ctx.cards_dir)
     # 应用持久化主题/壁纸（默认 blue 已随 APP_QSS 应用，非默认或带壁纸时覆盖）
-    from xiaoli_app.ui import build_qss
+    from xiaoli_app.ui import build_qss, default_wallpaper_path
     _theme = ctx.cfg.get("theme", "blue")
     _wp = ctx.cfg.get("wallpaper_path", "")
+    # 首次启动兜底：无壁纸配置 → 内置默认壁纸（「壁纸」目录里的默认款）
+    if not _wp:
+        _wp = default_wallpaper_path()
+        if _wp:
+            ctx.cfg["wallpaper_path"] = _wp
+            try:
+                config_store.save_config(ctx.cfg, ctx.cfg_path)
+            except OSError:
+                pass
     if _theme != "blue" or _wp:
         app.setStyleSheet(build_qss(_theme, _wp))
     # 首次启动（config 文件不存在）或任务目录/微信文件目录未配置 → 引导选择，
