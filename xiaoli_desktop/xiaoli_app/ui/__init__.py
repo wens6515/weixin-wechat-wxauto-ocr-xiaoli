@@ -22,6 +22,7 @@ _DEFAULTS = {
     "success": "#10B981", "danger": "#EF4444", "warning": "#F59E0B",
     "accent": "#5B8CFF", "focus": "#5B8CFF", "glow": "#8B5CF6",
     "scrollbar": "#CBD5E1", "card_alt": "#F8FAFC",
+    "card_border": None,  # 卡片专用边框（None → 深色主题自动提亮 $border）
 }
 
 # 12 套主题。字段语义：
@@ -140,8 +141,9 @@ _QSS_TEMPLATE = Template("""
     font-size: $fs_base; }
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
-/* 背景由 ParticleBackdrop 绘制（渐变+粒子）；QMainWindow 纯 bg 兜底 */
-QMainWindow { background: $bg; }
+/* 背景由 ParticleBackdrop 绘制（渐变+粒子）；QMainWindow 纯 bg 兜底。
+   无边框圆角窗口下 QMainWindow 必须透明，否则圆角外漏出方块底色 */
+QMainWindow { background: transparent; }
 /* 顶层对话框：深色系统 palette 下会漏出黑底（欢迎窗/确认框）——显式覆盖 */
 QDialog { background: $bg; }
 QMessageBox { background: $bg; }
@@ -162,14 +164,15 @@ QTabBar::tab:selected { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
 QLabel#title { font-size: $fs_title; font-weight: 800; color: $p1; letter-spacing: 2px; }
 QLabel#subtitle { font-size: $fs_sub; color: $muted; letter-spacing: 1px; }
 QLabel#stateLabel { font-size: 14px; color: $muted; }
-/* 环境检测标签（HomePage）：tag 状态色跟随主题，不再散落硬编码 */
-QLabel#envTag { font-weight: 600; }
+/* 环境检测标签（HomePage）：tag 状态色跟随主题，不再散落硬编码。
+   envDot 为仪表盘圆点（●），envOk/envBad 同时服务标签与圆点 */
+QLabel#envTag { font-weight: 600; color: $muted; }
 QLabel#envOk { font-weight: 600; color: $success; }
 QLabel#envBad { font-weight: 600; color: $danger; }
 QLabel#envPending { font-weight: 600; color: $muted; }
 /* 页内提示文字（ModelsPage tip_model 等）：text 80% 透明度，浅于正文深于 muted */
 QLabel#tip { color: $tip; font-size: 13px; }
-QFrame#card { background: $card; border: 1px solid $border; border-radius: 16px; }
+QFrame#card { background: $card; border: 1px solid $card_border; border-radius: 16px; }
 QPushButton#btnMain { color: white; border: none; border-radius: 14px;
                       font-size: 16px; font-weight: 600; padding: 12px 36px;
                       background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
@@ -193,6 +196,8 @@ QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 1
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
 QPushButton:pressed { background: $hover; border-top: 2px solid rgba(0,0,0,0.12); }
 QPushButton:disabled { color: $muted; background: $frame; border-color: $border; }
+/* 紧凑按钮：窄栏横排（如角色卡页 5 按钮行）——小 padding 防文字挤压裁剪 */
+QPushButton[compact="true"] { padding: 6px 8px; min-height: 30px; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: $input_bg; border: 1px solid $border; border-radius: 10px;
     padding: 5px 10px; }
@@ -211,6 +216,17 @@ QTableWidget { alternate-background-color: $card_alt; gridline-color: transparen
 QListWidget::item { padding: 7px 10px; border-radius: 8px; margin: 2px 4px; }
 QListWidget::item:hover { background: $hover; }
 QListWidget::item:selected { background: $hover; color: $text; }
+/* 自绘标题栏（无边框圆角窗口）：品牌区 + 窗口控制按钮 */
+QFrame#titleBar { background: transparent; }
+QLabel#titleBarTitle { font-size: 15px; font-weight: 700; color: $text; }
+QLabel#titleBarSub { font-size: 12px; color: $muted; }
+QPushButton#winBtn { background: transparent; border: none; border-radius: 8px;
+                     font-size: 15px; color: $muted; padding: 2px 8px;
+                     min-height: 26px; }
+QPushButton#winBtn:hover { background: $hover; color: $text; }
+QPushButton#winBtn:pressed { background: $border; }
+/* 外层圆角容器：背景由 backdrop 绘制，这里只保证圆角裁剪区透明 */
+QFrame#windowShell { background: transparent; border: none; }
 /* 左侧导航栏：窄侧边 + 竖排导航项，选中态渐变背景 + 白字白图标 */
 QListWidget#navList { background: transparent; border: none;
                       border-right: 1px solid $border; padding: 14px 10px; outline: 0; }
@@ -235,7 +251,7 @@ QHeaderView::section { background: $header; border: none;
                        border-bottom: 2px solid $border; padding: 10px 8px;
                        font-weight: 600; color: $text; }
 QHeaderView { background: $header; }
-QGroupBox { border: 1px solid $border; border-radius: 12px; margin-top: 12px;
+QGroupBox { border: 1px solid $card_border; border-radius: 12px; margin-top: 12px;
             padding-top: 10px; background: $card; font-weight: 600; color: $text; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px;
                    color: $p1; }
@@ -504,6 +520,14 @@ def build_qss(theme: str = "blue", wallpaper: str = "", card_opacity=None,
     t["nav_hover"] = _hex_to_rgba(t["p1"], 0.12)
     # 表格选中行：主色 18% 透明（比 hover 更浓，可辨识选中态）
     t["sel_row"] = _hex_to_rgba(t["p1"], 0.18)
+    # 卡片边框：深色主题下 $border 与背景对比弱（卡片轮廓不清），
+    # 自动向白色提亮 25% 强化轮廓；浅色主题保留原 border。
+    if t.get("card_border"):
+        pass  # 主题显式定义则用之
+    elif t.get("group", "浅色") == "深色":
+        t["card_border"] = _lighten(t["border"], 0.25)
+    else:
+        t["card_border"] = t["border"]
     # 提示文字（tip）：text 的 80% 透明度，比 muted 更清晰可读
     t["tip"] = _hex_to_rgba(t["text"], 0.8)
     # 字号档位

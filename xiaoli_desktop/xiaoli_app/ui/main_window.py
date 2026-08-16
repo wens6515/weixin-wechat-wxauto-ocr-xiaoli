@@ -2,13 +2,16 @@
 """主窗口：左侧导航 + 右侧内容区 + 状态栏 + 定时刷新总线事件。关闭窗口隐藏到托盘。"""
 import os
 
-from PySide6.QtCore import QTimer, Qt, QSize, QByteArray, QRectF
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
+from PySide6.QtCore import QTimer, Qt, QSize, QByteArray, QRectF, QPoint, QPointF
+from PySide6.QtGui import (QIcon, QPixmap, QPainter, QColor, QFont,
+                           QPainterPath, QLinearGradient, QBrush)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QMainWindow, QListWidget, QListWidgetItem, QLabel,
                                QSystemTrayIcon, QMessageBox, QHBoxLayout, QWidget,
                                QStackedWidget, QVBoxLayout, QStyledItemDelegate,
-                               QStyle, QStyleOptionViewItem, QApplication)
+                               QStyle, QStyleOptionViewItem, QApplication,
+                               QFrame, QPushButton, QGraphicsDropShadowEffect,
+                               QSizeGrip)
 
 from .backdrop import ParticleBackdrop
 from .pages import HomePage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
@@ -131,27 +134,52 @@ class NavItemDelegate(QStyledItemDelegate):
 
 
 class MainWindow(QMainWindow):
+    # 圆角窗口常量
+    _WINDOW_RADIUS = 16
+    _SHELL_MARGIN = 22  # 四周留边放阴影
+    _TITLEBAR_H = 42
+
     def __init__(self, ctx, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.setWindowTitle("小漓控制面板")
         self.resize(1020, 680)
+        self.setMinimumSize(940, 620)  # 防 QStackedWidget sizeHint 强制撑大
+        # 无边框 + 透明背景 → 自绘圆角窗口（Windows 非无边框无法真圆角）。
+        # 保留 WA_TranslucentBackground 让 shell 圆角外的背景透出桌面。
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        # 双层结构：backdrop 垫底（手动几何跟随 central，QStackedLayout 会隐藏
-        # 非当前页导致背景层不渲染——必须用 lower + resize 同步），content 在上透明透出
-        self.backdrop = ParticleBackdrop(central)
-        self.backdrop.setGeometry(0, 0, central.width(), central.height())
+        # 外层圆角容器：承载阴影效果 + 圆角裁剪；背景由 backdrop 绘制
+        self._shell = QFrame(self)
+        self._shell.setObjectName("windowShell")
+        self.setCentralWidget(self._shell)
+        _shadow = QGraphicsDropShadowEffect(self._shell)
+        _shadow.setBlurRadius(28)
+        _shadow.setOffset(0, 8)
+        _shadow.setColor(QColor(0, 0, 0, 90))
+        self._shell.setGraphicsEffect(_shadow)
+        _shell_lay = QVBoxLayout(self._shell)
+        _shell_lay.setContentsMargins(0, 0, 0, 0)
+        _shell_lay.setSpacing(0)
+
+        # 自绘标题栏（无系统边框 → 拖拽区 + 最小化/关闭按钮）
+        self._build_titlebar(_shell_lay)
+
+        # 主体：backdrop 垫底 + content 在上
+        body = QWidget(self._shell)
+        _shell_lay.addWidget(body, 1)
+        self.backdrop = ParticleBackdrop(body)
+        self.backdrop.setGeometry(0, 0, body.width(), body.height())
         self.backdrop.lower()
 
         def _sync_backdrop(e):
             self.backdrop.setGeometry(0, 0, e.size().width(), e.size().height())
             self._layout_nav()
-        central.resizeEvent = _sync_backdrop
+        body.resizeEvent = _sync_backdrop
 
-        content = QWidget(central)
-        _outer = QVBoxLayout(central)
+        content = QWidget(body)
+        _outer = QVBoxLayout(body)
         _outer.setContentsMargins(0, 0, 0, 0)
         _outer.setSpacing(0)
         _outer.addWidget(content)
@@ -231,6 +259,69 @@ class MainWindow(QMainWindow):
         """首次显示后布局稳定，重算导航排满（构造时 nav 高度未定）。"""
         super().showEvent(event)
         self._layout_nav()
+
+    # ---------- 圆角窗口 ----------
+
+    def _build_titlebar(self, shell_lay):
+        """自绘标题栏：左侧品牌区（可拖拽）+ 右侧最小化/关闭按钮。"""
+        tb = QFrame()
+        tb.setObjectName("titleBar")
+        tb.setFixedHeight(self._TITLEBAR_H)
+        h = QHBoxLayout(tb)
+        h.setContentsMargins(14, 0, 10, 0)
+        h.setSpacing(8)
+        # 品牌区：logo + 标题（双击最大化，拖动移动窗口）
+        from . import render_logo
+        logo = QLabel()
+        logo.setPixmap(render_logo(26))
+        title = QLabel("小漓")
+        title.setObjectName("titleBarTitle")
+        sub = QLabel("控制面板")
+        sub.setObjectName("titleBarSub")
+        h.addWidget(logo)
+        h.addWidget(title)
+        h.addWidget(sub)
+        h.addStretch(1)
+        # 控制按钮
+        btn_min = QPushButton("—")
+        btn_min.setObjectName("winBtn")
+        btn_min.setToolTip("最小化")
+        btn_min.clicked.connect(self.showMinimized)
+        btn_close = QPushButton("✕")
+        btn_close.setObjectName("winBtn")
+        btn_close.setToolTip("关闭")
+        btn_close.clicked.connect(self.close)  # 走 closeEvent 弹窗逻辑
+        h.addWidget(btn_min)
+        h.addWidget(btn_close)
+        shell_lay.addWidget(tb)
+        # 拖拽移动：标题栏整条响应
+        for w in (tb, logo, title, sub):
+            w.mousePressEvent = lambda e: self._tb_press(e)
+            w.mouseMoveEvent = lambda e: self._tb_move(e)
+            w.mouseDoubleClickEvent = lambda e: self._tb_dblclick(e)
+        self._drag_offset = None
+
+    def _tb_press(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = (e.globalPosition().toPoint()
+                                 - self.frameGeometry().topLeft())
+
+    def _tb_move(self, e):
+        if self._drag_offset is not None and (e.buttons() & Qt.MouseButton.LeftButton):
+            self.move(e.globalPosition().toPoint() - self._drag_offset)
+
+    def _tb_dblclick(self, e):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _sync_shell_geometry(self):
+        """shell 由 QMainWindow 布局管理（充满窗口），阴影空间依赖窗口透明边缘。
+        （保留方法避免误用；圆角由 backdrop 裁剪实现）"""
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
 
     # ---------- 刷新 ----------
 
