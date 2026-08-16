@@ -109,21 +109,22 @@ class TestUiSmoke(unittest.TestCase):
         用户反复反馈「导航字体随字号调节而变化」——根因：Qt 不把 QSS 的
         ::item font-size 应用到 item 渲染（item 继承 view 字体），QSS 写
         42px 实际无效，导航文字高度随 base 字号 13px→17px 变化。修复：
-        main_window 对每个 item 显式 setFont（_NAV_FONT，pixelSize=42）。
-        本测试断言 API 层面：item 字体必须由代码显式固定。
+        main_window 对每个 item 显式 setFont（_NAV_FONT，pixelSize=38，
+        42→38 为用户反馈的「导航过大，减小 10%」）。本测试断言 API 层面：
+        item 字体必须由代码显式固定。
         """
         ctx = self._make_ctx()
         win = MainWindow(ctx)
-        # 所有导航项字体应与 _NAV_FONT 一致（pixelSize 42，不随档位）
+        # 所有导航项字体应与 _NAV_FONT 一致（pixelSize 38，不随档位）
         from xiaoli_app.ui.main_window import _NAV_FONT
         for i in range(win.nav.count()):
             it = win.nav.item(i)
             self.assertEqual(it.font().pixelSize(), _NAV_FONT.pixelSize(),
-                             f"导航项 {i} 字号必须固定 42px（setFont 显式设置）")
+                             f"导航项 {i} 字号必须固定（setFont 显式设置）")
             self.assertNotEqual(it.font().pixelSize(), -1,
                                 "导航项必须显式 setFont，不能依赖 QSS ::item font-size")
         # 三档字号下导航字体引用同一固定字体（不随 config 重建）
-        self.assertEqual(_NAV_FONT.pixelSize(), 42)
+        self.assertEqual(_NAV_FONT.pixelSize(), 38)
         win.close()
 
     def test_prompt_flow_sends_first_prompt_directly(self):

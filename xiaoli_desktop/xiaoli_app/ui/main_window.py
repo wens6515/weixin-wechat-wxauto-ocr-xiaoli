@@ -2,12 +2,13 @@
 """主窗口：左侧导航 + 右侧内容区 + 状态栏 + 定时刷新总线事件。关闭窗口隐藏到托盘。"""
 import os
 
-from PySide6.QtCore import QTimer, Qt, QSize, QByteArray
+from PySide6.QtCore import QTimer, Qt, QSize, QByteArray, QRectF
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QMainWindow, QListWidget, QListWidgetItem, QLabel,
                                QSystemTrayIcon, QMessageBox, QHBoxLayout, QWidget,
-                               QStackedWidget, QVBoxLayout)
+                               QStackedWidget, QVBoxLayout, QStyledItemDelegate,
+                               QStyle, QStyleOptionViewItem, QApplication)
 
 from .backdrop import ParticleBackdrop
 from .pages import HomePage, CardsPage, ModelsPage, TasksPage, LogPage, SettingsPage
@@ -28,9 +29,13 @@ _NAV_ITEMS = (
 # 导航项字体：必须显式 setFont——Qt 不把 QSS 的 ::item font-size 应用到
 # item 渲染（item 继承 view 字体），QSS 写 42px 实际无效（实测 small/large
 # 档位下导航文字高度随 base 字号 13px→17px 变化）。setPixelSize 固定物理像素。
-_NAV_FONT = QFont("Noto Sans SC", 21)  # 42px ≈ 21pt(96dpi)
-_NAV_FONT.setPixelSize(42)
+# 用户反馈「导航过大 + 角色卡截断成'角···'」：字号 42→38（-10%）且改
+# 垂直排布（图标上/文字下），宽度不再受「图标+三字」横排限制。
+_NAV_FONT = QFont("Noto Sans SC", 19)  # 38px ≈ 19pt(96dpi)，较 42px 减 10%
+_NAV_FONT.setPixelSize(38)
 _NAV_FONT.setWeight(QFont.Weight.DemiBold)
+# 导航图标渲染尺寸（较 48px 减 10%）
+_NAV_ICON_SIZE = 43
 
 
 def _load_nav_icon(name, normal_color="#94A3B8", selected_color="#FFFFFF",
@@ -58,6 +63,71 @@ def _load_nav_icon(name, normal_color="#94A3B8", selected_color="#FFFFFF",
         painter.end()
         icon.addPixmap(pm, mode)
     return icon
+
+
+class NavItemDelegate(QStyledItemDelegate):
+    """导航项垂直排布绘制：图标在上、文字在下、选中态左侧高亮条。
+
+    QListWidgetItem 默认图标在左文字在右——42px 字号 3 字 + 48px 图标在
+    200px 导航横排必然截断（用户实测「角色卡→角···」）。改用 delegate
+    自绘：保留 QSS 选中渐变背景（super().paint 绘制底）+ 图标/文字垂直
+    排布，宽度只受图标与单字宽度约束，任何导航名都不会截断。
+    """
+
+    def __init__(self, parent=None, icon_size=43):
+        super().__init__(parent)
+        self.icon_size = icon_size
+        self.font = _NAV_FONT
+        self.accent = QColor("#5B8CFF")
+
+    def paint(self, painter, option, index):
+        # 先画默认底（含 QSS 渐变选中背景 / hover 背景）
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        painter.save()
+        if opt.widget is not None:
+            style = opt.widget.style()
+        else:
+            style = QApplication.style()
+        style.drawPrimitive(QStyle.PrimitiveElement.PE_PanelItemViewItem,
+                            opt, painter, opt.widget)
+        # 垂直布局：图标居中上部，文字居中下部
+        r = opt.rect
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        icon = opt.icon
+        if not icon.isNull():
+            isz = self.icon_size
+            icon_rect = QRectF(r.center().x() - isz / 2,
+                               r.top() + 8, isz, isz)
+            mode = QIcon.Mode.Selected if selected else QIcon.Mode.Normal
+            icon.paint(painter, icon_rect.toRect(), Qt.AlignmentFlag.AlignCenter,
+                       mode, QIcon.State.Off)
+        # 文字：选中白 / 未选中 muted
+        text = opt.text
+        if text:
+            f = self.font
+            if selected:
+                color = QColor("#FFFFFF")
+            else:
+                color = QColor("#94A3B8")
+            painter.setFont(f)
+            painter.setPen(color)
+            text_rect = QRectF(r.left(), r.top() + self.icon_size + 8,
+                               r.width(), r.height() - self.icon_size - 12)
+            painter.drawText(text_rect.toRect(),
+                             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                             text)
+        # 选中态左侧高亮条（现代侧边栏风格）
+        if selected:
+            bar = QRectF(r.left() + 4, r.top() + 6, 3, r.height() - 12)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self.accent)
+            painter.drawRoundedRect(bar, 1.5, 1.5)
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        base = super().sizeHint(option, index)
+        return QSize(base.width(), max(base.height(), self.icon_size + 34))
 
 
 class MainWindow(QMainWindow):
@@ -98,15 +168,14 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.pages = {}
         # 导航字号/图标固定（不随字号档位变化）：用户要求导航始终大且居中。
-        # 关键：必须 setIconSize 显式对齐渲染尺寸，否则 QListWidget 按 Qt 默认
-        # 小图标（16px）绘制，48px pixmap 被钳制缩小——「SVG 很小」根因。
-        _icon_size = 48
-        self.nav.setIconSize(QSize(_icon_size, _icon_size))
+        # 尺寸已按用户反馈 -10%（图标 48→43、字号 42→38），垂直排布防截断。
+        self.nav.setItemDelegate(NavItemDelegate(self.nav, icon_size=_NAV_ICON_SIZE))
+        # delegate 自绘图标，不再依赖 QListWidget 的 iconSize 钳制
         for cls, name, icon_name in _NAV_ITEMS:
             page = cls(ctx)
             self.pages[name] = page
             self.stack.addWidget(page)
-            item = QListWidgetItem(_load_nav_icon(icon_name, size=_icon_size), name)
+            item = QListWidgetItem(_load_nav_icon(icon_name, size=_NAV_ICON_SIZE), name)
             item.setFont(_NAV_FONT)  # 显式固定导航字号（QSS ::item font-size 不生效）
             item.setSizeHint(QSize(0, 46))
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -142,7 +211,7 @@ class MainWindow(QMainWindow):
         self._layout_nav()
 
     def _layout_nav(self):
-        """左侧导航项从上到下排满：6 项均分导航高度（最小 44px）。"""
+        """左侧导航项从上到下排满：6 项均分导航高度（最小 96px 容纳垂直排布）。"""
         if getattr(self, "_nav_layouting", False):
             return
         self._nav_layouting = True
@@ -151,8 +220,8 @@ class MainWindow(QMainWindow):
             if n <= 0:
                 return
             # 用 nav.height()（布局后稳定）而非 viewport 高度——viewport 随
-            # item 高度变化导致收敛漂移；最小 52px 容纳 48px 图标不被裁剪
-            per = max(52, (self.nav.height() - 28) // n)
+            # item 高度变化导致收敛漂移；最小 96px 容纳 43px 图标 + 38px 文字
+            per = max(96, (self.nav.height() - 28) // n)
             for i in range(n):
                 self.nav.item(i).setSizeHint(QSize(0, per))
         finally:
