@@ -122,7 +122,7 @@ tools/                       # 配套标定/调试工具
 
 ## 发布版安装包（桌面 GUI）
 
-v2.0.0 提供完整桌面端安装包（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻），从 [Releases](https://github.com/wens6515/xiaoli-wechat-ai-bot/releases) 下载 `小漓安装包.exe`。桌面端源码（GUI）不在此仓库——本仓库为**后端核心源码**开源。
+v2.0.0 提供完整桌面端安装包（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻），从 [Releases](https://github.com/wens6515/xiaoli-wechat-ai-bot/releases) 下载 `xiaoli-setup-v2.0.0.exe`。桌面端源码（GUI）不在此仓库——本仓库为**后端核心源码**开源。
 
 ## 隐私与安全
 
