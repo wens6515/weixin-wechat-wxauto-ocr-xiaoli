@@ -20,8 +20,6 @@ def make_bot(**over):
     bot._task_was_active = False
     bot._task_end_time = None
     bot._listen_hold_seconds = 2
-    bot.dispatched_msg_ids = set()
-    bot.recent_msg_ids = set()
     bot._pending_files = {}
     bot._sent_back_files = {}
     bot._sent_back_stems = {}

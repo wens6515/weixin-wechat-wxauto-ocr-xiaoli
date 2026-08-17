@@ -36,3 +36,7 @@ Thumbs.db
 # 本地 agent 工具链文件（不上传）
 AGENTS.md
 .rivet.md
+
+# 桌面端构建脚本（仅本地参与打包，不入开源仓库）
+tools/install-node.ps1
+tools/小漓.iss
