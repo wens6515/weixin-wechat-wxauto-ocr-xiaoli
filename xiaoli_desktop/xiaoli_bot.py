@@ -1418,6 +1418,7 @@ def run_self_test():
             b._sent_back_files = {}
             b._sent_back_stems = {}
             b._sent_back_stems_file = None
+            b._file_snapshot = {"__baseline__": [0, 0]}  # 非空哨兵：模拟已有历史快照（空快照=首启，_find_user_file 只建基线返回 None）
             b.file_storage_path = dirpath
             b.nickname = "小漓"
             return b
@@ -1449,15 +1450,18 @@ def run_self_test():
         got_b = bot_b._find_user_file(dir_b)
         check("T12 排除成果副本，选中用户目标文件", got_b == target_b, str(got_b))
 
-        # 场景 C：对照——未登记 stem（修复前行为）→ 副本 mtime 最新会被误选（bug 复现）
+        # 场景 C：对照——未登记 stem → 成果副本被误选（登记必要性的反证）。
+        # 先建 target 再写副本：副本 ctime 严格晚于 target（模拟微信把成果副本
+        # 写入接收目录在用户文件之后）+ 副本 mtime 最新（+10s）→ (dup, ctime, mtime)
+        # 排序下副本必胜。已登记时（场景 B）stem 排除救回 target。
         dir_c = os.path.join(tmp, "recv_c")
         os.makedirs(dir_c)
         bot_c = make_bot(dir_c)
-        shutil.copy2(src_out, os.path.join(dir_c, "成果报告.html"))
-        os.utime(os.path.join(dir_c, "成果报告.html"), (time.time() + 10, time.time() + 10))
         target_c = os.path.join(dir_c, "报名表.xlsx")
         with open(target_c, "w", encoding="utf-8") as f:
             f.write("target")
+        shutil.copy2(src_out, os.path.join(dir_c, "成果报告.html"))
+        os.utime(os.path.join(dir_c, "成果报告.html"), (time.time() + 10, time.time() + 10))
         got_c = bot_c._find_user_file(dir_c)
         check("T12 对照：未登记时成果副本被误选（bug 复现）",
               got_c == os.path.join(dir_c, "成果报告.html"), str(got_c))
