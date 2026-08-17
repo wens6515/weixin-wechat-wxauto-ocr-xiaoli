@@ -10,10 +10,11 @@
 
 **v2.0.0 完整桌面版安装包**（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [Releases 下载 `xiaoli-setup-v2.0.0.exe`](https://github.com/wens6515/xiaoli-wechat-ai-bot/releases)
+👉 [Releases 下载 `xiaoli-setup-v2.0.0.exe`](https://github.com/wens6515/weixin-wxauto-ocr-xiaoli/releases)
 
 - **系统要求**：Windows 10+、已登录的**微信 PC 4.1.12+**
-- **安装**：双击安装（免管理员权限），安装过程自动检测并安装 Node.js（天枢 CLI 依赖），完成后从开始菜单/桌面启动小漓
+- **无需安装 Python / Node.js**：安装包已内置 Python 运行时和全部依赖（含 OCR 引擎）；Node.js（天枢 CLI 依赖）在安装时自动检测，缺失则自动下载安装
+- **安装**：双击安装（免管理员权限），完成后从开始菜单/桌面启动小漓
 - **首次启动**：按引导配置三样东西——任务工作目录、微信文件接收目录、模型 API Key
 
 > 安装包为桌面完整版；本仓库另提供**后端核心源码**（见下方「源码运行」）。
