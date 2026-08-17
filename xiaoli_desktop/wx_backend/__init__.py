@@ -5,7 +5,7 @@
 任何方案都面临版本升级失效风险，且已验证 wxauto/UIA 通道在新版微信
 4.1.12 上结构性失效、视觉方案为可行保底。因此把"微信层"（连接/收/发/定位）
 从业务逻辑中解耦：业务只面向 WeChatBackend 协议与 WeChatMessage 模型编程，
-具体实现（wxauto、视觉、CDP 等）注册进注册表，由 create_backend 选择并
+具体实现（视觉、CDP 等）注册进注册表，由 create_backend 选择并
 在 auto 模式下自动降级。
 
 用法::
@@ -46,11 +46,11 @@ class BackendUnavailableError(BackendError):
 class WeChatBackend(Protocol):
     """微信后端协议。所有实现必须满足该接口（可经 isinstance 结构检查）。
 
-    name —— 后端标识（如 "wxauto" / "visual" / "cdp"）
+    name —— 后端标识（如 "visual" / "cdp"）
 
     可选扩展（不在协议方法集中，bot 层用 hasattr 探测，缺省自动降级）：
     - iter_unread_sessions() —— 仅迭代有新消息（未读红圈角标）的会话；
-      visual 后端实现（列表区红圈像素检测驱动），wxauto 等无此能力可不实现，
+      visual 后端实现（列表区红圈像素检测驱动），其它后端无此能力可不实现，
       bot 层探测不到时走旧的"全量 iter_sessions + get_messages"路径。
     """
 
@@ -141,17 +141,11 @@ def _require_connected(inst: WeChatBackend, name: str) -> None:
 def _register_default_backends() -> None:
     """注册内置后端（幂等：已注册同名后端时跳过）。
 
-    顺序即 auto 降级链：visual（新版微信 4.1.12，唯一通道，无窗口副作用）
-    → wxauto（旧版微信兼容路径）。注意：wxauto 的 WeChat() 实例化会触发微信
-    窗口恢复到记忆位置（实测新版微信上 connect 失败后窗口 rect 被改动），
-    因此 visual 必须排在 wxauto 之前，避免每次连接都被 wxauto 干扰窗口。
+    当前唯一内置后端为 visual（新版微信 4.1.12 上唯一可用通道）。
     """
     from . import visual_backend
-    from . import wxauto_backend
     if "visual" not in _REGISTRY:
         visual_backend.register()
-    if "wxauto" not in _REGISTRY and wxauto_backend._WXAUTO_AVAILABLE:
-        wxauto_backend.register()
 
 
 # 模块导入即注册默认后端——create_backend("auto") 开箱即用。

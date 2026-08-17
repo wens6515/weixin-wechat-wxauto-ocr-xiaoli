@@ -40,38 +40,6 @@ class TestIsGroupChat(unittest.TestCase):
         self.assertFalse(is_group_chat("小明"))
 
 
-class TestRememberRecent(unittest.TestCase):
-    def _make(self):
-        bot = WeChatBot.__new__(WeChatBot)
-        bot.recent_msg_ids = set()
-        bot._RECENT_MAX = 10
-        return bot
-
-    def test_dedup_no_growth(self):
-        bot = self._make()
-        bot._remember_recent("x")
-        bot._remember_recent("x")
-        self.assertEqual(len(bot.recent_msg_ids), 1)
-        self.assertEqual(len(bot._recent_order), 1)
-
-    def test_caps_drops_oldest(self):
-        """RED 复现：recent_msg_ids 只增不减会无限膨胀。
-        超限（_RECENT_MAX=10）后每次丢弃最旧一半，保留最近消息。"""
-        bot = self._make()
-        for i in range(20):
-            bot._remember_recent(f"k{i}")
-        self.assertEqual(len(bot.recent_msg_ids), 10, "集合必须被限界")
-        self.assertIn("k19", bot.recent_msg_ids, "最新消息必须保留")
-        self.assertNotIn("k0", bot.recent_msg_ids, "最旧消息应被丢弃")
-        self.assertNotIn("k9", bot.recent_msg_ids)
-
-    def test_within_cap_kept_all(self):
-        bot = self._make()
-        for i in range(8):
-            bot._remember_recent(f"k{i}")
-        self.assertEqual(len(bot.recent_msg_ids), 8)
-
-
 class TestConnectWx(unittest.TestCase):
     def _make(self, stop_event=None, max_retries=None, interval=0):
         bot = WeChatBot.__new__(WeChatBot)
@@ -211,8 +179,6 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.last_reply_time = 0.0
         bot.cooldown = 0.0
         bot.wx = wx
-        bot.recent_msg_ids = set()
-        bot.processed_ids = set()
         bot.nickname = "小漓"
         return bot
 
@@ -291,7 +257,6 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.last_reply_time = 0.0
         bot.cooldown = 0.0
         bot.wx = FakeWx()
-        bot.recent_msg_ids = set()
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
@@ -342,7 +307,6 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.last_reply_time = 0.0
         bot.cooldown = 0.0
         bot.wx = FakeWx()
-        bot.recent_msg_ids = set()
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
@@ -388,7 +352,6 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.last_reply_time = 0.0
         bot.cooldown = 0.0
         bot.wx = FakeWx()
-        bot.recent_msg_ids = set()
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
@@ -431,7 +394,6 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.last_reply_time = 0.0
         bot.cooldown = 0.0
         bot.wx = FakeWx()
-        bot.recent_msg_ids = set()
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")

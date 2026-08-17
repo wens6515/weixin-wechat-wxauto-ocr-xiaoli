@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from xiaoli_bot import AgentBot, _looks_like_file_text
+from xiaoli_bot import AgentBot, _looks_like_file_text, poll_outbox
 from wx_backend.models import MessageType
 
 
@@ -56,8 +56,6 @@ def _make_bot(recv_dir=""):
     bot = AgentBot.__new__(AgentBot)
     bot.nickname = "小漓"
     bot.task_enabled = True
-    bot.dispatched_msg_ids = set()
-    bot.recent_msg_ids = set()
     bot.paused = False
     bot._sending_lock = False
     bot.tasks_dir = tempfile.mkdtemp(prefix="att_")
@@ -165,7 +163,7 @@ class TestFileTaskClassifyInput(unittest.TestCase):
         bot._add_history = lambda *a, **k: None
         bot._process_file_with_instruction(
             "小明", "王", r"D:\recv\部门简介+纳新宣传(6).docx",
-            "部门简介+纳新宣传(6).docx", "内容",
+            "部门简介+纳新宣传(6).docx",
             "把这个做成一个赛博朋克风格的网页")
         self.assertEqual(
             got,
@@ -201,3 +199,92 @@ class TestImageMediaDrive(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPollOutboxIdempotent(unittest.TestCase):
+    """poll_outbox 幂等：归档是 deliver 的前置条件，绝不二次投递（真机根因：
+    15:03 同一任务 20260816150016f8cc 重复回传两次，成果重复发送）。"""
+
+    def _make_task(self, tasks, name):
+        import json as _json
+        task_dir = os.path.join(tasks, name)
+        os.makedirs(task_dir)
+        with open(os.path.join(task_dir, "task.json"), "w", encoding="utf-8") as f:
+            _json.dump({"chat_name": "小明"}, f)
+        with open(os.path.join(task_dir, "result.json"), "w", encoding="utf-8") as f:
+            _json.dump({"reply_text": "完成"}, f)
+        return task_dir
+
+    def test_already_archived_skips_deliver(self):
+        """sent 下已有同名归档目录 → 跳过 deliver 并清理残留顶层目录。"""
+        tasks = tempfile.mkdtemp(prefix="poll_")
+        try:
+            task_dir = self._make_task(tasks, "20260816150016f8cc")
+            sent_dir = os.path.join(tasks, "sent")
+            os.makedirs(os.path.join(sent_dir, "20260816150016f8cc"))
+            delivered = []
+            poll_outbox(tasks, lambda d, i, r: delivered.append(1))
+            self.assertEqual(delivered, [], "已归档任务不得二次 deliver")
+            self.assertFalse(os.path.isdir(task_dir), "残留顶层目录应被清理")
+        finally:
+            import shutil
+            shutil.rmtree(tasks, ignore_errors=True)
+
+    def test_move_fail_no_deliver(self):
+        """move 失败（文件被占用）→ 不 deliver，抛异常回滚重试。"""
+        from unittest import mock as _mock
+        tasks = tempfile.mkdtemp(prefix="poll_")
+        try:
+            self._make_task(tasks, "t1")
+            delivered = []
+            with _mock.patch("xiaoli_bot.shutil.move",
+                             side_effect=OSError("文件被占用")):
+                poll_outbox(tasks, lambda d, i, r: delivered.append(1))
+            self.assertEqual(delivered, [], "move 失败不得 deliver")
+        finally:
+            import shutil
+            shutil.rmtree(tasks, ignore_errors=True)
+
+
+class TestFileTaskNoFileText(unittest.TestCase):
+    def test_task_dispatch_no_file_text(self):
+        """任务分支只投文件本体，不提取文字、不写 file_text（真机根因：
+        task.json 里出现多余的 file_text 字段）。"""
+        bot = _make_bot()
+        dispatched = []
+        bot._classify_task = lambda t: {"is_task": True, "task": "做网页"}
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append(k)
+        bot._add_history = lambda *a, **k: None
+        bot._send_text = lambda *a, **k: None
+
+        def _boom_extract(p):
+            raise AssertionError("任务分支不得提取文件文字")
+
+        bot._extract_file_text = _boom_extract
+        bot._process_file_with_instruction(
+            "小明", "王", r"D:\recv\报告.docx", "报告.docx", "把这个做成网页")
+        self.assertEqual(len(dispatched), 1)
+        k = dispatched[0]
+        self.assertNotIn("file_text", k["extra"], "任务分支不得写 file_text")
+        self.assertEqual(k["attachment_paths"], [r"D:\recv\报告.docx"])
+
+    def test_file_with_media_passes_extra_attachments(self):
+        """文件+图片组合：图片截图作为 extra_attachments 传给文件处理，
+        最终与文件一并投递（真机根因：file_text 分支吞掉图片）。"""
+        recv_dir = tempfile.mkdtemp(prefix="recv_")
+        try:
+            bot = _make_bot(recv_dir=recv_dir)
+            got = []
+            bot._find_file_by_display_name = lambda name: r"D:\recv\报告.docx"
+            bot._extract_file_text = lambda p: "内容"
+            bot._process_file_with_instruction = lambda *a, **k: got.append(
+                k.get("extra_attachments"))
+            bot._send_text = lambda *a, **k: None
+            bot._handle_file_message(
+                "小明", "王", "报告.docx", "处理一下",
+                extra_attachments=[r"C:\tmp\img.jpg"])
+            self.assertEqual(got, [[r"C:\tmp\img.jpg"]],
+                             "文件+图片组合时图片截图应传给文件处理")
+        finally:
+            import shutil
+            shutil.rmtree(recv_dir, ignore_errors=True)
