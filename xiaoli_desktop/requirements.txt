@@ -1,23 +1,22 @@
-# 小漓桌面版依赖（Python 3.12，Windows）
+# 小漓后端依赖（Python 3.12，Windows）
 # 安装：python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
-
-# --- 微信自动化 ---
-wxauto4==41.1.2
-uiautomation==2.0.29
-PyAutoGUI==0.9.54
-pywin32==312
+# v2.0.0：适配微信 4.1.12+（wxauto4/UIA 通道已弃用，视觉方案唯一通道）
 
 # --- LLM API ---
 requests==2.34.2
 
-# --- 图片/文件处理 ---
+# --- 图像处理（visual_backend 截图/气泡/头像分析）---
 pillow==12.3.0
-comtypes==1.4.16
-openpyxl==3.1.5
-python-docx==1.2.0
+numpy==2.5.2
 
-# --- GUI ---
-PySide6==6.11.1
+# --- OCR（视觉通道文本识别，懒加载）---
+rapidocr_onnxruntime==1.4.4
 
-# --- 打包（可选）---
-pyinstaller==6.21.0
+# --- 微信窗口交互（点击/输入/置前）---
+PyAutoGUI==0.9.54
+pywin32==312            # config_store DPAPI 加密（win32crypt）
+
+# --- 文件内容提取（Office 文档转文字喂 AI）---
+comtypes==1.4.16        # Office COM
+openpyxl==3.1.5         # Excel
+python-docx==1.2.0      # Word
