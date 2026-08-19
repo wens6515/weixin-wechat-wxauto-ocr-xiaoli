@@ -206,13 +206,13 @@ QPushButton:disabled { color: $muted; background: $frame; border-color: $border;
 QPushButton[compact="true"] { padding: 6px 8px; min-height: 30px; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: $input_bg; border: 1px solid $border; border-radius: 10px;
-    padding: 5px 10px; }
+    padding: 5px 10px; min-height: 30px; }
 /* 下拉弹层（QComboBox 弹出的列表）：深色系统主题下 palette 文字是白色，
    必须显式设深灰文字 + 白底，否则浅色界面上下拉项白字看不清 */
 QComboBox QAbstractItemView {
     color: $text; background: $input_bg; border: 1px solid $border;
     border-radius: 10px; padding: 4px; selection-background-color: $hover; selection-color: $text; }
-QComboBox QAbstractItemView::item { padding: 6px 10px; border-radius: 6px; }
+QComboBox QAbstractItemView::item { padding: 9px 12px; border-radius: 6px; }
 QComboBox QAbstractItemView::item:selected { background: $hover; color: $text; }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid $focus; background: $input_bg; }
@@ -253,7 +253,7 @@ QListWidget#themeGrid::item, QListWidget#wpGrid::item { border: 2px solid transp
 QListWidget#themeGrid::item:hover, QListWidget#wpGrid::item:hover { background: $hover; }
 QListWidget#themeGrid::item:selected, QListWidget#wpGrid::item:selected { background: $hover;
                               color: $text; }
-QTableWidget::item { padding: 9px 8px; }
+QTableWidget::item { padding: 11px 8px; min-height: 26px; }
 QTableWidget::item:selected { background: $sel_row; color: $text; }
 QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;

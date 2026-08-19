@@ -135,69 +135,104 @@ class NavItemDelegate(QStyledItemDelegate):
 
 
 class FadeStackedWidget(QStackedWidget):
-    """带过渡动画的页面容器（替代默认瞬切）。
+    """带过渡动画的页面容器：旧页渐渐散掉 + 新页从下方升起。
 
-    实现：切换时先抓旧页快照（grab 静态 pixmap），立即切到新页，
-    旧页快照以约 150ms 淡出——快照盖在新页上渐隐，视觉为
-    「旧页淡出、新页显现」的交叉过渡。
+    实现（纯软件合成，零 GPU effect）：
+      - 切换瞬间抓旧页静态快照（grab），立即切到新页（新页完整显示在下层）
+      - 旧页快照：QPainter 逐帧按 alpha 重新合成 pixmap 显示（1.0 → 0.0，
+        约 150ms）+ 轻微上飘——painter 的 setOpacity 是 CPU 合成，
+        不触发 DWM/半透明窗口的 effect 合成路径，真机不再闪烁
+      - 新页：QTimer 逐帧 move 从下方（height*0.16）升到 0，随旧页淡出
+        同步「从下方升起露出」
 
-    为何不用 QGraphicsOpacityEffect 直接套页面做交叉淡化：真实 Windows
-    半透明圆角窗口（WA_TranslucentBackground + 粒子背景层）下，effect
-    会让页面整页离屏合成且每帧重绘，实测表现为「快速闪烁 + 卡顿」。
-    快照是静态 pixmap，淡出只插值 alpha，零离屏重绘、零闪烁。
-
-    淡出驱动用 QTimer 手动逐帧 setOpacity（而非 QPropertyAnimation）：
-    offscreen 与真实环境实测 QPropertyAnimation + QGraphicsOpacityEffect
-    组合的 finished 信号不可靠（DeleteWhenStopped 提前删 C++ 对象 /
-    事件循环 tick 不推进），会导致 pending 切页卡死。
+    为何弃用 QGraphicsOpacityEffect：本应用是 WA_TranslucentBackground
+    无边框圆角窗口 + 粒子背景层，effect 的 alpha 动画走 GPU 合成路径，
+    真机实测每帧闪烁 + 卡顿（快照 label 的 effect 同样中招）。
+    painter 软件合成完全绕开该路径。
     动画期间再点导航：记录 pending，当前动画结束直接续切（不跳帧）。
     """
 
     def __init__(self, parent=None, duration=150):
         super().__init__(parent)
         self._duration = max(80, duration)
-        self._snap = None          # 当前旧页快照 QLabel（动画完删除）
+        self._snap = None        # 旧页快照 QLabel（动画完删除）
+        self._snap_base = None   # 旧页快照原始 pixmap（逐帧合成 alpha 用）
+        self._lift = None        # 正在升起的新页 widget
+        self._lift_start = 0     # 升起起始 y
+        self._animating = False
         self._pending = -1
-        self._snap_seq = 0         # 快照序号：快速切换时作废过期定时器
+        self._seq = 0
 
     def setCurrentIndex(self, index):
         if index < 0 or index >= self.count():
             return
         if index == self.currentIndex():
             return
-        if self._snap is not None:
+        if self._animating:
             self._pending = index
             return
         old = self.currentWidget()
         # 立即切换（新页完整显示在下层，不透明、无闪烁）
         super().setCurrentIndex(index)
-        if old is None:
+        new = self.currentWidget()
+        if old is None or new is None:
             return
-        self._snap_seq += 1
-        seq = self._snap_seq
-        # 旧页快照盖在新页上，逐帧淡出
+        self._seq += 1
+        seq = self._seq
+        self._animating = True
+        # 旧页快照：原始图缓存，逐帧软件合成 alpha
+        base = old.grab()
+        if base.isNull():
+            self._animating = False
+            return
+        self._snap_base = base
         snap = QLabel(self)
-        snap.setPixmap(old.grab())
+        snap.setPixmap(base)
         snap.setGeometry(self.rect())
         snap.show()
         snap.raise_()
         self._snap = snap
-        eff = QGraphicsOpacityEffect(snap)
-        snap.setGraphicsEffect(eff)
-        eff.setOpacity(1.0)
-        steps = max(4, self._duration // 15)
+        # 新页初始偏下（升起起点），随动画升到 0
+        self._lift = new
+        self._lift_start = max(30, int(self.height() * 0.16))
+        new.move(0, self._lift_start)
+        steps = max(5, self._duration // 15)
         step_ms = max(8, self._duration // steps)
         for i in range(1, steps + 1):
-            QTimer.singleShot(i * step_ms,
-                              lambda i=i: eff.setOpacity(max(0.0, 1.0 - i / steps)))
-        QTimer.singleShot((steps + 1) * step_ms, lambda: self._snap_done(seq))
+            t = i / steps
+            QTimer.singleShot(i * step_ms, lambda t=t, seq=seq: self._frame(t, seq))
+        QTimer.singleShot((steps + 1) * step_ms, lambda seq=seq: self._done(seq))
 
-    def _snap_done(self, seq):
-        if seq != self._snap_seq:
-            return  # 已有更新的切换，本次快照的定时器作废
+    def _frame(self, t, seq):
+        if seq != self._seq or not self._animating:
+            return
+        # 旧页快照：painter 软件合成 alpha（1-t）+ 轻微上飘（「散掉」感）
+        base = self._snap_base
+        if base is not None and self._snap is not None:
+            pm = QPixmap(base.size())
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.setOpacity(max(0.0, 1.0 - t))
+            p.drawPixmap(0, 0, base)
+            p.end()
+            self._snap.setPixmap(pm)
+            self._snap.move(0, -int(8 * t))
+        # 新页：从下方升起（start → 0）
+        if self._lift is not None:
+            self._lift.move(0, int(self._lift_start * (1.0 - t)))
+
+    def _done(self, seq):
+        if seq != self._seq:
+            return
+        self._animating = False
         if self._snap is not None:
             self._snap.deleteLater()
             self._snap = None
+        self._snap_base = None
+        if self._lift is not None:
+            self._lift.move(0, 0)   # 复位到布局位置
+            self._lift = None
         if self._pending >= 0:
             idx, self._pending = self._pending, -1
             self.setCurrentIndex(idx)
@@ -411,9 +446,12 @@ class MainWindow(QMainWindow):
         """
         self._max_state = not getattr(self, "_max_state", False)
         self._suppress_max_sync = True  # 防抖：本轮 toggle 引发的状态变更不反向覆盖
-        # 防抖标志延迟清除：changeEvent 可能在 showMaximized 之后异步触发
+        # 防抖窗口 300ms：showMaximized/showNormal 的 WindowStateChange 异步
+        # 且可能多次到达（最大化动画），期间 changeEvent 若用 isMaximized()
+        # 覆盖 _max_state 会把还原意图洗掉（isMaximized 在调用后异步才变 True，
+        # 过早覆盖 → 按钮图标错误 → 再点「还原」实际执行 showMaximized → 失效）。
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: setattr(self, "_suppress_max_sync", False))
+        QTimer.singleShot(300, lambda: setattr(self, "_suppress_max_sync", False))
         if self._max_state:
             self.showMaximized()
         else:
@@ -482,8 +520,14 @@ class MainWindow(QMainWindow):
                     tray.set_state("error")
 
     def apply_backdrop(self, theme=None, wallpaper=None):
-        """主题/壁纸切换时同步背景层（设置页/入口调用）。"""
+        """主题/壁纸切换时同步背景层（设置页/入口调用）。
+
+        主题解析与入口一致（resolve_theme）：follow_system 开关生效时
+        backdrop 粒子/渐变随系统深浅走，避免与已解析的 QSS 分裂。
+        """
+        from . import resolve_theme
         theme = theme if theme is not None else self.ctx.theme()
+        theme = resolve_theme(theme, bool((self.ctx.cfg or {}).get("follow_system")))
         wallpaper = wallpaper if wallpaper is not None else self.ctx.wallpaper()
         self.backdrop.set_theme(theme)
         self.backdrop.set_wallpaper(wallpaper)
