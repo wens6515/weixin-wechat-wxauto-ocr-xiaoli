@@ -141,6 +141,11 @@ PRESET_PROVIDERS = [
     {"id": "doubao", "name": "豆包（火山引擎）",
      "base_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
      "models": ["doubao:doubao-seed-1.6"]},
+    {"id": "siliconflow", "name": "硅基流动 SiliconFlow",
+     "base_url": "https://api.siliconflow.cn/v1/chat/completions",
+     "models": ["siliconflow:deepseek-ai/DeepSeek-V3",
+                "siliconflow:Qwen/Qwen2.5-72B-Instruct",
+                "siliconflow:Qwen/Qwen2-VL-72B-Instruct"]},
 ]
 
 
