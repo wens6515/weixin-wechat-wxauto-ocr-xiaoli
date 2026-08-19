@@ -278,7 +278,7 @@ class TestPresetProviders(unittest.TestCase):
 
     def test_preset_shape(self):
         provs = config_store.PRESET_PROVIDERS
-        self.assertEqual(len(provs), 5)
+        self.assertEqual(len(provs), 6)  # deepseek/zhipu/qwen/kimi/doubao/siliconflow
         for p in provs:
             self.assertTrue(p.get("id"), p)
             self.assertTrue(p.get("name"), p)
