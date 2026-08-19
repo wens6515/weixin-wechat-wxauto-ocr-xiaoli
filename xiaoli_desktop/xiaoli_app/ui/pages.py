@@ -5,14 +5,14 @@ import os
 import threading
 import time
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QPoint, QRect
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
     QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox, QSpinBox,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QFrame,
-    QProgressBar, QScrollArea, QSlider, QHeaderView,
+    QProgressBar, QScrollArea, QSlider, QHeaderView, QLayout,
 )
 
 from xiaoli_app import card_store, config_store
@@ -24,6 +24,76 @@ from . import render_svg_icon
 _BOT_LOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "bot.log")
+
+
+# =====================================================================
+# 通用：流式布局（空间不足自动换行，预设按钮行小窗口不截断）
+# =====================================================================
+
+class _FlowLayout(QLayout):
+    """简易流式布局：空间不足自动换行。
+
+    Qt Widgets 无内置 FlowLayout，按官方示例简化实现：
+    高度依赖宽度（hasHeightForWidth），换行时 item 移入下一行。
+    """
+
+    def __init__(self, parent=None, margin=0, spacing=6):
+        super().__init__(parent)
+        self._items = []
+        self._spacing = spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, i):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize()
+        for it in self._items:
+            s = s.expandedTo(it.minimumSize())
+        m = self.contentsMargins()
+        return s + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _layout(self, rect, test_only):
+        x, y = rect.x(), rect.y()
+        line_h = 0
+        m = self.contentsMargins()
+        right = rect.right() - m.right()
+        for it in self._items:
+            w = it.sizeHint().width()
+            if x + w > right and line_h > 0:
+                x = rect.x()
+                y += line_h + self._spacing
+                line_h = 0
+            if not test_only:
+                it.setGeometry(QRect(QPoint(x, y), it.sizeHint()))
+            x += w + self._spacing
+            line_h = max(line_h, it.sizeHint().height())
+        return y + line_h - rect.y() + m.top() + m.bottom()
 
 
 # =====================================================================
@@ -867,15 +937,15 @@ class ModelsPage(QWidget):
         self.btn_test.clicked.connect(self._test)
         for b in (self.btn_add, self.btn_del, self.btn_save, self.btn_test):
             btn_row.addWidget(b)
-        # 快捷添加主流 Provider（一键填入 base_url + 常用模型，只填 key 即可）
-        preset_row = QHBoxLayout()
+        # 快捷添加主流 Provider（一键填入 base_url + 常用模型，只填 key 即可）。
+        # 流式布局：窗口缩小时自动换行，按钮文字不会被截断
+        preset_row = _FlowLayout(spacing=6)
         preset_row.addWidget(QLabel("快捷添加："))
         for p in config_store.PRESET_PROVIDERS:
             b = QPushButton(p["name"])
             b.setToolTip(f"{p['base_url']}\n常用模型：{', '.join(p['models'])}")
             b.clicked.connect(lambda checked=False, pp=p: self._add_preset(pp))
             preset_row.addWidget(b)
-        preset_row.addStretch(1)
         lay.addLayout(preset_row)
         # ---- 模型配置区：文字/图片模型独立选择（小白友好）----
         g_model = QGroupBox("模型配置（文字 / 图片分开选）")
@@ -1490,10 +1560,15 @@ class SettingsPage(QWidget):
         self.ed_tasks.setText(cfg.get("tasks_dir", ""))
         theme = cfg.get("theme", "blue")
         self.cb_follow_system.setChecked(bool(cfg.get("follow_system")))
+        # blockSignals：程序回填选中不触发 currentItemChanged→_on_theme_picked
+        # （那会无条件写盘 + 全量 QSS 重建；回填仅是 UI 同步，非用户操作）
+        self.theme_grid.blockSignals(True)
         try:
             self.theme_grid.setCurrentRow(self._theme_keys.index(theme))
         except ValueError:
             pass
+        finally:
+            self.theme_grid.blockSignals(False)
         self._select_wallpaper_item(cfg.get("wallpaper_path", ""))
         self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
         self.sl_opacity.setValue(int(cfg.get("card_opacity", 0.5) * 100))
@@ -1503,12 +1578,19 @@ class SettingsPage(QWidget):
         self._refresh_stems()
 
     def _select_wallpaper_item(self, path):
-        """按路径高亮壁纸网格项（当前壁纸；不在内置列表则不选中）。"""
-        for row, (item, wp_path) in enumerate(self._wp_items):
-            if wp_path == path:
-                self.wp_grid.setCurrentRow(row)
-                return
-        self.wp_grid.clearSelection()
+        """按路径高亮壁纸网格项（当前壁纸；不在内置列表则不选中）。
+
+        blockSignals：程序回填不触发 _on_wp_picked（避免非意图写盘+QSS 重建）。
+        """
+        self.wp_grid.blockSignals(True)
+        try:
+            for row, (item, wp_path) in enumerate(self._wp_items):
+                if wp_path == path:
+                    self.wp_grid.setCurrentRow(row)
+                    return
+            self.wp_grid.clearSelection()
+        finally:
+            self.wp_grid.blockSignals(False)
 
     def _on_wp_picked(self, current, previous):
         """点击壁纸缩略图：即时应用并保存（data 为 '' = 无壁纸）。"""
