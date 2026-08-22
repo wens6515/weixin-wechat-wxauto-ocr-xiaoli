@@ -1121,9 +1121,6 @@ class AgentBot(WeChatBot):
 
         返回 True = 已处理（回复/投递）；False = 无待处理（回到红点监听）。
         """
-        is_group = getattr(self.wx, "_current_is_group", None)
-        if is_group is None:
-            is_group = is_group_chat(chat_name)
         at_tag = f"@{self.nickname}"
 
         def _window_msgs(win):
@@ -1144,6 +1141,13 @@ class AgentBot(WeChatBot):
         if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
             logger.info(f"[跳过] {chat_name} 窗口空（bot 已回复或无对方消息）")
             return False
+        # 群聊判定用本次会话权威值：analyze_window 内部 read_title 已把
+        # _current_is_group 刷新为当前会话（标题括号人数）。此前在
+        # analyze_window 之前读取旧缓存，导致私聊被上一轮群聊残留误判为
+        # 群聊走 @ 过滤跳过（实测日志：私聊「王文生」被判「群聊消息未 @小漓」）。
+        is_group = getattr(self.wx, "_current_is_group", None)
+        if is_group is None:
+            is_group = is_group_chat(chat_name)
         # 先读一次窗口内文字，判断是否有文件（OCR 扩展名）。文件卡片在视觉层
         # 被判普通气泡（has_text 而非 has_media），但文件下载/渲染同样需防抖。
         window_msgs = _window_msgs(win)

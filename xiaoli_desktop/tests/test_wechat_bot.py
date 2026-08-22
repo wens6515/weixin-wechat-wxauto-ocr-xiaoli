@@ -292,7 +292,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             def iter_unread_sessions(self):
                 return iter(["强盗”集团"])
 
-            def analyze_window(self, chat):
+            def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False, "width": 747, "height": 1135}
 
@@ -310,6 +310,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.wx = FakeWx()
         bot.nickname = "小漓"
         bot._pending_files = {}
+        bot._pending_placeholders = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -321,6 +322,61 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
              _mock.patch.object(bot, "_tick_poll_outbox"):
             bot.process_new_messages()
         self.assertEqual(handled, [], "群聊未 @ 消息不应回复")
+
+    def test_private_msg_after_group_not_filtered_by_at(self):
+        """私聊在群聊之后处理：_current_is_group 缓存残留 True 不得让私聊走 @ 过滤。
+
+        回归（实测日志）：bot 处理完群聊后，私聊「王文生」被判群聊走
+        「群聊消息未 @小漓」跳过。根因：_handle_unread 在 analyze_window
+        （read_title 刷新 _current_is_group 为本次会话权威值）之前读取旧缓存
+        判定 is_group，局部变量不随刷新更新。
+        """
+        from unittest import mock as _mock
+
+        from wx_backend.models import MessageType, WeChatMessage
+        from xiaoli_bot import AgentBot
+
+        handled = []
+
+        class FakeWx:
+            _current_is_group = True  # 上一轮群聊残留
+
+            def iter_unread_sessions(self):
+                return iter(["王文生"])
+
+            def analyze_window(self, chat, skip_bot=0):
+                # 模拟 read_title：私聊标题「王文生」→ 本次会话权威值刷新为 False
+                self._current_is_group = False
+                return {"bot_bottom": None, "other_text": [], "other_media": [],
+                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+
+            def get_messages(self, chat):
+                return [
+                    WeChatMessage(id="v1", chat=chat, sender="王文生",
+                                  content="在吗", type=MessageType.TEXT),
+                ]
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.paused = False
+        bot._sending_lock = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = FakeWx()
+        bot.nickname = "小漓"
+        bot._pending_files = {}
+        bot._pending_placeholders = {}
+        bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 10
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+            handled.append((sender, content))
+        with _mock.patch("xiaoli_bot.should_resume_listen",
+                         return_value=(True, False, None)), \
+             _mock.patch.object(bot, "_tick_poll_outbox"):
+            bot.process_new_messages()
+        self.assertEqual(handled, [("王文生", "在吗")],
+                         "私聊不应被上一轮群聊的 _current_is_group 残留误判为群聊")
 
     def test_group_message_with_at_is_handled(self):
         """群聊消息 @小漓 → 正常处理并回复。"""
