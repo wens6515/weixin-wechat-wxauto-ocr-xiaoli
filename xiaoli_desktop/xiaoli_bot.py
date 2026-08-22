@@ -698,7 +698,8 @@ class AgentBot(WeChatBot):
         return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
     def _vision_route(self, chat_name, sender, text, img_path=None, msg_id=None,
-                      raw_message=None, attachments=None):
+                      raw_message=None, attachments=None, is_group=None,
+                      multi_sender=False):
         """vision-exp 单调用分流：任务判断 + 回复一次完成（替代两段式）。
 
         契约（基类 call_vision_api 由并行维度实现）：
@@ -714,7 +715,23 @@ class AgentBot(WeChatBot):
         """
         # 方案二：人设由 call_vision_api 的 system 消息承载，这里不再重复注入
         # （避免同段人设同时出现在 system 与 user prompt 造成冗余/冲突）
-        prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{text}"
+        # sender 分流：对齐 call_chat_ai（wechat_bot.py）三分支——群聊带发送者
+        # 名、多发送者只包群名前缀不重包 sender、私聊带发送者；否则模型不知
+        # 道谁发的消息（历史缺陷：sender 与群聊名完全没进 prompt）。
+        if is_group is None:
+            is_group = bool(
+                getattr(getattr(self, "wx", None), "_current_is_group", None)
+                or is_group_chat(chat_name))
+        if is_group:
+            if multi_sender:
+                decorated = f"群聊：{chat_name} {text}"
+            elif sender:
+                decorated = f"群聊：{chat_name} {sender}：{text}"
+            else:
+                decorated = f"群聊：{chat_name}：{text}"
+        else:
+            decorated = f"私聊 - {sender}：{text}" if sender else f"私聊：{text}"
+        prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{decorated}"
         content = [{"type": "text", "text": prompt}]
         if img_path:
             try:
@@ -733,7 +750,7 @@ class AgentBot(WeChatBot):
             return None
         return self._apply_vision_result(
             chat_name, sender, resp, img_path=img_path, msg_id=msg_id,
-            raw_message=raw_message, attachments=attachments, user_text=text)
+            raw_message=raw_message, attachments=attachments, user_text=decorated)
 
     def _apply_vision_result(self, chat_name, sender, result, img_path=None,
                              msg_id=None, raw_message=None, attachments=None,
@@ -993,6 +1010,7 @@ class AgentBot(WeChatBot):
                 chat_name, sender, classify_input,
                 msg_id=None, raw_message=filename,
                 attachments=[filepath] + (extra_attachments or []),
+                is_group=is_group, multi_sender=multi_sender,
             )
             if resp is not None:
                 return True
@@ -1067,7 +1085,8 @@ class AgentBot(WeChatBot):
         if self.task_enabled:
             resp = self._vision_route(
                 chat_name, sender, question,
-                msg_id=msg_id, raw_message=content)
+                msg_id=msg_id, raw_message=content,
+                is_group=is_group, multi_sender=multi_sender)
             if resp is not None:
                 return True
             # vision 降级（None）：API 失败默认非任务，回退普通聊天（与现状一致）
@@ -1275,7 +1294,7 @@ class AgentBot(WeChatBot):
             img_path = self._capture_latest_image(chat_name)
             resp = self._vision_route(
                 chat_name, sender, text_content, img_path=img_path,
-                msg_id=None, raw_message=text_content)
+                msg_id=None, raw_message=text_content, multi_sender=multi_sender)
             if resp is not None:
                 return True
         # 降级：vision 失败或任务桥关闭 → 回退纯文字处理

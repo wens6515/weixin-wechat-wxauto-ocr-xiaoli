@@ -1201,7 +1201,8 @@ class TestVisionRoutePersona(unittest.TestCase):
         self.assertEqual(msgs[1]["role"], "user")
         user_text = msgs[1]["content"][0]["text"]
         self.assertIn("判断用户的消息", user_text, "user 消息仍含路由指令")
-        self.assertIn("用户消息：\n你好呀", user_text)
+        self.assertIn("用户消息：\n私聊 - 王文生：你好呀", user_text,
+                      "sender 必须进 prompt（修复：vision 单调用分流丢失发送者信息）")
         self.assertNotIn("你叫小漓", user_text,
                          "不变量：_vision_route 的 user prompt 不重复注入人设")
 
@@ -1220,7 +1221,39 @@ class TestVisionRoutePersona(unittest.TestCase):
         self.assertEqual(msgs[0]["role"], "user")
         user_text = msgs[0]["content"][0]["text"]
         self.assertIn("判断用户的消息", user_text, "路由指令必须保留")
-        self.assertIn("用户消息：\n你好", user_text)
+        self.assertIn("用户消息：\n私聊 - 王文生：你好", user_text,
+                      "私聊 decorated 带 sender（空人设不破坏 sender 分流）")
+
+    def test_group_single_sender_goes_to_user_text(self):
+        """群聊单条：user prompt 含「群聊：群名 发送者：内容」——sender 和群聊名
+        都必须进 prompt（RED：修复前 prompt 只含 text，模型不知道谁发的）。"""
+        bot = self._agent("")
+        bot._apply_vision_result = lambda *a, **k: True
+        captured, patcher = self._capture_payload(bot)
+        with patcher:
+            bot._vision_route("强盗\"集团", "王文生", "我是谁",
+                              is_group=True, multi_sender=False)
+        msgs = captured["json"]["messages"]
+        user_text = msgs[0]["content"][0]["text"]
+        self.assertIn("用户消息：\n群聊：强盗\"集团 王文生：我是谁", user_text,
+                      "群聊名与发送者必须都进 prompt")
+
+    def test_group_multi_sender_no_double_wrap(self):
+        """多发送者：只包「群聊：群名」前缀、不重包 sender（防「群聊：群名
+        王文生：王文生：」双层嵌套——text 里每条已自带发送者名）。"""
+        bot = self._agent("")
+        bot._apply_vision_result = lambda *a, **k: True
+        captured, patcher = self._capture_payload(bot)
+        with patcher:
+            bot._vision_route(
+                "强盗\"集团", "王文生", "王文生：内容A\n李四：内容B",
+                is_group=True, multi_sender=True)
+        msgs = captured["json"]["messages"]
+        user_text = msgs[0]["content"][0]["text"]
+        self.assertIn("用户消息：\n群聊：强盗\"集团 王文生：内容A\n李四：内容B",
+                      user_text, "多发送者只包群名前缀")
+        self.assertNotIn("王文生：王文生", user_text,
+                         "不重包 sender（防双层嵌套）")
 
 
 if __name__ == "__main__":
