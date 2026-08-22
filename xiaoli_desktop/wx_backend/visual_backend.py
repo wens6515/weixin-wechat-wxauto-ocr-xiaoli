@@ -472,6 +472,24 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
     return _connected_boxes(content, min_h=80, min_w=80)
 
 
+def _bucket_avatar(top: int, tops: list[int]) -> int | None:
+    """头像划块归属：top 落入排序头像边界序列的哪个区间。
+
+    窗口内左右头像 top 混合排序成边界序列：区间 [tops[i], tops[i+1])
+    归属 tops[i]（最后一个区间向 +∞ 延伸）。消息框（气泡/media）顶部 y
+    落入哪个区间 → 归属该区间下边界头像，再按该头像 x 侧定 self/对方。
+    替代旧 tol=40 对齐判据——区间归属无魔法数容差。top 低于最上方头像
+    （消息顶在最高头像之上，无归属）或 tops 为空时返回 None。
+    """
+    hit = None
+    for t in sorted(tops):
+        if top >= t:
+            hit = t
+        else:
+            break
+    return hit
+
+
 def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
     """检测消息区左侧/右侧头像的顶部 y 列表（几何判据，无需头像模板）。
 
@@ -1171,17 +1189,23 @@ class VisualBackend:
         # media 框横跨中线（l=334 < 373 < r=613），文件名 OCR 行 x 靠左被
         # _is_self 降级判对方，上层窗口过滤漏进 bot 消息误判为对方文件。
         media_1x = find_media_boxes(region_1x, colors)
+        # 头像划块：左右头像 top 混合排序成边界序列，media 框顶部落入
+        # 哪个区间 → 归属该头像（x 侧：右=自己/左=对方）。替代旧 tol=40
+        # 对齐——区间归属无需魔法数容差。
+        all_avatar_tops_1x = sorted(set(right_tops_1x) | set(other_tops_1x))
         media_self_boxes = []   # 2x 坐标，归 bot 的 media 框
         media_other_boxes = []  # 2x 坐标，归对方的 media 框
         for (mt, mb, ml, mr) in media_1x:
-            if any(abs(mt - top) <= 40 for top in right_tops_1x):
+            hit = _bucket_avatar(mt, all_avatar_tops_1x)
+            if hit is not None and hit in right_tops_1x:
                 media_self_boxes.append((mt * 2, mb * 2, ml * 2, mr * 2))
-            elif any(abs(mt - top) <= 40 for top in other_tops_1x):
+            elif hit is not None:
                 media_other_boxes.append((mt * 2, mb * 2, ml * 2, mr * 2))
         for it in items:
             cy = it["y"] + it["h"] // 2
             cx = it["x"] + it["w"] // 2
             it["_media_self"] = None
+            it["_in_media"] = False
             for (t, b, l, r) in media_self_boxes:
                 if t <= cy <= b and l <= cx <= r:
                     it["_media_self"] = True
@@ -1190,6 +1214,11 @@ class VisualBackend:
                 for (t, b, l, r) in media_other_boxes:
                     if t <= cy <= b and l <= cx <= r:
                         it["_media_self"] = False
+                        # 仅对方媒体框剔除：对方图片块内文字（图片上的字）
+                        # 是假消息（真机 '我不是'）；bot 文件卡片文件名
+                        # （media_self_boxes）是真实 bot 输出，保留 sender='self'
+                        # （既有验收 test_get_messages_bot_file_card_sender_self）。
+                        it["_in_media"] = True
                         break
         avatar_h_1x = max(40, region_1x.height // 18)
         avatar_x_2x = int(region_1x.width * 0.84) * 2
@@ -1283,19 +1312,22 @@ class VisualBackend:
                         # 气泡探测失败时降级头像锚定 + x 中线。
                         bubble_self = cur_lines[0].get("_bubble_self")
                         media_self_flag = cur_lines[0].get("_media_self")
-                        # 头像几何判据优先于气泡色：bot 文件卡片颜色接近
-                        # other 气泡色会被 find_bubble_boxes 误判 is_self=False，
-                        # 但消息首行 y 对齐右侧头像顶部 → 归 bot（与
-                        # analyze_window 同一判据，tol=40 覆盖群聊名字行偏移、
-                        # 消息间距 ≥98px 不跨消息误对齐）。
+                        # 头像划块优先于气泡色：bot 文件卡片颜色接近 other
+                        # 气泡色会被 find_bubble_boxes 误判 is_self=False，但
+                        # 消息框顶（气泡框 top 优先、OCR 行 y 兜底）落入头像
+                        # 边界序列区间 → 区间头像 x 侧定 sender（右=自己/
+                        # 左=对方）。群聊对方消息 sender 用 block_sender
+                        # （发送者名），不得被 x 中线/气泡色取代——名字是
+                        # 用户硬性要求保留的信息。
                         first_y_1x = first_y // 2
-                        aligned_right = any(abs(first_y_1x - top) <= 40
-                                            for top in right_tops_1x)
-                        aligned_left = any(abs(first_y_1x - top) <= 40
-                                           for top in other_tops_1x)
-                        if aligned_right:
+                        if cur_lines[0].get("_bubble") is not None:
+                            first_y_1x = cur_lines[0]["_bubble"][0] // 2
+                        bucket_hit = _bucket_avatar(first_y_1x,
+                                                    all_avatar_tops_1x)
+                        if bucket_hit is not None \
+                                and bucket_hit in right_tops_1x:
                             sender = "self"
-                        elif aligned_left:
+                        elif bucket_hit is not None:
                             sender = block_sender or chat
                         elif bubble_self is not None:
                             sender = "self" if bubble_self else (block_sender or chat)
@@ -1339,6 +1371,16 @@ class VisualBackend:
             # 头像文字排除：落在头像区域（自己模板 / 对方气泡左列）的文字
             # 是头像图片上的字，不是消息内容，直接丢弃。
             if it.get("_in_avatar"):
+                continue
+            # media 框内文字剔除（与 _in_avatar 对称）：图片/文件消息的
+            # 内容矩形（media 框）内 OCR 到的文字（图片上的字/文件名）不
+            # 拆成假文字消息——图片块只产 1 条媒体消息（由 analyze_window
+            # 媒体框承载，上层 has_media 分支处理）。紧贴框顶的候选发送者
+            # 名（pending_name）是媒体消息的发送者，一并吞掉不产独立消息。
+            if it.get("_in_media"):
+                if pending_name is not None \
+                        and abs(it["y"] - pending_name[1]) < 150:
+                    pending_name = None
                 continue
             # 气泡归并：连通域气泡框优先——同一气泡框的行合并、不同气泡框
             # 换块（气泡内换行 vs 跨气泡不再靠猜行距）。气泡框缺失（纯色/
@@ -1551,13 +1593,10 @@ class VisualBackend:
             # bot 文件 r/w=0.83、对方长文字 r/w=0.80——宽度阈值切不开，头像一右一左分离。
             bot_tops = detect_avatar_tops(region, colors.get("bg"), "right")
             other_tops = detect_avatar_tops(region, colors.get("bg"), "left")
-
-            def _aligned(t, tops, tol=40):
-                # tol=40：私聊头像与气泡顶部对齐（差 0），群聊对方消息头像上方
-                # 隔着发送者名字（真机实测差 ~37px），tol=12 私聊标定覆盖不了，
-                # 放宽到 40 覆盖名字行偏移且不跨消息误对齐（消息间距 ≥98px）。
-                return any(abs(t - top) <= tol for top in tops)
-
+            # 头像划块：左右头像 top 混合排序成边界序列，消息框（气泡/
+            # media 框）顶部 y 落入哪个区间 → 归属该区间头像（替代旧
+            # tol=40 _aligned 对齐——区间归属无魔法数容差）。
+            all_avatar_tops = sorted(set(bot_tops) | set(other_tops))
             # 消息定位改用头像几何不变量：消息上边框 = 对应头像上边框。
             # bot_bottom = 我方最后回复之后第一条消息的上边框（不再依赖
             # find_bubble_boxes 检测 bot 气泡算 bottom——气泡色漂移会导致
@@ -1573,8 +1612,7 @@ class VisualBackend:
             else:
                 last_bot_top = None
             if last_bot_top is not None:
-                all_tops = sorted(set(bot_tops) | set(other_tops))
-                after = [t for t in all_tops if t > last_bot_top]
+                after = [t for t in all_avatar_tops if t > last_bot_top]
                 bot_bottom = after[0] if after else rh
             else:
                 bot_bottom = None
@@ -1582,11 +1620,12 @@ class VisualBackend:
             # 气泡/media 检测——气泡色漂移、黑图被当背景都不会漏判）
             other_new_tops = [t for t in other_tops
                               if last_bot_top is None or t > last_bot_top]
-            # 类型区分：气泡/media 对齐对方新消息头像
+            other_new_set = set(other_new_tops)
+            # 类型区分：气泡/media 框顶部落入对方新消息头像区间（划块归属）
             other_text = [(t, b, l, r) for (t, b, l, r, _is_self) in bubbles
-                          if _aligned(t, other_new_tops)]
+                          if _bucket_avatar(t, all_avatar_tops) in other_new_set]
             other_media = [(t, b, l, r) for (t, b, l, r) in media
-                           if _aligned(t, other_new_tops)]
+                           if _bucket_avatar(t, all_avatar_tops) in other_new_set]
             has_other = bool(other_new_tops)
             # [临时诊断日志] 抓"窗口空"现场，定位后删除
             logger.info(

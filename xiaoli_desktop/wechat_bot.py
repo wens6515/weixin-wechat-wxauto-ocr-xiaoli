@@ -1194,7 +1194,14 @@ class WeChatBot:
             "Content-Type": "application/json"
         }
         if is_group:
-            decorated = f"群聊 - {sender_name}：{user_msg}" if sender_name else f"群聊：{user_msg}"
+            # 群聊格式 = 群聊名 + 发送者名 + 内容（用户原话：群聊：XXX XXX：消息内容）。
+            # sender_name 缺失（极端 OCR 失败）时用群聊名兜底并打日志，
+            # 绝不落入「群聊：{user_msg}」无名字退化分支。
+            if sender_name:
+                decorated = f"群聊：{chat_id} {sender_name}：{user_msg}"
+            else:
+                logger.warning(f"[群聊] {chat_id} 视觉层未读到发送者名，用群聊名兜底")
+                decorated = f"群聊：{chat_id}：{user_msg}"
         else:
             decorated = f"私聊 - {sender_name}：{user_msg}" if sender_name else f"私聊：{user_msg}"
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1326,10 +1333,18 @@ class WeChatBot:
                 file_text = next(
                     (m.content.strip() for m in window_msgs if file_re.search(m.content or "")),
                     None)
-                text_parts = [
-                    m.content.strip() for m in window_msgs
+                text_candidates = [
+                    m for m in window_msgs
                     if m.content.strip() and not file_re.search(m.content or "")
                 ]
+                if len(text_candidates) > 1:
+                    # 多发送者合并：每条带各自发送者名（不整批只带最后一条）
+                    text_parts = [
+                        f"{m.sender or chat_name}：{m.content.strip()}"
+                        for m in text_candidates
+                    ]
+                else:
+                    text_parts = [m.content.strip() for m in text_candidates]
                 text_content = "\n".join(text_parts)
                 has_media = bool(win.get("has_media")) if win else False
                 sender = window_msgs[-1].sender if window_msgs else chat_name
