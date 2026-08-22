@@ -893,6 +893,28 @@ class TestCallVisionApi(unittest.TestCase):
                         "image_url 应为 base64 data URL")
         self.assertIn("iVBORy1mYWtl", url, "base64 应编码原始图片字节")
 
+    def test_system_persona_prepended_when_set(self):
+        """persona 非空时 messages 为 [system(纯文本人设), user(块列表原样)]；
+        图片块只出现在 user（DeepSeek 限制：system 不放图片）。"""
+        bot = self._make()
+        bot.system_prompt = "你叫小漓，是蓝色大肥鱼。"
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "ok"}}]}})
+        content = [
+            {"type": "text", "text": "描述这张图片"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,iVBORy1mYWtl"}},
+        ]
+        with patcher:
+            bot.call_vision_api(content)
+        msgs = captured["json"]["messages"]
+        self.assertEqual(len(msgs), 2, "messages 应为 [system(人设), user(块列表)]")
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(msgs[0]["content"], "你叫小漓，是蓝色大肥鱼。",
+                         "system 只放纯文本人设")
+        self.assertEqual(msgs[1]["role"], "user")
+        self.assertEqual(msgs[1]["content"], content, "user 块列表原样透传（含图片）")
+
     def test_payload_declares_dispatch_task_tool(self):
         """payload 必须声明 dispatch_task 工具 + tool_choice=auto：
         没有 tools 数组模型永不输出 tool_calls，任务消息无法分流。"""
@@ -1124,6 +1146,81 @@ class TestVisionModelDefault(unittest.TestCase):
             cfg = wechat_bot.load_config(path)
             self.assertEqual(cfg["chat_model"], "zhipu:glm-4v-flash",
                              "用户已有配置不应被默认值覆盖")
+
+
+class TestVisionRoutePersona(unittest.TestCase):
+    """方案二契约：人设由 call_vision_api 的 system 消息承载（不重复注入
+    user prompt）；_vision_route 的 user prompt 只含路由指令 + 用户消息。
+
+    契约（DeepSeek 限制）：system 只放纯文本人设；图片块只在 user 的
+    content 里，绝不进 system 消息。
+    """
+
+    def _agent(self, system_prompt):
+        from xiaoli_bot import AgentBot
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.system_prompt = system_prompt
+        bot.nickname = "小漓"
+        bot.vision_api_url = "https://api.deepseek.com/v1/chat/completions"
+        bot.vision_api_key = "test-key"
+        bot.chat_model = "deepseek-v4-flash"
+        bot.vision_temp = 0.7
+        bot.vision_max_tokens = 10000
+        bot._model_lock = threading.RLock()
+        return bot
+
+    def _capture_payload(self, bot):
+        """mock wechat_bot.requests.post，捕获真实 call_vision_api 的 payload。"""
+        from unittest import mock as _mock
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            resp = _mock.MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"choices": [{"message": {"content": "嗨"}}]}
+            return resp
+
+        return captured, _mock.patch("wechat_bot.requests.post", side_effect=fake_post)
+
+    def test_persona_goes_to_system_message(self):
+        """人设进 call_vision_api 的 messages[0]（system 角色，content 含人设）；
+        user 消息仍含路由指令 + 用户文本，且不重复注入人设（不变量）。"""
+        bot = self._agent("你叫小漓，是蓝色大肥鱼。不要用 emoji，用颜文字。")
+        bot._apply_vision_result = lambda *a, **k: True
+        captured, patcher = self._capture_payload(bot)
+        with patcher:
+            bot._vision_route("王文生", "王文生", "你好呀")
+
+        msgs = captured["json"]["messages"]
+        self.assertEqual(msgs[0]["role"], "system", "人设必须由 system 消息承载")
+        self.assertIn("你叫小漓", msgs[0]["content"], "system content 含人设")
+        self.assertIn("不要用 emoji，用颜文字", msgs[0]["content"],
+                      "颜文字指令必须在 system 人设里")
+        self.assertEqual(msgs[1]["role"], "user")
+        user_text = msgs[1]["content"][0]["text"]
+        self.assertIn("判断用户的消息", user_text, "user 消息仍含路由指令")
+        self.assertIn("用户消息：\n你好呀", user_text)
+        self.assertNotIn("你叫小漓", user_text,
+                         "不变量：_vision_route 的 user prompt 不重复注入人设")
+
+    def test_empty_persona_keeps_route_instruction(self):
+        """system_prompt 为空时不报错、不插入空 system 消息（防空消息 API 400）；
+        user 消息仍含路由指令（防御空人设）。"""
+        bot = self._agent("")
+        bot._apply_vision_result = lambda *a, **k: True
+        captured, patcher = self._capture_payload(bot)
+        with patcher:
+            result = bot._vision_route("王文生", "王文生", "你好")
+
+        self.assertTrue(result, "空人设时调用链路不报错、正常返回")
+        msgs = captured["json"]["messages"]
+        self.assertEqual(len(msgs), 1, "空人设不插入空 system 消息")
+        self.assertEqual(msgs[0]["role"], "user")
+        user_text = msgs[0]["content"][0]["text"]
+        self.assertIn("判断用户的消息", user_text, "路由指令必须保留")
+        self.assertIn("用户消息：\n你好", user_text)
 
 
 if __name__ == "__main__":
