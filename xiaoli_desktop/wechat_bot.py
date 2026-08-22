@@ -147,6 +147,11 @@ logging.getLogger().handlers[1].setLevel(logging.INFO)
 logger = logging.getLogger("xiaoli")
 
 
+# 视觉模型默认值：随 DeepSeek vision-exp 发布迁移（旧 zhipu:glm-4v-flash 仅作
+# 用户既有配置保留；缺键时补默认，不覆盖用户现有配置）
+VISION_MODEL_DEFAULT = "deepseek:deepseek-v4-flash-vision-exp"
+
+
 def load_config(path="config.json"):
     default_cfg = {
         "bot_nickname": "小漓",
@@ -155,7 +160,7 @@ def load_config(path="config.json"):
         "chat_model": "deepseek:deepseek-v4-flash",
         "chat_temperature": 0.7,
         "chat_top_p": 0.9,
-        "vision_model": "zhipu:glm-4v-flash",
+        "vision_model": VISION_MODEL_DEFAULT,
         "vision_temp": 0.7,
         "vision_max_tokens": 10000,
         "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",
@@ -225,7 +230,7 @@ class WeChatBot:
         self.chat_model = strip_model_prefix(cfg["chat_model"])
         self.chat_temperature = cfg.get("chat_temperature", 0.7)
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
-        self.vision_model = strip_model_prefix(cfg["vision_model"])
+        self.vision_model = strip_model_prefix(cfg.get("vision_model", VISION_MODEL_DEFAULT))
         self.vision_temp = cfg.get("vision_temp", 0.7)
         self.vision_max_tokens = cfg.get("vision_max_tokens", 10000)
         # cfg.get 兜底：config_store 统一补默认（AI_DEFAULTS），此处防御
@@ -256,6 +261,9 @@ class WeChatBot:
         self._file_snapshot = self._load_file_snapshot()
         # 图片消息点击偏移校准（竖图点击偏位时手动校正，格式 [dx, dy]，存 config.json）
         self.image_click_offset = cfg.get("image_click_offset", [0, 0])
+        # 占位消息计数（"收到任务啦，正在处理中"等）：按 chat_name 隔离，
+        # 非全局计数——每个聊天独立记录，绝不跨会话复用
+        self._pending_placeholders = {}
 
         self._model_lock = threading.RLock()
 
@@ -393,15 +401,27 @@ class WeChatBot:
             logger.info(f"  删除: [{ts}] {role}: {msg['content'][:50]}...")
         return True
 
-    def call_vision_api(self, image_bytes, prompt_text):
-        img_base64 = base64.b64encode(image_bytes).decode()
+    def call_vision_api(self, content):
+        """单调用视觉识别（OpenAI 兼容 / chat.completions）。
+
+        唯一参数 content：块列表 list[dict]，格式
+          [{"type": "text", "text": ...},
+           {"type": "image_url", "image_url": {"url": "data:image/..."}}]
+        图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进唯一一条
+        user 消息；DeepSeek vision 限制：图片只能出现在 user 消息，
+        system/assistant 带图返回 400）。
+
+        payload 声明 dispatch_task 工具（tool_choice=auto）：模型判定用户消息为
+        任务时走 tool_calls 返回，否则返回纯文本描述（上层按 dict 分流）。
+
+        返回结构化结果（供上层按 dict 处理）：
+        - message.tool_calls 存在（如 dispatch_task 工具调用）→
+          {'kind': 'tool_call', 'name': ..., 'arguments': ...}（arguments 为原始 JSON 字符串）
+        - 仅 message.content → {'kind': 'text', 'content': ...}
+        - 非 200 / 无 choices / content 空白 → None
+        """
         headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
-        messages = [
-            {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_base64}"}},
-                {"type": "text", "text": prompt_text}
-            ]}
-        ]
+        messages = [{"role": "user", "content": content}]
         with self._model_lock:
             model = self.vision_model
             temp = self.vision_temp
@@ -409,27 +429,58 @@ class WeChatBot:
             "model": model,
             "messages": messages,
             "max_tokens": self.vision_max_tokens,
-            "temperature": temp
+            "temperature": temp,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "dispatch_task",
+                    "description": "判断用户消息是否为任务，是则投递天枢处理",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {"type": "string", "description": "任务描述"},
+                        },
+                        "required": ["task"],
+                    },
+                },
+            }],
+            "tool_choice": "auto",
         }
         try:
             resp = requests.post(self.vision_api_url, headers=headers, json=payload, timeout=60)
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get("choices", [])
-                if choices:
-                    reply = choices[0].get("message", {}).get("content", "").strip()
-                    if not reply:
-                        reply = "（无有效描述）"
-                    return reply
-                else:
-                    logger.warning("视觉模型返回无 choices")
-                    return None
-            else:
+            if resp.status_code != 200:
                 logger.warning(f"视觉模型API错误: {resp.status_code} - {resp.text}")
                 return None
+            data = resp.json()
+            choices = data.get("choices", [])
+            if not choices:
+                logger.warning("视觉模型返回无 choices")
+                return None
+            message = choices[0].get("message", {}) or {}
+            tool_calls = message.get("tool_calls") or []
+            if tool_calls:
+                fn = tool_calls[0].get("function", {}) or {}
+                return {"kind": "tool_call",
+                        "name": fn.get("name", ""),
+                        "arguments": fn.get("arguments", "")}
+            content = (message.get("content") or "").strip()
+            if not content:
+                logger.warning("视觉模型返回空 content")
+                return None
+            return {"kind": "text", "content": content}
         except Exception as e:
             logger.error(f"视觉模型调用失败: {e}")
             return None
+
+    def _route_vision_result(self, chat_name, sender, result, img_path=None):
+        """vision 单调用结果分流 hook（可覆写）。
+
+        result 为 call_vision_api 的 dict 返回（{'kind':'tool_call',
+        'name','arguments'} | {'kind':'text','content'}）或 None；基类默认
+        返回 None（未处理），由 AgentBot（xiaoli_bot）覆写：tool_call →
+        任务投递，text → 直接回复。img_path 为截图临时文件路径（调用方
+        finally 负责清理，覆写方需在返回前同步消费）。"""
+        return None
 
     # 视觉模型输入最长边上限：屏幕截图（可能 4K 全窗口）base64 直发体积过大
     MAX_IMAGE_EDGE = 2048
@@ -516,11 +567,16 @@ class WeChatBot:
             with open(tmp_path, 'rb') as f:
                 img_bytes = f.read()
             logger.debug(f"[处理] 调用视觉模型 ({len(img_bytes)} bytes)...")
-            vision_reply = self.call_vision_api(img_bytes, self.vision_prompt)
+            vision_reply = self.call_vision_api([
+                {"type": "text", "text": self.vision_prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
+            ])
 
             if vision_reply:
-                logger.info(f"📷 图片识别完成 ({len(vision_reply)} 字符)")
-                return self._reply_with_vision(chat_name, sender, vision_reply)
+                logger.info("📷 图片识别完成，交由 _route_vision_result 分流")
+                return self._route_vision_result(chat_name, sender, vision_reply,
+                                                 img_path=tmp_path)
             else:
                 logger.warning("[处理] 视觉模型返回空")
                 self._send_text("图片识别失败了，可能是什么地方出了问题～", chat_name)
@@ -598,14 +654,24 @@ class WeChatBot:
             return None
 
     def _describe_image(self, chat_name):
-        """点击最新图片 → 截图 → 视觉模型 → 返回描述文本（不回复，清理临时文件）。"""
+        """点击最新图片 → 截图 → 视觉模型 → dict 原样路由给
+        _route_vision_result（不压文本；img_path 由调用方 finally 清理，
+        覆写方需在返回前同步消费）。sender 无独立来源，以 chat_name 兜底。"""
         tmp_path = self._capture_latest_image(chat_name)
         if not tmp_path:
             return None
         try:
             with open(tmp_path, 'rb') as f:
                 img_bytes = f.read()
-            return self.call_vision_api(img_bytes, self.vision_prompt)
+            result = self.call_vision_api([
+                {"type": "text", "text": self.vision_prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
+            ])
+            if result:
+                return self._route_vision_result(chat_name, chat_name, result,
+                                                 img_path=tmp_path)
+            return None
         except Exception as e:
             logger.error(f"[图片描述] 异常: {e}")
             return None
@@ -628,10 +694,15 @@ class WeChatBot:
             self._save_screenshot_compressed(shot, tmp_path)
             with open(tmp_path, 'rb') as f:
                 img_bytes = f.read()
-            vision_reply = self.call_vision_api(img_bytes, self.vision_prompt)
+            vision_reply = self.call_vision_api([
+                {"type": "text", "text": self.vision_prompt},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
+            ])
             if vision_reply:
-                logger.info(f"📷 整窗识别完成 ({len(vision_reply)} 字符)")
-                return self._reply_with_vision(chat_name, sender, vision_reply)
+                logger.info("📷 整窗识别完成，交由 _route_vision_result 分流")
+                return self._route_vision_result(chat_name, sender, vision_reply,
+                                                 img_path=tmp_path)
             else:
                 logger.warning("[处理] 视觉模型返回空")
                 self._send_text("图片识别失败了，可能是什么地方出了问题～", chat_name)
@@ -646,16 +717,6 @@ class WeChatBot:
                     os.unlink(tmp_path)
                 except Exception:
                     pass
-
-    def _reply_with_vision(self, chat_name, sender, vision_reply):
-        """根据视觉模型返回的图片描述，生成回复并发送"""
-        logger.debug(f"[图片处理] 视觉模型返回: {vision_reply[:100]}...")
-        self._add_history(chat_name, "assistant", f"[图片描述] {vision_reply}")
-        refine_prompt = f"用户发来一张图片，内容描述如下：{vision_reply}\n请根据这个描述，以{self.nickname}的身份回复用户。"
-        is_group = is_group_chat(chat_name)
-        final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group)
-        self._send_text(final_reply, chat_name)
-        return True
 
     def _extract_file_text(self, filepath):
         """从文件中提取文本内容，支持纯文本、docx、xlsx、pdf"""
@@ -1193,12 +1254,20 @@ class WeChatBot:
                     time.sleep(2 * (attempt + 1))
         return f"请求失败: {last_exc}"
 
-    def _send_text(self, text, chat_id):
+    def _send_text(self, text, chat, placeholder=False):
+        """发送文本到指定聊天。placeholder=True 表示这是"处理中"占位消息
+        （计数 +1）；默认 False（普通回复）把该聊天的占位计数归零。
+        计数按 chat_name 隔离（_pending_placeholders），非全局。"""
         try:
             cleaned_text = text.strip()
-            self.wx.send_text(chat_id, cleaned_text)
+            self.wx.send_text(chat, cleaned_text)
             preview = cleaned_text[:50].replace('\n', ' ')
-            logger.info(f"🤖 → [{chat_id}]: {preview}")
+            logger.info(f"🤖 → [{chat}]: {preview}")
+            if placeholder:
+                self._pending_placeholders[chat] = self._pending_placeholders.get(chat, 0) + 1
+            else:
+                # 删除键而非留 0（防 dict 膨胀）；pop 对未占位过的 chat 安全
+                self._pending_placeholders.pop(chat, None)
         except Exception as e:
             logger.error(f"发送失败: {e}")
 
