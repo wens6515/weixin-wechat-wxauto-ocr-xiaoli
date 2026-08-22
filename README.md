@@ -2,15 +2,15 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v2.0.0「视觉版」** · 适配微信 PC **4.1.12+** · 弃用 wxauto4（UIA 通道在 4.1.12 结构性失效），全面迁移到 **OCR 视觉方案**（PrintWindow 截图 + RapidOCR + 像素检测）。
+> **v2.1.0「视觉版」** · 适配微信 PC **4.1.12+** · 弃用 wxauto4（UIA 通道在 4.1.12 结构性失效），全面迁移到 **OCR 视觉方案**（PrintWindow 截图 + RapidOCR + 像素检测）。
 
 ---
 
 ## ⬇️ 下载安装（桌面版）
 
-**v2.0.0 完整桌面版安装包**（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻）：
+**v2.1.0 完整桌面版安装包**（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [Releases 下载 `xiaoli-setup-v2.0.0.exe`](https://github.com/wens6515/weixin-wxauto-ocr-xiaoli/releases)
+👉 [Releases 下载 `xiaoli-setup-v2.1.0.exe`](https://github.com/wens6515/weixin-wxauto-ocr-xiaoli/releases)
 
 - **系统要求**：Windows 10+、已登录的**微信 PC 4.1.12+**
 - **无需安装 Python / Node.js**：安装包已内置 Python 运行时和全部依赖（含 OCR 引擎）；Node.js（天枢 CLI 依赖）在安装时自动检测，缺失则自动下载安装
@@ -46,32 +46,31 @@ flowchart TD
     A["红圈检测新消息"] -->|无| A
     A -->|有未读| B["切换会话"]
     B --> C{"私聊还是群聊"}
-    C -->|私聊| D["截图并分析气泡"]
-    C -->|群聊| R["截图并分析气泡"]
-    R --> S["定位小漓最后回复并检测提醒"]
+    C -->|私聊| D["截图并分析气泡<br/>skip_bot=N[chat]"]
+    C -->|群聊| R["截图并分析气泡<br/>skip_bot=N[chat]"]
+    R --> S["定位小漓最后回复<br/>= 从下往上第 1+N 条 bot 消息"]
     S -->|无提醒| A
-    S -->|有提醒| F["读取对方新消息"]
-    D --> E["定位小漓最后回复"]
-    E --> F["读取对方新消息"]
+    S -->|有提醒| F["读取对方新消息<br/>（占位回复之前的内容也纳入）"]
+    D --> E["定位小漓最后回复<br/>（同 skip_bot 规则）"]
+    E --> F
     F -->|无内容| A
     F -->|纯文字| G["识别文字"]
     F -->|含图片或文件| H["等待10秒再截图"]
-    G --> I{"是否任务"}
-    I -->|不是| J["AI 回复"]
-    I -->|是| K["投递任务桥"]
+    G --> I["vision-exp 单次调用<br/>看图读字 + 回复 + 任务判断"]
     H --> L["重新截图分析"]
-    L -->|文字加图片| M["文字与图片处理"]
-    L -->|仅图片| N["视觉模型描述"]
-    L -->|文件| O["文件流程并关联发送者"]
-    M -->|不是任务| P["组装文字与描述"]
-    M -->|是任务| Q["投递任务桥"]
-    J --> T["回复完成"]
-    K --> T
-    N --> T
-    P --> T
-    Q --> T
-    O --> E
-    T --> A
+    L -->|① sender 有待关联文件<br/>且带文字指令| I
+    L -->|② 有文件| O["文件流程"]
+    O --> T2{"有伴随文字?"}
+    T2 -->|是| I
+    T2 -->|否| U["回复'文件已收到～' N=0<br/>登记 pending_files<br/>回红圈监听"]
+    L -->|③ 图片+文字| I
+    L -->|④ 仅图片| I
+    L -->|⑤ 纯文字| I
+    I -->|tool_calls 投递任务| K["投递任务桥<br/>发占位 → N[chat]+1"]
+    I -->|纯文本回复| J["AI 回复<br/>发实质 → N[chat]=0"]
+    U --> A
+    K --> A
+    J --> A
 ```
 
 > 气泡/媒体分析无法区分视频、表情、图片，统一按图片处理；图片消息含文字时 10 秒等待防话没说完；文件消息「回复收到 + 不停摆」，该发送者后续文字指令自动关联待处理文件。
@@ -107,7 +106,7 @@ python tools\fix_window.py 50 50 900 920
 xiaoli_desktop/
 ├── xiaoli_bot.py            # CLI 入口 + 任务桥 + 消息主循环（--run / --test）
 ├── wechat_bot.py            # 基础微信机器人（监听/回复/图片/文件/记忆）
-├── wx_backend/              # 微信后端协议层（v2.0.0 核心）
+├── wx_backend/              # 微信后端协议层（v2.1.0 核心）
 │   ├── __init__.py          # 后端注册表 + create_backend("auto")
 │   ├── models.py            # WeChatMessage / MessageType
 │   └── visual_backend.py    # 视觉后端：截图/OCR/红圈检测/气泡定位/发送
@@ -141,7 +140,7 @@ tools/                       # 配套标定/调试工具
 | `tianshu_window_title` | 空 | 天枢 CLI 窗口标题（空 = 启动时交互选择） |
 | `tianshu_trigger_command` | `开始处理` | 唤起天枢后发送的触发指令 |
 | `tianshu_poll_interval` | 5 | 任务结果轮询间隔（秒） |
-| `file_send_method` | `clipboard` | 成果文件发送方式：clipboard（剪贴板，v2.0.0 唯一方式） |
+| `file_send_method` | `clipboard` | 成果文件发送方式：clipboard（剪贴板，v2.1.0 唯一方式） |
 | `max_history` | 1000 | 单聊天保留的最大历史条数 |
 | `cooldown` | 3 | 回复冷却（秒） |
 | `start_paused` | true | 启动时是否暂停自动回复 |
@@ -163,4 +162,4 @@ tools/                       # 配套标定/调试工具
 
 ## 更新记录
 
-[v2.0.0 完整更新记录](docs/更新记录-2026-08-17.md)（架构迁移/UI 美化/bug 修复明细）
+[v2.1.0 完整更新记录](docs/更新记录-2026-08-23.md)（单模型化/人设修复/sender 修复）
