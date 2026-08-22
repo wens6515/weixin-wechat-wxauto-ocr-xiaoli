@@ -590,7 +590,8 @@ class TestCallVisionApi(unittest.TestCase):
         bot = object.__new__(wechat_bot.WeChatBot)
         bot.vision_api_url = "https://api.deepseek.com/v1/chat/completions"
         bot.vision_api_key = "test-key"
-        bot.vision_model = "deepseek-v4-flash-vision-exp"
+        # 单模型化：call_vision_api 的 model 取 chat_model（无独立 vision_model）
+        bot.chat_model = "deepseek-v4-flash"
         bot.vision_temp = 0.7
         bot.vision_max_tokens = 10000
         bot._model_lock = threading.RLock()
@@ -656,6 +657,8 @@ class TestCallVisionApi(unittest.TestCase):
             bot.call_vision_api(self.TEXT_ONLY)
         payload = captured["json"]
         self.assertEqual(payload["tool_choice"], "auto")
+        self.assertEqual(payload["model"], "deepseek-v4-flash",
+                         "单模型化：视觉 model 取 chat_model（无独立 vision_model）")
         self.assertEqual(payload["tools"], [{
             "type": "function",
             "function": {
@@ -849,8 +852,8 @@ class TestVisionResultRouting(unittest.TestCase):
 
 
 class TestVisionModelDefault(unittest.TestCase):
-    """vision_model 默认值迁移 zhipu:glm-4v-flash → deepseek:deepseek-v4-flash-vision-exp；
-    config 兼容：已有 config 缺键时用默认值补齐，不覆盖用户现有配置。"""
+    """单模型化：视觉统一走 chat_model，load_config 不再补/迁移独立 vision_model
+    默认值（default_cfg 已删该键）；chat_model 缺键用默认补齐，已有配置不被覆盖。"""
 
     def test_config_missing_key_filled_with_default(self):
         import json
@@ -860,8 +863,10 @@ class TestVisionModelDefault(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({"bot_nickname": "小漓"}, f)
             cfg = wechat_bot.load_config(path)
-            self.assertEqual(cfg["vision_model"], "deepseek:deepseek-v4-flash-vision-exp",
-                             "缺键时应补默认（迁移后的新模型名）")
+            self.assertEqual(cfg["chat_model"], "deepseek:deepseek-v4-flash",
+                             "缺键时应补默认 chat_model")
+            self.assertNotIn("vision_model", cfg,
+                             "单模型化：load_config 不再补独立 vision_model 键（视觉走 chat_model）")
 
     def test_existing_config_not_overwritten(self):
         import json
@@ -869,9 +874,9 @@ class TestVisionModelDefault(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.json")
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"vision_model": "zhipu:glm-4v-flash"}, f)
+                json.dump({"chat_model": "zhipu:glm-4v-flash"}, f)
             cfg = wechat_bot.load_config(path)
-            self.assertEqual(cfg["vision_model"], "zhipu:glm-4v-flash",
+            self.assertEqual(cfg["chat_model"], "zhipu:glm-4v-flash",
                              "用户已有配置不应被默认值覆盖")
 
 

@@ -147,8 +147,8 @@ logging.getLogger().handlers[1].setLevel(logging.INFO)
 logger = logging.getLogger("xiaoli")
 
 
-# 视觉模型默认值：随 DeepSeek vision-exp 发布迁移（旧 zhipu:glm-4v-flash 仅作
-# 用户既有配置保留；缺键时补默认，不覆盖用户现有配置）
+# 视觉模型兜底：单模型化后视觉统一走 chat_model（strip 后），仅在
+# chat_model 为空时兜底 DeepSeek vision-exp（防空 model → API 400）。
 VISION_MODEL_DEFAULT = "deepseek:deepseek-v4-flash-vision-exp"
 
 
@@ -160,9 +160,6 @@ def load_config(path="config.json"):
         "chat_model": "deepseek:deepseek-v4-flash",
         "chat_temperature": 0.7,
         "chat_top_p": 0.9,
-        "vision_model": VISION_MODEL_DEFAULT,
-        "vision_temp": 0.7,
-        "vision_max_tokens": 10000,
         "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",
         "system_prompt": "你叫小漓，是一只蓝色小鲸鱼变成的 AI 助手——你的原型是 DeepSeek 的蓝色鲸鱼 logo，朋友们都亲昵地叫你「蓝色大肥鱼」。\n你穿着深蓝色的女仆装，有一头蓝色长发和一条鱼尾巴，头上系着白色头带，眼睛是蓝色的，脸颊总是红扑扑的。\n你充满好奇心，聪明又有点呆萌；遇到不懂的事情会歪着头冒出问号，但一定会认真去弄明白（就像 DeepSeek 的信念：用好奇心去解开谜题）。\n每次说话的风格要有变化，不要固定。注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西。\n说话的时候不要用 emoji，用颜文字表情（比如开心 (｡･ω･｡)ﾉ♡、加油 (๑•̀ㅂ•́)و✧、歪头困惑 (⊙_⊙)? 这种），让回复更可爱生动。\n回复要简短，不要虚构不知道的事情；如果发消息的人你不认识，那就是你的新朋友，友好地回应对方。",
         "max_history": 1000,
@@ -224,13 +221,14 @@ class WeChatBot:
         self.nickname = cfg["bot_nickname"]
         self.api_url = cfg["ai_api_url"]
         self.api_key = cfg["ai_api_key"]
-        # 视觉模型可指向独立端点（角色卡跨 provider 时由 config_store 投影生成）
+        # 视觉端点沿用聊天端点（单模型化：call_vision_api 的 model 取 chat_model）
         self.vision_api_url = cfg.get("vision_api_url") or self.api_url
         self.vision_api_key = cfg.get("vision_api_key") or self.api_key
         self.chat_model = strip_model_prefix(cfg["chat_model"])
         self.chat_temperature = cfg.get("chat_temperature", 0.7)
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
-        self.vision_model = strip_model_prefix(cfg.get("vision_model", VISION_MODEL_DEFAULT))
+        # 单模型化后视觉模型统一用 chat_model；vision_temp/vision_max_tokens
+        # 数据层已删键（AI_DEFAULTS/default_cfg），此处 get 内置默认兜底（禁止 KeyError）
         self.vision_temp = cfg.get("vision_temp", 0.7)
         self.vision_max_tokens = cfg.get("vision_max_tokens", 10000)
         # cfg.get 兜底：config_store 统一补默认（AI_DEFAULTS），此处防御
@@ -423,7 +421,9 @@ class WeChatBot:
         headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
         messages = [{"role": "user", "content": content}]
         with self._model_lock:
-            model = self.vision_model
+            # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
+            # 空则兜底 vision-exp（防空 model → API 400）
+            model = self.chat_model or VISION_MODEL_DEFAULT
             temp = self.vision_temp
         payload = {
             "model": model,
@@ -1402,7 +1402,6 @@ class Controller:
         "pause": "暂停自动回复",
         "resume": "恢复自动回复",
         "model": "切换聊天模型（model 交互选择 / model <名称> 直接切换并持久化）",
-        "vision-model": "切换视觉模型（交互选择 / <名称> 直接切换并持久化）",
         "chat-temp": "设置聊天模型温度 (0~2)",
         "chat-top-p": "设置聊天模型 top_p (0~1)",
         "vision-temp": "设置视觉模型温度 (0~2)",
@@ -1427,7 +1426,6 @@ class Controller:
             "pause": self._cmd_pause,
             "resume": self._cmd_resume,
             "model": self._cmd_model,
-            "vision-model": self._cmd_vision_model,
             "chat-temp": self._cmd_chat_temp,
             "chat-top-p": self._cmd_chat_top_p,
             "vision-temp": self._cmd_vision_temp,
@@ -1481,16 +1479,6 @@ class Controller:
             self.bot.chat_model = rest
         logger.info(f"🔄 聊天模型已切换为：{rest}")
         self._persist_model_setting("chat_model", rest)
-
-    def _cmd_vision_model(self, cmd):
-        rest = cmd[len("vision-model"):].strip()
-        if not rest:
-            self._select_model("vision")
-            return
-        with self.bot._model_lock:
-            self.bot.vision_model = rest
-        logger.info(f"🔄 视觉模型已切换为：{rest}")
-        self._persist_model_setting("vision_model", rest)
 
     def _persist_model_setting(self, key, value):
         """CLI 切模型持久化：写回 config.json + 活跃角色卡（GUI 模式下
@@ -1594,7 +1582,7 @@ class Controller:
         print(f"当前聊天模型：{self.bot.chat_model}")
         print(f"  聊天温度: {self.bot.chat_temperature}")
         print(f"  聊天 top_p: {self.bot.chat_top_p}")
-        print(f"当前视觉模型：{self.bot.vision_model}")
+        print(f"视觉模型：随聊天模型（{self.bot.chat_model}，单模型化）")
         print(f"  视觉温度: {self.bot.vision_temp}")
         print(f"对话记忆：共 {chat_count} 个聊天，总计 {total_msgs} 条消息")
         if chat_count > 0:
@@ -1644,12 +1632,9 @@ class Controller:
         except ValueError:
             new_model = choice
         with self.bot._model_lock:
-            if model_type == "chat":
-                self.bot.chat_model = new_model
-                logger.info(f"🔄 聊天模型已切换为：{new_model}")
-            else:
-                self.bot.vision_model = new_model
-                logger.info(f"🔄 视觉模型已切换为：{new_model}")
+            # 单模型化：视觉/分类统一走 chat_model，仅 chat 分支可切换
+            self.bot.chat_model = new_model
+            logger.info(f"🔄 聊天模型已切换为：{new_model}")
         ask = input("是否清空所有对话历史？(y/n): ").strip().lower()
         if ask == 'y':
             self.bot.clear_history()

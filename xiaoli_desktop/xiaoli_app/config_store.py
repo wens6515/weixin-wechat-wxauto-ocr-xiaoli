@@ -12,8 +12,10 @@ config.json 主存结构（改造后）：
 卡不存 key，只引用 provider id → 导出/分享不泄密。
 
 「投影」：启动时从 providers + 活跃卡重建旧字段（ai_api_url / ai_api_key /
-chat_model / vision_model / file_model / chat_temperature ...）并写回，
-AgentBot 读到的 cfg 与改造前完全同构 → 引擎零改动风险。
+chat_model / vision_api_url / vision_api_key / chat_temperature ...）并写回，
+AgentBot 读到的 cfg 与引擎消费方完全同构。单模型化：视觉/分类统一走
+chat provider 端点与 chat_model，不再投影 vision_model / file_model /
+vision_temp / vision_max_tokens。
 """
 import base64
 import json
@@ -112,8 +114,6 @@ AI_DEFAULTS = {
     "system_prompt": "你叫小漓，是一个很会聊天、很可爱的人。你是用户创建的微信 AI 助手，陪用户聊天、帮忙处理任务。\n每次说话的风格要有变化，不要固定。注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西。\n说话的时候不要用 emoji，用颜文字表情。\n回复要简短，不要虚构不知道的事情；如果发消息的人你不认识，那就是你的新朋友，友好地回应对方。",
     "chat_temperature": 0.7,
     "chat_top_p": 0.9,
-    "vision_temp": 0.7,
-    "vision_max_tokens": 10000,
     "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",
     "max_history": 1000,
     "cooldown": 3,
@@ -128,7 +128,8 @@ AI_DEFAULTS = {
 PRESET_PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek 深度求索",
      "base_url": "https://api.deepseek.com/v1/chat/completions",
-     "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro"]},
+     "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro",
+                "deepseek:deepseek-v4-flash-vision-exp"]},
     {"id": "zhipu", "name": "智谱 GLM",
      "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
      "models": ["zhipu:glm-5.2", "zhipu:glm-5v-turbo", "zhipu:glm-4.6v", "zhipu:glm-4v-flash"]},
@@ -262,10 +263,10 @@ def default_memory_file():
 # 旧字段投影所需的完整键集合（引擎 WeChatBot.__init__ 消费方）
 _PROJECT_KEYS = (
     "ai_api_url", "ai_api_key", "chat_model",
-    "vision_api_url", "vision_api_key", "vision_model",
-    "file_model", "system_prompt", "bot_nickname",
+    "vision_api_url", "vision_api_key",
+    "system_prompt", "bot_nickname",
     "chat_temperature", "chat_top_p",
-    "vision_temp", "vision_max_tokens", "max_history",
+    "max_history",
 )
 
 CARD_TEMPLATE = {
@@ -285,14 +286,8 @@ CARD_TEMPLATE = {
     "nickname": "小漓",
     "chat_provider": "deepseek",
     "chat_model": "",
-    "vision_provider": "deepseek",
-    "vision_model": "",
-    "classify_provider": "deepseek",
-    "classify_model": "",
     "temperature": 0.7,
     "top_p": 0.9,
-    "vision_temp": 0.7,
-    "vision_max_tokens": 10000,
     "max_history": 1000,
 }
 
@@ -361,12 +356,8 @@ def migrate_config(cfg, cards_dir):
     card = dict(CARD_TEMPLATE)
     card["nickname"] = str(out.get("bot_nickname", "小漓"))
     card["chat_model"] = str(out.get("chat_model", ""))
-    card["vision_model"] = str(out.get("vision_model", ""))
-    card["classify_model"] = str(out.get("file_model", ""))
     card["temperature"] = out.get("chat_temperature", 0.7)
     card["top_p"] = out.get("chat_top_p", 0.9)
-    card["vision_temp"] = out.get("vision_temp", 0.7)
-    card["vision_max_tokens"] = out.get("vision_max_tokens", 10000)
     card["max_history"] = out.get("max_history", 1000)
     _write_card(cards_dir, card)
 
@@ -394,9 +385,9 @@ def _fallback_provider(cfg):
 def project_config(cfg, card):
     """根据 providers + 活跃卡重建旧字段投影。返回新 cfg（原 cfg 不变）。
 
-    规则：
-    - 聊天/分类沿用 chat provider 端点（模型名可不同）
-    - 视觉可跨 provider（生成 vision_api_url / vision_api_key）
+    单模型化：视觉/分类统一走 chat provider 端点（vision_api_url/key 沿用
+    chat 端点），不再投影 vision_model / file_model / vision_temp /
+    vision_max_tokens——call_vision_api 的 model 取 chat_model。
     - 未知 provider → 回退第一个可用 provider（不置空 URL）；全部缺失才置空
     """
     out = dict(cfg)
@@ -405,30 +396,22 @@ def project_config(cfg, card):
     chat_p = _provider(out, card.get("chat_provider") or "deepseek")
     if chat_p is None:
         chat_p = _fallback_provider(out)
-    vision_p = _provider(out, card.get("vision_provider") or card.get("chat_provider") or "deepseek")
-    if vision_p is None:
-        vision_p = chat_p or _fallback_provider(out)
     chat_p = chat_p or {}
-    vision_p = vision_p or {}
 
     chat_url = str(chat_p.get("base_url", ""))
     chat_key = str(chat_p.get("api_key", ""))
-    vision_url = str(vision_p.get("base_url", "")) or chat_url
-    vision_key = str(vision_p.get("api_key", "")) or chat_key
 
     out["ai_api_url"] = chat_url
     out["ai_api_key"] = chat_key
     out["chat_model"] = str(card.get("chat_model", ""))
-    out["vision_api_url"] = vision_url
-    out["vision_api_key"] = vision_key
-    out["vision_model"] = str(card.get("vision_model", ""))
-    out["file_model"] = str(card.get("classify_model", "")) or out.get("file_model", "")
+    # 视觉端点沿用聊天端点（单模型化；WeChatBot.__init__ 的 cfg.get 兜底
+    # 即使缺键也回退 ai_api_url/ai_api_key，这里投影保证 config.json 写回稳定）
+    out["vision_api_url"] = chat_url
+    out["vision_api_key"] = chat_key
     out["system_prompt"] = str(card.get("system_prompt", ""))
     out["bot_nickname"] = str(card.get("nickname", "")) or out.get("bot_nickname", "小漓")
     out["chat_temperature"] = card.get("temperature", out.get("chat_temperature", 0.7))
     out["chat_top_p"] = card.get("top_p", out.get("chat_top_p", 0.9))
-    out["vision_temp"] = card.get("vision_temp", out.get("vision_temp", 0.7))
-    out["vision_max_tokens"] = card.get("vision_max_tokens", out.get("vision_max_tokens", 10000))
     out["max_history"] = card.get("max_history", out.get("max_history", 1000))
     return out
 

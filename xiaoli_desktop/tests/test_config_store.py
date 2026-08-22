@@ -84,12 +84,13 @@ class TestMigrate(unittest.TestCase):
         self.assertEqual(card["system_prompt"], config_store.CARD_TEMPLATE["system_prompt"])
         self.assertEqual(card["nickname"], cfg["bot_nickname"])
         self.assertEqual(card["chat_model"], cfg["chat_model"])
-        self.assertEqual(card["vision_model"], cfg["vision_model"])
-        self.assertEqual(card["classify_model"], cfg["file_model"])
         self.assertEqual(card["temperature"], cfg["chat_temperature"])
         self.assertEqual(card["top_p"], cfg["chat_top_p"])
-        self.assertEqual(card["vision_temp"], cfg["vision_temp"])
         self.assertEqual(card["max_history"], cfg["max_history"])
+        # 单模型化：卡不再投影独立 vision_model/classify_model/vision_temp——
+        # 视觉/分类统一走 chat_model（migrate 建卡只派生 chat_model 唯一模型键）
+        for k in ("vision_model", "classify_model", "vision_temp", "vision_max_tokens"):
+            self.assertNotIn(k, card, f"迁移建卡不应含旧独立模型键 {k}")
         # 卡不存 key
         self.assertNotIn("api_key", card)
         self.assertNotIn("key", str(card))
@@ -169,15 +170,20 @@ class TestProject(unittest.TestCase):
                         "卡引用的 provider 不存在时必须回退可用 provider，不得置空 URL")
         self.assertTrue(str(out["ai_api_key"]), "回退后必须有可用的 api_key")
 
-    def test_project_vision_cross_provider(self):
+    def test_project_vision_shares_chat_endpoint(self):
+        """单模型化：视觉统一走 chat provider 端点与 chat_model，不再跨 provider。
+        旧卡残留的 vision_provider/vision_model 为未知字段，投影忽略。"""
         card = self._card(vision_provider="zhipu", vision_model="glm-4v-plus")
         cfg = {"providers": self._providers(), "active_card_id": "xiaoli"}
         out = config_store.project_config(cfg, card)
-        self.assertEqual(out["vision_api_url"], "https://open.bigmodel.cn/api/paas/v4/chat/completions")
-        self.assertEqual(out["vision_api_key"], "sk-zp-2")
-        self.assertEqual(out["vision_model"], "glm-4v-plus")
-        # 聊天仍走 deepseek
+        # 视觉端点沿用聊天端点（deepseek），不再按 vision_provider 解析
+        self.assertEqual(out["vision_api_url"], "https://api.deepseek.com/v1/chat/completions")
+        self.assertEqual(out["vision_api_key"], "sk-ds-1")
+        # 聊天走同一端点
         self.assertEqual(out["ai_api_url"], "https://api.deepseek.com/v1/chat/completions")
+        self.assertEqual(out["chat_model"], "deepseek-chat")
+        # 不再投影独立 vision_model（call_vision_api 的 model 取 chat_model）
+        self.assertNotIn("vision_model", out)
 
     def test_project_unknown_provider_falls_back(self):
         card = self._card(chat_provider="nope", vision_provider="nope")
@@ -188,13 +194,16 @@ class TestProject(unittest.TestCase):
         self.assertEqual(out["ai_api_url"], "https://api.deepseek.com/v1/chat/completions")
         self.assertEqual(out["ai_api_key"], "sk-ds-1")
 
-    def test_project_classify_uses_chat_endpoint(self):
+    def test_project_classify_uses_chat_model(self):
+        """单模型化：分类不再投影独立 file_model——任务判断统一走 chat_model
+        （xiaoli_bot._classify_task 用 chat_model 调 classify_task_with_llm）。"""
         card = self._card(classify_model="deepseek-reasoner")
         cfg = {"providers": self._providers(), "active_card_id": "xiaoli"}
         out = config_store.project_config(cfg, card)
-        self.assertEqual(out["file_model"], "deepseek-reasoner")
-        # 分类沿用聊天端点（ai_api_url 即聊天端点）
+        # 分类沿用聊天端点与唯一模型键 chat_model
         self.assertEqual(out["ai_api_url"], "https://api.deepseek.com/v1/chat/completions")
+        self.assertEqual(out["chat_model"], "deepseek-chat")
+        self.assertNotIn("file_model", out)
 
 
 class TestRoundTrip(unittest.TestCase):
@@ -213,11 +222,15 @@ class TestRoundTrip(unittest.TestCase):
         # 迁移完成
         self.assertIn("providers", cfg1)
         self.assertEqual(cfg1["active_card_id"], config_store.DEFAULT_CARD_ID)
-        # 投影字段齐全（引擎同构）
-        for k in ("ai_api_url", "ai_api_key", "chat_model", "vision_model",
-                  "file_model", "system_prompt", "bot_nickname",
-                  "chat_temperature", "chat_top_p", "vision_temp", "vision_max_tokens", "max_history"):
+        # 投影字段齐全（引擎同构；单模型化后 chat_model 为唯一模型键）
+        for k in ("ai_api_url", "ai_api_key", "chat_model",
+                  "vision_api_url", "vision_api_key",
+                  "system_prompt", "bot_nickname",
+                  "chat_temperature", "chat_top_p", "max_history"):
             self.assertIn(k, cfg1, k)
+        # 单模型化：视觉端点沿用聊天端点（call_vision_api 的 model 取 chat_model）
+        self.assertEqual(cfg1["vision_api_url"], cfg1["ai_api_url"])
+        self.assertEqual(cfg1["vision_api_key"], cfg1["ai_api_key"])
         # 任务桥字段不丢
         self.assertEqual(cfg1["tasks_dir"], r"D:\工作间\wxauto")
         self.assertEqual(cfg1["image_click_offset"], [-200, -130])
@@ -576,10 +589,11 @@ class TestLoadCompleteness(unittest.TestCase):
     两个缺键场景：全新安装（无 config.json）与已有 providers 的新结构 config。
     """
 
-    # WeChatBot.__init__ 直接索引（cfg[k] 非 cfg.get）的键
+    # WeChatBot.__init__ 直接索引（cfg[k] 非 cfg.get）的键；单模型化后
+    # __init__ 不再裸索引 vision_model（视觉 model 取 chat_model）
     REQUIRED_KEYS = [
         "bot_nickname", "ai_api_url", "ai_api_key", "chat_model",
-        "vision_model", "vision_prompt", "system_prompt", "max_history",
+        "vision_prompt", "system_prompt", "max_history",
         "cooldown", "api_retry", "api_timeout",
     ]
 
@@ -598,6 +612,8 @@ class TestLoadCompleteness(unittest.TestCase):
             self.assertIn(k, cfg, f"全新安装 cfg 缺 {k} → 初始化 KeyError")
         self.assertTrue(str(cfg["vision_prompt"] or "").strip(),
                         "vision_prompt 必须有非空默认值")
+        self.assertNotIn("vision_model", cfg,
+                         "单模型化：cfg 不应投影独立 vision_model（视觉走 chat_model）")
 
     def test_modern_config_without_ai_keys(self):
         """新结构 config（providers 已存在、无旧 AI 字段）：同样必须补齐。"""
@@ -617,6 +633,8 @@ class TestLoadCompleteness(unittest.TestCase):
             self.assertIn(k, cfg, f"新结构 config 缺 {k} → 初始化 KeyError")
         self.assertTrue(str(cfg["vision_prompt"] or "").strip(),
                         "vision_prompt 必须有非空默认值")
+        self.assertNotIn("vision_model", cfg,
+                         "单模型化：新结构 config 不应投影独立 vision_model（视觉走 chat_model）")
 
 
     def test_missing_card_falls_back_template(self):
