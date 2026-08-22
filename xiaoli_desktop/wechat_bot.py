@@ -1188,16 +1188,25 @@ class WeChatBot:
 
         return None
 
-    def call_chat_ai(self, chat_id, user_msg, sender_name=None, is_group=False):
+    def call_chat_ai(self, chat_id, user_msg, sender_name=None, is_group=False, multi_sender=False):
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         if is_group:
             # 群聊格式 = 群聊名 + 发送者名 + 内容（用户原话：群聊：XXX XXX：消息内容）。
-            # sender_name 缺失（极端 OCR 失败）时用群聊名兜底并打日志，
-            # 绝不落入「群聊：{user_msg}」无名字退化分支。
-            if sender_name:
+            # 显式三分支：
+            #   1. multi_sender=True：user_msg 已由 _handle_unread_session 合并成
+            #      「发送者A：内容A\n发送者B：内容B」（每条自带发送者名），
+            #      只包『群聊：群名』前缀，不再重包 sender（否则双层嵌套）。
+            #   2. sender_name 存在：群聊名 + 发送者名 + 内容（单条，现状）。
+            #   3. sender_name 缺失（极端 OCR 失败）：群聊名兜底并打日志，
+            #      绝不落入「群聊：{user_msg}」无名字退化分支。
+            # multi_sender 是唯一显式信号——禁止用 user_msg 含换行等隐式判断
+            # （单条多行文本消息会误判）。
+            if multi_sender:
+                decorated = f"群聊：{chat_id} {user_msg}"
+            elif sender_name:
                 decorated = f"群聊：{chat_id} {sender_name}：{user_msg}"
             else:
                 logger.warning(f"[群聊] {chat_id} 视觉层未读到发送者名，用群聊名兜底")
@@ -1339,11 +1348,13 @@ class WeChatBot:
                 ]
                 if len(text_candidates) > 1:
                     # 多发送者合并：每条带各自发送者名（不整批只带最后一条）
+                    multi_sender = True
                     text_parts = [
                         f"{m.sender or chat_name}：{m.content.strip()}"
                         for m in text_candidates
                     ]
                 else:
+                    multi_sender = False
                     text_parts = [m.content.strip() for m in text_candidates]
                 text_content = "\n".join(text_parts)
                 has_media = bool(win.get("has_media")) if win else False
@@ -1370,7 +1381,7 @@ class WeChatBot:
                         if not question:
                             question = "你好呀～"
                     logger.info(f"💬 [{chat_name}] {sender}: {question[:80]}")
-                    reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group)
+                    reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
                     self._send_text(reply, chat_name)
                     self.last_reply_time = time.time()
                     return

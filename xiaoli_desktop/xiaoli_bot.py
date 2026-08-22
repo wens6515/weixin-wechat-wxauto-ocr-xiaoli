@@ -967,7 +967,7 @@ class AgentBot(WeChatBot):
             self._last_poll_time = now
             self._poll_outbox()
 
-    def _process_file_with_instruction(self, chat_name, sender, filepath, filename, user_instruction, extra_attachments=None):
+    def _process_file_with_instruction(self, chat_name, sender, filepath, filename, user_instruction, extra_attachments=None, multi_sender=False):
         """根据用户指令处理文件：vision-exp 单调用判断任务 → 天枢投递 或 原文件识别。
 
         任务分支只投文件本体（天枢 CLI 自行读附件），不提取文件文字、不写
@@ -1021,7 +1021,7 @@ class AgentBot(WeChatBot):
             f"用户对文件处理的要求是：{instruction}\n\n"
             f"请根据文件内容和用户的要求，以{self.nickname}的身份回复用户。"
         )
-        final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group)
+        final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
         self._send_text(final_reply, chat_name)
         return True
 
@@ -1045,7 +1045,7 @@ class AgentBot(WeChatBot):
             logger.error(f"[回传] 持久化成果登记失败: {e}")
 
 
-    def _handle_text(self, chat_name, sender, content, msg_id=None):
+    def _handle_text(self, chat_name, sender, content, msg_id=None, multi_sender=False):
         """文本消息统一处理：vision-exp 单调用判断+回复 → 天枢投递 或 普通聊天。
 
         附件只由文件消息路径投递（_process_file_with_instruction，用户确实
@@ -1070,7 +1070,7 @@ class AgentBot(WeChatBot):
             if resp is not None:
                 return True
             # vision 降级（None）：API 失败默认非任务，回退普通聊天（与现状一致）
-        reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group)
+        reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
         self._send_text(reply, chat_name)
         return True
 
@@ -1174,11 +1174,13 @@ class AgentBot(WeChatBot):
         ]
         if len(text_candidates) > 1:
             # 多发送者合并：每条带各自发送者名（群聊名兜底，不整批只带最后一条）
+            multi_sender = True
             text_parts = [
                 f"{m.sender or chat_name}：{m.content.strip()}"
                 for m in text_candidates
             ]
         else:
+            multi_sender = False
             text_parts = [m.content.strip() for m in text_candidates]
         text_content = "\n".join(text_parts)
         has_media = bool(win.get("has_media"))
@@ -1188,7 +1190,7 @@ class AgentBot(WeChatBot):
             logger.info(f"[文件] {sender} 发来处理指令，关联到待处理文件 {pending['filename']}")
             return self._process_file_with_instruction(
                 pending["chat_name"], sender, pending["file_path"],
-                pending["filename"], text_content)
+                pending["filename"], text_content, multi_sender=multi_sender)
         # ============ 分类分发 ============
         if file_text:
             # 文件（可能同时有图片）：有图片则截图一并投递，不再被文件分支吞掉
@@ -1200,11 +1202,12 @@ class AgentBot(WeChatBot):
             logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
             return self._handle_file_message(
                 chat_name, sender, file_text, text_content,
-                extra_attachments=extra_attachments)
+                extra_attachments=extra_attachments, multi_sender=multi_sender)
         if has_media and text_content:
             # 图片 + 文字 → 文字 LLM 判任务，任务投递（图截图），非任务组装
             logger.info(f"🖼💬 判断为图片+文字消息：{chat_name}")
-            return self._handle_image_with_text(chat_name, sender, text_content)
+            return self._handle_image_with_text(
+                chat_name, sender, text_content, multi_sender=multi_sender)
         if has_media and not text_content:
             # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 图片多模态
             logger.info(f"🖼 判断为图片消息：{chat_name}")
@@ -1212,10 +1215,11 @@ class AgentBot(WeChatBot):
         if text_content:
             # 纯文字 → 任务判断 + 聊天
             logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")
-            return self._handle_text(chat_name, sender, text_content, None)
+            return self._handle_text(
+                chat_name, sender, text_content, None, multi_sender=multi_sender)
         return False
 
-    def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None):
+    def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None, multi_sender=False):
         """文件消息处理：按显示名/快照增量定位 → 回复收到并询问。
 
         文字提取延迟到真正需要时（非任务分支喂 AI）才做，任务分支只投
@@ -1240,7 +1244,7 @@ class AgentBot(WeChatBot):
             # 文件 + 伴随文字 → 按指令处理（任务判断 or 文件识别附带指令）
             return self._process_file_with_instruction(
                 chat_name, sender, file_path, filename, text_content,
-                extra_attachments=extra_attachments)
+                extra_attachments=extra_attachments, multi_sender=multi_sender)
         # 无伴随文字 → 回复收到 + 记录 sender 关联（不停摆，等该 sender 后续指令）
         self._pending_files[sender] = {
             "chat_name": chat_name,
@@ -1250,7 +1254,7 @@ class AgentBot(WeChatBot):
         self._send_text("文件已收到～请告诉我需要怎么处理呢？", chat_name)
         return True
 
-    def _handle_image_with_text(self, chat_name, sender, text_content):
+    def _handle_image_with_text(self, chat_name, sender, text_content, multi_sender=False):
         """图片 + 文字：vision-exp 单调用（图 + 文字一次判断 + 回复）。
 
         任务 → 图截图 + 文字投递（tool_call 不发送回复文本）；非任务 → 直接
@@ -1265,7 +1269,8 @@ class AgentBot(WeChatBot):
             if resp is not None:
                 return True
         # 降级：vision 失败或任务桥关闭 → 回退纯文字处理
-        return self._handle_text(chat_name, sender, text_content, None)
+        return self._handle_text(
+            chat_name, sender, text_content, None, multi_sender=multi_sender)
 
 class TianshuController(Controller):
     HELP = {
