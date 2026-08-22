@@ -73,11 +73,11 @@ CLASSIFY_PROMPT = (
 
 
 VISION_ROUTE_PROMPT = (
-    "你是微信机器人「{nickname}」，负责判断用户消息并回复。\n"
+    "请严格遵守以上人设（包括不用 emoji、改用颜文字）。现在判断用户的消息：\n"
     "如果用户的消息是需要由 AI 代理（天枢）实际执行的任务——例如：根据文档做一个网站、"
     "做一个 PPT、写一段代码、分析一份数据、整理文件、生成文档等需要动手完成的工作——"
     "调用 dispatch_task 工具投递任务，任务描述写在工具参数里。\n"
-    "否则（普通的闲聊、打招呼、问问题、要资料等）直接以「{nickname}」的身份回复用户，"
+    "否则（普通的闲聊、打招呼、问问题、要资料等）直接以你的身份回复用户，"
     "不需要调用任何工具。"
 )
 
@@ -712,8 +712,9 @@ class AgentBot(WeChatBot):
 
         返回 True = 已处理；None = 调用失败，交调用方降级。
         """
-        prompt = VISION_ROUTE_PROMPT.format(nickname=self.nickname) + \
-            "\n\n用户消息：\n" + text
+        # 方案二：人设由 call_vision_api 的 system 消息承载，这里不再重复注入
+        # （避免同段人设同时出现在 system 与 user prompt 造成冗余/冲突）
+        prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{text}"
         content = [{"type": "text", "text": prompt}]
         if img_path:
             try:
