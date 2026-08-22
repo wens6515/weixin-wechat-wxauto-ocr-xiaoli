@@ -264,7 +264,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -314,7 +314,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -360,7 +360,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -397,7 +397,7 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         bot._add_history = lambda *a, **k: None
         return bot
 
-    def _user_msg_content(self, bot, **kwargs):
+    def _user_msg_content(self, bot, user_msg="豆包有学生优惠了", **kwargs):
         from types import SimpleNamespace
         from unittest import mock
 
@@ -412,7 +412,7 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
             )
 
         with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
-            reply = bot.call_chat_ai("强盗”集团", "豆包有学生优惠了", **kwargs)
+            reply = bot.call_chat_ai("强盗”集团", user_msg, **kwargs)
         self.assertEqual(reply, "ok")
         return sent["json"]["messages"][-1]["content"]
 
@@ -430,6 +430,37 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         content = self._user_msg_content(bot, sender_name=None, is_group=True)
         self.assertEqual(content, "群聊：强盗”集团：豆包有学生优惠了",
                          "群聊无发送者名时用群聊名兜底，不得退化为无名字")
+
+    def test_group_multi_sender_no_double_wrap(self):
+        """多发送者已装饰文本：只包『群聊：群名』前缀，不再重包 sender。
+        RED 复现：旧实现把最后一条 sender 再包一层 →
+        '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗' 双层嵌套。"""
+        bot = self._make()
+        content = self._user_msg_content(
+            bot, "哆拉A萝：豆包有学生优惠了\n王文生：在吗",
+            sender_name="王文生", is_group=True, multi_sender=True)
+        self.assertEqual(content,
+                         "群聊：强盗”集团 哆拉A萝：豆包有学生优惠了\n王文生：在吗",
+                         "多发送者只包群聊名前缀，不得重包 sender")
+
+    def test_group_multi_sender_branch_wins_over_sender_name(self):
+        """多发送者分支优先于 sender_name：即使 sender_name 缺失
+        （视觉层只给最后一条）也不得重包或退化兜底。"""
+        bot = self._make()
+        content = self._user_msg_content(
+            bot, "哆拉A萝：你好\n王文生：在吗",
+            sender_name=None, is_group=True, multi_sender=True)
+        self.assertEqual(content, "群聊：强盗”集团 哆拉A萝：你好\n王文生：在吗",
+                         "多发送者分支不依赖 sender_name")
+
+    def test_group_single_multiline_not_multi_sender(self):
+        """单条多行文本（user_msg 含换行）不得被隐式判定为多发送者——
+        multi_sender 是唯一显式信号，禁换行启发式（单条多行会误判）。"""
+        bot = self._make()
+        content = self._user_msg_content(
+            bot, "第一行\n第二行", sender_name="哆拉A萝", is_group=True)
+        self.assertEqual(content, "群聊：强盗”集团 哆拉A萝：第一行\n第二行",
+                         "单条多行仍走单条分支（群聊名+sender+内容）")
 
     def test_private_format_unchanged_with_sender(self):
         bot = self._make()
@@ -491,7 +522,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -553,7 +584,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \

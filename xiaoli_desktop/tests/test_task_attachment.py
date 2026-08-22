@@ -420,7 +420,7 @@ class TestVisionRoute(unittest.TestCase):
         bot.call_vision_api = lambda content: None
         bot._capture_latest_image = lambda chat: None
         handled = []
-        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append(content)
         bot._handle_image_with_text("小明", "王", "在吗")
         self.assertEqual(handled, ["在吗"])
@@ -589,9 +589,10 @@ class TestGroupNameChain(unittest.TestCase):
         bot._tick_poll_outbox = lambda: None
         bot.call_vision_api = lambda content: None  # vision 降级 → 回退 call_chat_ai
         calls = {}
-        bot.call_chat_ai = lambda chat_id, user_msg, sender_name=None, is_group=False: \
+        bot.call_chat_ai = lambda chat_id, user_msg, sender_name=None, is_group=False, multi_sender=False: \
             calls.update(chat_id=chat_id, user_msg=user_msg,
-                         sender_name=sender_name, is_group=is_group) or "ok"
+                         sender_name=sender_name, is_group=is_group,
+                         multi_sender=multi_sender) or "ok"
         bot._add_history = lambda *a, **k: None
         bot._send_text = lambda *a, **k: None
         with mock.patch("xiaoli_bot.should_resume_listen",
@@ -603,3 +604,137 @@ class TestGroupNameChain(unittest.TestCase):
                          "发送者名必须传到 call_chat_ai")
         self.assertTrue(calls.get("is_group"),
                         "群聊消息 is_group 必须为 True（decorated 走群聊格式）")
+
+    def test_group_multi_sender_merge_passes_flag(self):
+        """多发送者合并全链路：_handle_unread_session 判定 text_candidates>1
+        → _handle_text → call_chat_ai 收到 multi_sender=True 与已装饰合并文本
+        （每条带各自发送者名，只包群聊名前缀在 call_chat_ai 完成）。
+
+        RED 复现：旧实现 multi_sender 信号不存在，call_chat_ai 把最后一条
+        sender 再包一层 → '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗'。"""
+        bot = _make_bot()
+        bot.wx = _FakeWx([
+            _text_msg("哆拉A萝", "豆包有学生优惠了 @小漓", "m1"),
+            _text_msg("王文生", "在吗 @小漓", "m2"),
+        ])
+        bot.wx._current_is_group = True
+        bot._tick_poll_outbox = lambda: None
+        bot.call_vision_api = lambda content: None  # vision 降级 → 回退 call_chat_ai
+        calls = {}
+        bot.call_chat_ai = lambda chat_id, user_msg, sender_name=None, is_group=False, multi_sender=False: \
+            calls.update(chat_id=chat_id, user_msg=user_msg,
+                         sender_name=sender_name, is_group=is_group,
+                         multi_sender=multi_sender) or "ok"
+        bot._add_history = lambda *a, **k: None
+        bot._send_text = lambda *a, **k: None
+        with mock.patch("xiaoli_bot.should_resume_listen",
+                        return_value=(True, False, None)):
+            bot.process_new_messages()
+        self.assertTrue(calls.get("is_group"),
+                        "群聊消息 is_group 必须为 True")
+        self.assertTrue(calls.get("multi_sender"),
+                        "多发送者必须透传 multi_sender=True 到 call_chat_ai")
+        user_msg = calls.get("user_msg", "")
+        self.assertIn("哆拉A萝：豆包有学生优惠了", user_msg,
+                      "合并文本第一条带各自发送者名")
+        self.assertIn("王文生：在吗", user_msg,
+                      "合并文本第二条带各自发送者名")
+
+
+class TestGroupNameDecoratedFinal(unittest.TestCase):
+    """群聊名字·最终 decorated 全链路回归（不 mock 中间层）。
+
+    瑶光盲区补强：wave1 测试（TestGroupMultiSenderText）mock 掉 _handle_text
+    只覆盖合并层，未验证最终 decorated；本类走 process_new_messages →
+    _handle_unread_session → _handle_text → call_chat_ai 全链路真实执行，
+    只 mock 网络层（requests.post / vision 降级），直接断言发送给 AI 的
+    最终 decorated 文本——middle 层（_handle_text / _handle_unread_session /
+    call_chat_ai）一个都不 mock。
+
+    RED 复现（wave1 缺陷）：多发送者时 call_chat_ai 把最后一条 sender 再包
+    一层 → '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗' 双层嵌套。
+    """
+
+    def _final_decorated(self, msgs, is_group=True):
+        """全链路跑一遍 process_new_messages，捕获 call_chat_ai 最终发给
+        AI 的 user content（真实执行 call_chat_ai，不 mock 中间层）。"""
+        import threading
+
+        bot = _make_bot()
+        bot.wx = _FakeWx(msgs)
+        bot.wx._current_is_group = is_group
+        bot._tick_poll_outbox = lambda: None
+        bot.call_vision_api = lambda content: None  # vision 降级 → 回退 call_chat_ai
+        # call_chat_ai 真实执行所需属性（不 mock call_chat_ai 本身）
+        bot.api_url = "https://api.test/v1/chat/completions"
+        bot.api_key = "test-key"
+        bot.chat_model = "test-model"
+        bot.chat_temperature = 0.7
+        bot.chat_top_p = 0.9
+        bot.api_retry = 0
+        bot.api_timeout = 5
+        bot.system_prompt = "你是小漓"
+        bot._model_lock = threading.RLock()
+        bot._get_history = lambda chat_id: []
+        bot._add_history = lambda *a, **k: None
+        bot._send_text = lambda *a, **k: None
+
+        sent = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            sent["json"] = json
+            return SimpleNamespace(
+                status_code=200, text="{}",
+                json=lambda: {"choices": [{"message": {"content": "ok"}}]},
+            )
+
+        with mock.patch("wechat_bot.requests.post", side_effect=fake_post), \
+             mock.patch("xiaoli_bot.should_resume_listen",
+                        return_value=(True, False, None)):
+            bot.process_new_messages()
+        self.assertIn("json", sent, "call_chat_ai 必须真实执行并发出请求")
+        return sent["json"]["messages"][-1]["content"]
+
+    def test_single_group_msg_decorated(self):
+        """单条群聊 @：最终 decorated = 群聊名 + 发送者名 + 内容。"""
+        content = self._final_decorated([
+            _text_msg("哆拉A萝", "豆包有学生优惠了@小漓", "m1"),
+        ])
+        self.assertEqual(content, "群聊：小明 哆拉A萝：豆包有学生优惠了",
+                         "单条群聊最终 decorated 必须为「群聊名+发送者名+内容」")
+
+    def test_multi_sender_decorated_no_double_wrap(self):
+        """多发送者合并全链路：最终 decorated = 群聊名一次 + 每条 sender
+        各自在内容前 + 无双层嵌套。
+        RED 复现：旧实现把最后一条 sender 再包一层 →
+        '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗'。"""
+        content = self._final_decorated([
+            _text_msg("哆拉A萝", "豆包有学生优惠了@小漓", "m1"),
+            _text_msg("王文生", "在吗@小漓", "m2"),
+        ])
+        self.assertEqual(content,
+                         "群聊：小明 哆拉A萝：豆包有学生优惠了\n王文生：在吗",
+                         "多发送者最终 decorated：群聊名只一次、每条 sender 各自")
+        self.assertEqual(content.count("群聊：小明"), 1, "群聊名只能出现一次")
+        self.assertNotIn("王文生：哆拉A萝", content, "不得出现双层嵌套")
+
+    def test_group_no_sender_fallback_chat_name(self):
+        """sender 缺失（空字符串，视觉层未读到）：最终 decorated 用群聊名
+        兜底（群聊名+内容），并打 warning，不退化无名字分支。"""
+        with self.assertLogs("xiaoli", level="WARNING") as logs:
+            content = self._final_decorated([
+                _text_msg("", "豆包有学生优惠了@小漓", "m1"),
+            ])
+        self.assertEqual(content, "群聊：小明：豆包有学生优惠了",
+                         "sender 缺失时用群聊名兜底")
+        self.assertTrue(
+            any("视觉层未读到发送者名" in line for line in logs.output),
+            "sender 缺失必须打 warning 日志")
+
+    def test_private_format_unchanged(self):
+        """私聊全链路：格式保持「私聊 - 发送者名：内容」不变。"""
+        content = self._final_decorated([
+            _text_msg("王文生", "在吗", "m1"),
+        ], is_group=False)
+        self.assertEqual(content, "私聊 - 王文生：在吗",
+                         "私聊格式保持不变")
