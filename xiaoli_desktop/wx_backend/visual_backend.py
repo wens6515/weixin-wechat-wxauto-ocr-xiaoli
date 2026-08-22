@@ -1568,9 +1568,27 @@ class VisualBackend:
         }
         """
         self._switch_chat(chat)
+        # 先读会话名区（标题）判定群聊/私聊——本次会话权威值，判定发生在
+        # OCR 之前（用户设计：读列表区 → 切会话 → 读会话名区判群聊私聊 →
+        # 走分支 → 才 OCR）。get_messages 内也有 read_title 刷新缓存，但
+        # analyze_window 被 _handle_unread_session 单独先调且不调 get_messages，
+        # 必须在这里拿到权威 is_group 随返回带出——否则调用方回落到上一轮
+        # 会话的旧缓存，私聊被误判群聊（实测日志「私聊王文生被判群聊跳过」）。
+        title = self.read_title(foreground=True)
+        if not title:
+            logger.warning(f"[读取] {chat!r} 标题区为空（微信未选中任何会话？），force 重切")
+            self._switch_chat(chat, force=True)
+            title = self.read_title(foreground=True)
+        if title:
+            name, is_group, _ = parse_title(title)
+            self._current_title = name or chat
+            self._current_is_group = is_group
+        else:
+            is_group = bool(self._current_is_group)
+            logger.warning(f"[读取] {chat!r} 标题仍未读到，回落缓存 _current_is_group={is_group}")
         empty = {"bot_bottom": None, "other_text": [], "other_media": [],
                  "has_text": False, "has_media": False, "has_other": False,
-                 "width": 0, "height": 0}
+                 "is_group": is_group, "width": 0, "height": 0}
         for attempt in range(2):
             if attempt > 0:
                 # 第一次分析结果为空：可能 toggle 取消选中（_switch_chat 标题
@@ -1646,6 +1664,7 @@ class VisualBackend:
                 "has_text": bool(other_text),
                 "has_media": bool(other_media),
                 "has_other": has_other,
+                "is_group": is_group,
                 "width": rw, "height": rh,
             }
         return empty

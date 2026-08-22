@@ -728,6 +728,7 @@ class TestVisualBackend(unittest.TestCase):
             return [0, 50] if side == "right" else [100]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -757,6 +758,7 @@ class TestVisualBackend(unittest.TestCase):
             return [0] if side == "right" else []
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -786,6 +788,7 @@ class TestVisualBackend(unittest.TestCase):
             return [85, 392] if side == "right" else [0, 250, 490, 588, 1055]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((747, 1135), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -813,6 +816,7 @@ class TestVisualBackend(unittest.TestCase):
             return [50, 200, 350] if side == "right" else [100, 400]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -835,6 +839,7 @@ class TestVisualBackend(unittest.TestCase):
             return [50, 200, 350] if side == "right" else [100, 400]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -861,6 +866,7 @@ class TestVisualBackend(unittest.TestCase):
             return [200] if side == "right" else [300]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -882,6 +888,7 @@ class TestVisualBackend(unittest.TestCase):
             return [] if side == "right" else [100]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -895,6 +902,58 @@ class TestVisualBackend(unittest.TestCase):
                           "无 bot 回复时 bot_bottom 维持 None")
         self.assertTrue(win["has_other"],
                         "无 bot 时对方消息全部算新消息")
+
+    def test_analyze_window_is_group_true_from_title(self):
+        """analyze_window 先读会话名区（read_title）判定群聊，随返回带出权威 is_group。
+
+        重构：判定发生在 OCR 之前（analyze_window 内 read_title 解析标题括号人数），
+        _handle_unread_session 不再依赖上一轮会话的旧缓存。
+        """
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [0] if side == "right" else []
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "read_title", return_value='强盗"集团(5)'), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                        return_value=[(0, 40, 20, 160, True)]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes",
+                        return_value=[]):
+            win = b.analyze_window("强盗”集团")
+        self.assertIs(win.get("is_group"), True,
+                      "群聊标题带括号人数 → analyze_window 返回 is_group=True")
+
+    def test_analyze_window_is_group_false_from_title(self):
+        """私聊标题（无括号人数）→ analyze_window 返回 is_group=False。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [0] if side == "right" else []
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "read_title", return_value="王文生"), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                        return_value=[(0, 40, 20, 160, True)]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes",
+                        return_value=[]):
+            win = b.analyze_window("王文生")
+        self.assertIs(win.get("is_group"), False,
+                      "私聊标题无括号人数 → analyze_window 返回 is_group=False")
 
     def test_detect_avatar_tops_geometry(self):
         """detect_avatar_tops 真实实现：窄带非背景块标出头像顶部 y，
@@ -1428,6 +1487,7 @@ class TestRealFixtureRegion(unittest.TestCase):
         b.connect()
         img = Image.open(_REGION_1X)
         with mock.patch.object(b, "_switch_chat", return_value=True), \
+         mock.patch.object(b, "read_title", return_value="王文生"), \
                 mock.patch.object(b, "_refresh", return_value=img):
             win = b.analyze_window("王文生")
         self.assertEqual(win["other_media"], [(838, 1117, 119, 398)],

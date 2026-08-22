@@ -241,7 +241,11 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
             def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
-                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+                        "has_text": True, "has_media": False,
+                        "is_group": False, "width": 747, "height": 1135}
+                return {"bot_bottom": None, "other_text": [], "other_media": [],
+                        "has_text": True, "has_media": False,
+                        "is_group": True, "width": 747, "height": 1135}
 
             def get_messages(self, chat):
                 return [
@@ -294,7 +298,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
             def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
-                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+                        "has_text": True, "has_media": False,
+                        "is_group": True, "width": 747, "height": 1135}
 
             def get_messages(self, chat):
                 return [
@@ -339,16 +344,17 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         handled = []
 
         class FakeWx:
-            _current_is_group = True  # 上一轮群聊残留
+            _current_is_group = True  # 上一轮群聊残留（真实 analyze_window 已返回权威值，get_messages 不再刷新）
 
             def iter_unread_sessions(self):
                 return iter(["王文生"])
 
             def analyze_window(self, chat, skip_bot=0):
-                # 模拟 read_title：私聊标题「王文生」→ 本次会话权威值刷新为 False
-                self._current_is_group = False
+                # 重构后：analyze_window 内 read_title 解析私聊标题「王文生」
+                # → 返回本次会话权威 is_group=False（判定发生在 OCR 之前）
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
-                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+                        "has_text": True, "has_media": False,
+                        "is_group": False, "width": 747, "height": 1135}
 
             def get_messages(self, chat):
                 return [
@@ -395,7 +401,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
             def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
-                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+                        "has_text": True, "has_media": False,
+                        "is_group": True, "width": 747, "height": 1135}
 
             def get_messages(self, chat):
                 return [
@@ -556,7 +563,8 @@ class TestGroupMultiSenderText(unittest.TestCase):
 
             def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
-                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+                        "has_text": True, "has_media": False,
+                        "is_group": True, "width": 747, "height": 1135}
 
             def get_messages(self, chat):
                 return [
