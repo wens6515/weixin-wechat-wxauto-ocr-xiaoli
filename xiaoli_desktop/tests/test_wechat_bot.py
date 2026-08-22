@@ -239,7 +239,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             def iter_unread_sessions(self):
                 return iter(["王文生"])
 
-            def analyze_window(self, chat):
+            def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False, "width": 747, "height": 1135}
 
@@ -259,6 +259,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.wx = FakeWx()
         bot.nickname = "小漓"
         bot._pending_files = {}
+        bot._pending_placeholders = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -336,7 +337,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             def iter_unread_sessions(self):
                 return iter(["强盗”集团"])
 
-            def analyze_window(self, chat):
+            def analyze_window(self, chat, skip_bot=0):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False, "width": 747, "height": 1135}
 
@@ -354,6 +355,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.wx = FakeWx()
         bot.nickname = "小漓"
         bot._pending_files = {}
+        bot._pending_placeholders = {}
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -426,9 +428,13 @@ class TestImageProcessing(unittest.TestCase):
 
         with _mock.patch("wechat_bot.pyautogui") as pg, \
              _mock.patch("uiautomation.WindowControl") as wc, \
-             _mock.patch.object(bot, "call_vision_api", return_value="识别结果"), \
+             _mock.patch.object(bot, "call_vision_api",
+                                return_value={"kind": "tool_call",
+                                              "name": "dispatch_task",
+                                              "arguments": '{"task":"画图"}'}), \
              _mock.patch.object(bot, "_save_screenshot_compressed"), \
-             _mock.patch.object(bot, "_reply_with_vision", return_value=True), \
+             _mock.patch.object(bot, "_route_vision_result",
+                                return_value=True) as route, \
              _mock.patch.object(bot, "_process_image_visual_fallback",
                                 return_value=True) as fallback:
             preview = _mock.MagicMock()
@@ -445,6 +451,18 @@ class TestImageProcessing(unittest.TestCase):
 
             pg.click.assert_called_once_with(100, 200)
             fallback.assert_not_called()
+            # 契约：call_vision_api 的 dict 返回原样路由给 _route_vision_result，
+            # 不压文本、不二次转述（tool_call 语义不丢失）
+            route.assert_called_once()
+            _args, _kwargs = route.call_args
+            self.assertEqual(_kwargs.get("img_path") is not None, True,
+                             "img_path 必须透传给 _route_vision_result")
+            _result = _args[2] if len(_args) > 2 else None
+            self.assertEqual(_result,
+                             {"kind": "tool_call",
+                              "name": "dispatch_task",
+                              "arguments": '{"task":"画图"}'},
+                             "tool_call dict 必须原样传给 _route_vision_result")
 
 
 # ---- 文件显示名提取 + 目录快照增量（微信保留源时间戳的应对） ----
@@ -553,6 +571,308 @@ class TestFileDisplayNameAndSnapshot(unittest.TestCase):
         obj2 = self._obj()
         obj2.file_storage_path = None
         obj2._refresh_file_snapshot(wait=0)
+
+
+# ---- call_vision_api 单调用形态 + _send_text 占位计数 + vision 模型默认迁移 ----
+
+
+class TestCallVisionApi(unittest.TestCase):
+    """call_vision_api 单参契约：唯一参数 content 为块列表 list[dict]
+    [{"type":"text","text":...}, {"type":"image_url","image_url":{"url":"data:image/..."}}]
+    （图片块可选，无图时只含 text 块）；payload 声明 dispatch_task 工具
+    （tool_choice=auto）；响应解析 tool_calls → 结构化标记 / 仅 content →
+    文本 dict / 失败 → None。"""
+
+    TEXT_ONLY = [{"type": "text", "text": "描述"}]
+
+    def _make(self):
+        import wechat_bot
+        bot = object.__new__(wechat_bot.WeChatBot)
+        bot.vision_api_url = "https://api.deepseek.com/v1/chat/completions"
+        bot.vision_api_key = "test-key"
+        bot.vision_model = "deepseek-v4-flash-vision-exp"
+        bot.vision_temp = 0.7
+        bot.vision_max_tokens = 10000
+        bot._model_lock = threading.RLock()
+        return bot
+
+    def _post(self, payload):
+        from unittest import mock as _mock
+        captured = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            resp = _mock.MagicMock()
+            resp.status_code = payload.get("status", 200)
+            resp.json.return_value = payload.get("body", {})
+            resp.text = payload.get("text", "")
+            return resp
+
+        return captured, _mock.patch("wechat_bot.requests.post", side_effect=fake_post)
+
+    def test_payload_single_user_message_text_then_image(self):
+        """payload：唯一一条 user 消息，content 为调用方传入的块列表原样透传
+        （text 在前 image_url 在后，image_url 为 base64 data URL，图片仅出现一次）。"""
+        from unittest import mock as _mock
+        bot = self._make()
+        captured = {}
+        content = [
+            {"type": "text", "text": "描述这张图片"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,iVBORy1mYWtl"}},
+        ]
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            captured["json"] = json
+            resp = _mock.MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"choices": [{"message": {"content": "ok"}}]}
+            return resp
+
+        with _mock.patch("wechat_bot.requests.post", side_effect=fake_post):
+            bot.call_vision_api(content)
+
+        msgs = captured["json"]["messages"]
+        self.assertEqual(len(msgs), 1, "messages 只应有一条（图片仅随最初 user 消息传入一次）")
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[0]["content"], content,
+                         "content 应为调用方传入的块列表原样透传")
+        blocks = msgs[0]["content"]
+        self.assertEqual([b["type"] for b in blocks], ["text", "image_url"],
+                         "content 块顺序应为 [text, image_url]")
+        self.assertEqual(blocks[0]["text"], "描述这张图片")
+        url = blocks[1]["image_url"]["url"]
+        self.assertTrue(url.startswith("data:image/png;base64,"),
+                        "image_url 应为 base64 data URL")
+        self.assertIn("iVBORy1mYWtl", url, "base64 应编码原始图片字节")
+
+    def test_payload_declares_dispatch_task_tool(self):
+        """payload 必须声明 dispatch_task 工具 + tool_choice=auto：
+        没有 tools 数组模型永不输出 tool_calls，任务消息无法分流。"""
+        bot = self._make()
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "ok"}}]}})
+        with patcher:
+            bot.call_vision_api(self.TEXT_ONLY)
+        payload = captured["json"]
+        self.assertEqual(payload["tool_choice"], "auto")
+        self.assertEqual(payload["tools"], [{
+            "type": "function",
+            "function": {
+                "name": "dispatch_task",
+                "description": "判断用户消息是否为任务，是则投递天枢处理",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"task": {"type": "string", "description": "任务描述"}},
+                    "required": ["task"],
+                },
+            },
+        }])
+
+    def test_text_content_returns_kind_text(self):
+        """仅 message.content → {'kind': 'text', 'content': ...}（strip 空白）。"""
+        bot = self._make()
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "  图片里有只猫  "}}]}})
+        with patcher:
+            result = bot.call_vision_api([{"type": "text", "text": "描述"}])
+        self.assertEqual(result, {"kind": "text", "content": "图片里有只猫"})
+
+    def test_tool_calls_returns_kind_tool_call(self):
+        """message.tool_calls 存在（dispatch_task 工具调用）→ 结构化标记，name/arguments 透传。"""
+        bot = self._make()
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "dispatch_task",
+                                 "arguments": '{"task": "根据文档做网站"}'},
+                }],
+            }}]}})
+        with patcher:
+            result = bot.call_vision_api([{"type": "text", "text": "描述"}])
+        self.assertEqual(result, {"kind": "tool_call", "name": "dispatch_task",
+                                  "arguments": '{"task": "根据文档做网站"}'})
+
+    def test_no_choices_returns_none(self):
+        bot = self._make()
+        captured, patcher = self._post({"body": {"choices": []}})
+        with patcher:
+            self.assertIsNone(bot.call_vision_api([{"type": "text", "text": "描述"}]))
+
+    def test_http_error_returns_none(self):
+        bot = self._make()
+        captured, patcher = self._post({"status": 429, "text": "rate limited",
+                                        "body": {}})
+        with patcher:
+            self.assertIsNone(bot.call_vision_api([{"type": "text", "text": "描述"}]))
+
+    def test_blank_content_returns_none(self):
+        """content 空白且无 tool_calls → None（旧'（无有效描述）'占位文本移除）。"""
+        bot = self._make()
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "   "}}]}})
+        with patcher:
+            self.assertIsNone(bot.call_vision_api([{"type": "text", "text": "描述"}]))
+
+
+class TestSendTextPlaceholder(unittest.TestCase):
+    """_send_text 占位计数：按 chat_name 隔离（非全局），placeholder=True 递增 /
+    默认（False）归零；发送失败不计。"""
+
+    def _make(self):
+        from unittest import mock as _mock
+        import wechat_bot
+        bot = object.__new__(wechat_bot.WeChatBot)
+        bot._pending_placeholders = {}
+        bot.wx = _mock.MagicMock()
+        return bot
+
+    def test_placeholder_increments_per_chat(self):
+        bot = self._make()
+        bot._send_text("正在处理中", "小明", placeholder=True)
+        bot._send_text("正在处理中", "小明", placeholder=True)
+        bot._send_text("正在处理中", "产品讨论群", placeholder=True)
+        self.assertEqual(bot._pending_placeholders, {"小明": 2, "产品讨论群": 1})
+
+    def test_default_resets_to_zero(self):
+        bot = self._make()
+        bot._send_text("占位", "小明", placeholder=True)
+        bot._send_text("占位", "小明", placeholder=True)
+        bot._send_text("结果来了", "小明")  # 非占位 → 删除键
+        self.assertNotIn("小明", bot._pending_placeholders,
+                         "归零分支应删除键而非留 0（防 dict 膨胀）")
+
+    def test_chats_are_isolated(self):
+        bot = self._make()
+        bot._send_text("占位", "小明", placeholder=True)
+        bot._send_text("结果", "小明")  # 小明删除键
+        self.assertNotIn("小明", bot._pending_placeholders)
+        self.assertEqual(bot._pending_placeholders.get("产品讨论群"), None,
+                         "B 聊天未被 A 的计数影响")
+
+    def test_send_failure_not_counted(self):
+        bot = self._make()
+        bot.wx.send_text.side_effect = RuntimeError("send failed")
+        bot._send_text("占位", "小明", placeholder=True)
+        self.assertEqual(bot._pending_placeholders.get("小明"), None,
+                         "发送失败不应计入占位计数")
+
+
+class TestVisionResultRouting(unittest.TestCase):
+    """vision 单调用收尾契约：_route_vision_result 可覆写 hook 存在且基类
+    默认返回 None（未处理）；两段式残留 _reply_with_vision / _vision_result_text
+    必须删除；_describe_image / _process_image_visual_fallback 的 call_vision_api
+    dict 返回直接路由，不压文本不转述（tool_call 语义不丢失）。"""
+
+    @staticmethod
+    def _obj():
+        import wechat_bot
+        return object.__new__(wechat_bot.WeChatBot)
+
+    def test_route_vision_result_hook_exists_default_none(self):
+        """基类 _route_vision_result 存在，任何输入默认返回 None（未处理）。"""
+        bot = self._obj()
+        self.assertTrue(callable(getattr(bot, "_route_vision_result", None)),
+                        "_route_vision_result hook 必须存在")
+        self.assertIsNone(bot._route_vision_result("群", "小明", None))
+        self.assertIsNone(bot._route_vision_result(
+            "群", "小明", {"kind": "text", "content": "描述"}))
+        self.assertIsNone(bot._route_vision_result(
+            "群", "小明", {"kind": "tool_call", "name": "x", "arguments": "{}"},
+            img_path="/tmp/x.jpg"))
+
+    def test_reply_with_vision_removed(self):
+        """两段式残留 _reply_with_vision 必须删除（基类无此方法）。"""
+        import wechat_bot
+        self.assertFalse(hasattr(wechat_bot.WeChatBot, "_reply_with_vision"),
+                         "_reply_with_vision 两段式残留必须删除")
+
+    def test_vision_result_text_removed(self):
+        """_vision_result_text 改路由后无调用方，必须一并删除。"""
+        import wechat_bot
+        self.assertFalse(hasattr(wechat_bot.WeChatBot, "_vision_result_text"),
+                         "_vision_result_text 无调用方应删除")
+
+    def test_visual_fallback_routes_dict_not_text(self):
+        """降级路径：call_vision_api 返回 tool_call dict → 原样路由给
+        _route_vision_result（不压 arguments 字符串、不写 [图片描述] 转述）。"""
+        from unittest import mock as _mock
+        bot = self._obj()
+        bot.vision_prompt = "描述"
+        bot.wx = _mock.MagicMock()
+        tool_call = {"kind": "tool_call", "name": "dispatch_task",
+                     "arguments": '{"task":"画一张图"}'}
+        with _mock.patch("wechat_bot.pyautogui") as pg, \
+             _mock.patch.object(bot, "_save_screenshot_compressed"), \
+             _mock.patch.object(bot, "call_vision_api", return_value=tool_call), \
+             _mock.patch.object(bot, "_route_vision_result",
+                                return_value=True) as route:
+            pg.screenshot.return_value = _mock.MagicMock()
+            ret = bot._process_image_visual_fallback("群", "小明")
+            self.assertTrue(ret)
+            route.assert_called_once()
+            _args, _kwargs = route.call_args
+            self.assertEqual(_kwargs.get("img_path") is not None, True)
+            self.assertEqual(_args[2], tool_call,
+                             "tool_call dict 必须原样路由，不压文本")
+
+    def test_describe_image_routes_dict_not_text(self):
+        """_describe_image：tool_call dict 原样路由，不压 arguments 字符串。"""
+        from unittest import mock as _mock
+        bot = self._obj()
+        bot.vision_prompt = "描述"
+        bot.wx = _mock.MagicMock()
+        tool_call = {"kind": "tool_call", "name": "dispatch_task",
+                     "arguments": '{"task":"做PPT"}'}
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tf:
+            img_path = tf.name
+            tf.write(b"fake-image-bytes")
+        try:
+            with _mock.patch.object(bot, "_capture_latest_image",
+                                    return_value=img_path), \
+                 _mock.patch.object(bot, "call_vision_api",
+                                    return_value=tool_call), \
+                 _mock.patch.object(bot, "_route_vision_result",
+                                    return_value=True) as route:
+                ret = bot._describe_image("群")
+                self.assertTrue(ret)
+                route.assert_called_once()
+                _args, _kwargs = route.call_args
+                self.assertEqual(_args[2], tool_call,
+                                 "tool_call dict 必须原样路由，不压文本")
+        finally:
+            if os.path.exists(img_path):
+                os.unlink(img_path)
+
+
+class TestVisionModelDefault(unittest.TestCase):
+    """vision_model 默认值迁移 zhipu:glm-4v-flash → deepseek:deepseek-v4-flash-vision-exp；
+    config 兼容：已有 config 缺键时用默认值补齐，不覆盖用户现有配置。"""
+
+    def test_config_missing_key_filled_with_default(self):
+        import json
+        import wechat_bot
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"bot_nickname": "小漓"}, f)
+            cfg = wechat_bot.load_config(path)
+            self.assertEqual(cfg["vision_model"], "deepseek:deepseek-v4-flash-vision-exp",
+                             "缺键时应补默认（迁移后的新模型名）")
+
+    def test_existing_config_not_overwritten(self):
+        import json
+        import wechat_bot
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"vision_model": "zhipu:glm-4v-flash"}, f)
+            cfg = wechat_bot.load_config(path)
+            self.assertEqual(cfg["vision_model"], "zhipu:glm-4v-flash",
+                             "用户已有配置不应被默认值覆盖")
 
 
 if __name__ == "__main__":
