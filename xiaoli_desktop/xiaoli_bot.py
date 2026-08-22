@@ -8,7 +8,7 @@
 
 运行：python xiaoli_bot.py --run     自检：python xiaoli_bot.py --test
 """
-import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil, uuid, struct
+import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil, uuid, struct, base64
 import requests as req
 import pyautogui
 from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat, _extract_file_name_token
@@ -69,6 +69,16 @@ CLASSIFY_PROMPT = (
     "普通的闲聊、打招呼、问问题、要资料等不算任务。\n"
     "只输出一个 JSON 对象，不要输出任何其他文字：\n"
     '{"is_task": true 或 false, "task": "当 is_task 为 true 时，用一句清晰的话描述要完成的任务"}'
+)
+
+
+VISION_ROUTE_PROMPT = (
+    "你是微信机器人「{nickname}」，负责判断用户消息并回复。\n"
+    "如果用户的消息是需要由 AI 代理（天枢）实际执行的任务——例如：根据文档做一个网站、"
+    "做一个 PPT、写一段代码、分析一份数据、整理文件、生成文档等需要动手完成的工作——"
+    "调用 dispatch_task 工具投递任务，任务描述写在工具参数里。\n"
+    "否则（普通的闲聊、打招呼、问问题、要资料等）直接以「{nickname}」的身份回复用户，"
+    "不需要调用任何工具。"
 )
 
 
@@ -595,6 +605,8 @@ class AgentBot(WeChatBot):
         # rivet config set-approval 只影响下次启动，且 /yes 已覆盖此需求）。
         # 是否暂停消息监听由 has_active_tasks 每次实时判断，不保存粘滞状态
         self._pending_files = {}  # chat_name -> {sender} 群聊文件等待用户指令
+        # 占位回复计数（_pending_placeholders）由基类 WeChatBot 提供（基类
+        # __init__ 初始化；placeholder 发送 +1 / 实质回复归零，按 chat_name 隔离）
         self._sent_back_files = {}  # 回传成果文件 绝对路径 -> mtime（目录扫描时排除，防误当用户发送的文件）
         # 回传成果文件名主干 -> 发送时刻（排除微信写入接收目录的成果副本）。
         # 持久化到 tasks_dir 下，bot 重启后仍生效（否则重启后历史成果副本会再次被误当用户文件）
@@ -689,6 +701,104 @@ class AgentBot(WeChatBot):
         # 任务消息全被当聊天处理（用户实测：发两次都当聊天）。
         return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
+    def _vision_route(self, chat_name, sender, text, img_path=None, msg_id=None,
+                      raw_message=None, attachments=None):
+        """vision-exp 单调用分流：任务判断 + 回复一次完成（替代两段式）。
+
+        契约（基类 call_vision_api 由并行维度实现）：
+          content 块 = [{"type": "text", "text": ...},
+                        {"type": "image_url", "image_url": {"url": "data:image/..."}}]
+          call_vision_api(content) 返回 dict 或 None：
+            {"kind": "tool_call", "name": "dispatch_task",
+             "arguments": '{"task": "..."}'} → 投递天枢（task 从 arguments JSON 解析）
+            {"kind": "text", "content": "..."} → 直接回复（实质回复 → 占位归零）
+            None / 异常                          → 返回 None，调用方降级
+
+        返回 True = 已处理；None = 调用失败，交调用方降级。
+        """
+        prompt = VISION_ROUTE_PROMPT.format(nickname=self.nickname) + \
+            "\n\n用户消息：\n" + text
+        content = [{"type": "text", "text": prompt}]
+        if img_path:
+            try:
+                with open(img_path, "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode()
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                })
+            except OSError as e:
+                logger.error(f"[vision] 图片读取失败，忽略图片: {e}")
+        try:
+            resp = self.call_vision_api(content)
+        except Exception as e:
+            logger.error(f"[vision] 调用异常: {e}")
+            return None
+        return self._apply_vision_result(
+            chat_name, sender, resp, img_path=img_path, msg_id=msg_id,
+            raw_message=raw_message, attachments=attachments, user_text=text)
+
+    def _apply_vision_result(self, chat_name, sender, result, img_path=None,
+                             msg_id=None, raw_message=None, attachments=None,
+                             user_text=None):
+        """vision 单调用结果分流核心（_vision_route 与 _route_vision_result 共用）。
+
+        result: call_vision_api 的 dict 返回（{'kind':'tool_call'|'text',...}）
+        或 None；user_text 为用户消息原文（tool_call JSON 解析失败降级用、
+        text 分支记历史用；纯图路径为 None 时降级用 arguments 原文）。
+        返回 True = 已处理；None = 调用失败/未识别，交调用方降级。
+        """
+        if not result:
+            return None
+        kind = result.get("kind")
+        if kind == "tool_call":
+            # 契约：name 必须为 dispatch_task；task 从 arguments JSON 解析
+            # （json.loads 后取 task 字段；解析失败降级用原文）
+            if result.get("name") != "dispatch_task":
+                logger.warning(f"[vision] 未知工具调用 name={result.get('name')!r}，降级")
+                return None
+            task_desc = user_text or ""
+            raw_args = result.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args)
+                task_desc = str(args.get("task") or user_text or "").strip()
+            except (ValueError, TypeError):
+                task_desc = (user_text or raw_args).strip()
+            logger.info(f"[任务桥] vision 判定为任务: {task_desc[:60]}")
+            self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
+            atts = attachments if attachments is not None \
+                else ([img_path] if img_path else None)
+            self._dispatch_and_notify(
+                chat_name, sender, task_desc,
+                attachment_paths=atts,
+                extra={"msg_id": msg_id, "raw_message": raw_message or task_desc},
+            )
+            return True
+        if kind == "text":
+            reply = str(result.get("content") or "").strip()
+            if not reply:
+                logger.warning("[vision] text 响应无回复文本，降级")
+                return None
+            logger.info(f"[vision] 判定非任务，直接回复: {reply[:60]}")
+            if user_text:
+                self._add_history(chat_name, "user", user_text)
+            self._add_history(chat_name, "assistant", reply)
+            self._send_text(reply, chat_name)
+            return True
+        logger.warning(f"[vision] 未知响应 kind={kind!r}，降级")
+        return None
+
+    def _route_vision_result(self, chat_name, sender, result, img_path=None):
+        """纯图路径 hook 覆写：复用 _apply_vision_result 分流核心。
+
+        纯图路径（_process_image 系列截图 → vision → 本 hook）的 vision 单
+        调用结果分流：tool_call → 投递天枢（attachment_paths=[img_path]）；
+        text → 直接回复（实质回复 → 占位归零）；None → 返回 None，调用方降级。
+        无用户文字，JSON 解析失败降级用 arguments 原文。
+        """
+        return self._apply_vision_result(
+            chat_name, sender, result, img_path=img_path)
+
     def _dispatch_and_notify(self, chat_name, sender, task_desc, attachment_paths=None, extra=None):
         """投递任务 → 微信告知"处理中" → 唤起天枢窗口。返回是否投递成功"""
         task_info = {
@@ -710,7 +820,7 @@ class AgentBot(WeChatBot):
             _cs.grant_tasks_dir_to_tianshu(str(self.tasks_dir or "").strip())
         except Exception:
             pass
-        self._send_text("收到任务啦，正在处理中，稍等一下哦～", chat_name)
+        self._send_text("收到任务啦，正在处理中，稍等一下哦～", chat_name, placeholder=True)
         # 唤起天枢：统一走 resolve_cli_window——tianshu_window_title 可能被
         # 旧版本污染为桌面端「天枢 · Tianshu」，直接 send 会激活桌面端窗口。
         # resolve 三级定位（手动配置→CLI 特征→启动后新增窗口），含桌面端排除。
@@ -732,7 +842,7 @@ class AgentBot(WeChatBot):
             ok = send_trigger_to_window(title, self.tianshu_trigger_command, hold=2.0)
             if not ok:
                 logger.error(f"[天枢] 唤起窗口失败: {title}，任务 {task_id} 保留在 {os.path.join(self.tasks_dir, task_id)}")
-                self._send_text("天枢窗口没找到，不过任务已经记下了，处理完我会把结果发给你～", chat_name)
+                self._send_text("天枢窗口没找到，不过任务已经记下了，处理完我会把结果发给你～", chat_name, placeholder=True)
         except Exception as e:
             logger.error(f"[天枢] 唤起异常: {e}，任务已投递")
         return True
@@ -862,10 +972,11 @@ class AgentBot(WeChatBot):
             self._poll_outbox()
 
     def _process_file_with_instruction(self, chat_name, sender, filepath, filename, user_instruction, extra_attachments=None):
-        """根据用户指令处理文件：LLM 判断指令是否任务 → 天枢投递 或 原文件识别。
+        """根据用户指令处理文件：vision-exp 单调用判断任务 → 天枢投递 或 原文件识别。
 
         任务分支只投文件本体（天枢 CLI 自行读附件），不提取文件文字、不写
         file_text；只有非任务分支（把文件内容喂给 AI 生成回复）才提取文字。
+        vision 调用失败（None）时降级回退原两段式（_classify_task + 文件识别）。
         """
         is_group = is_group_chat(chat_name)
         instruction = user_instruction
@@ -875,15 +986,23 @@ class AgentBot(WeChatBot):
         if not instruction:
             instruction = user_instruction.strip()
 
-        # 判断用户指令是否为任务。任务判断输入 = 文件名 + 处理要求
+        # 任务判断输入 = 文件名 + 处理要求
         # （LLM 需知道「处理的对象」才能判断是否动手类任务；仅指令如
         # '把这个做成网页' 缺少对象，单独看会被误判闲聊）：
         #   '[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页'
+        classify_input = f"[文件]{filename} {instruction}"
         if self.task_enabled:
-            cls = self._classify_task(f"[文件]{filename} {instruction}")
+            resp = self._vision_route(
+                chat_name, sender, classify_input,
+                msg_id=None, raw_message=filename,
+                attachments=[filepath] + (extra_attachments or []),
+            )
+            if resp is not None:
+                return True
+            # vision 降级（None）：回退原两段式任务判断
+            cls = self._classify_task(classify_input)
             if cls["is_task"]:
                 logger.info(f"[任务桥] 文件+指令判定为任务: {cls['task'][:60]}")
-                self._add_history(chat_name, "user", f"[任务] 文件 {filename}: {instruction[:200]}")
                 self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
                 atts = [filepath] + (extra_attachments or [])
                 self._dispatch_and_notify(
@@ -931,12 +1050,12 @@ class AgentBot(WeChatBot):
 
 
     def _handle_text(self, chat_name, sender, content, msg_id=None):
-        """文本消息统一处理：任务判断 → 天枢投递 或 普通聊天。
+        """文本消息统一处理：vision-exp 单调用判断+回复 → 天枢投递 或 普通聊天。
 
-        附件只由文件消息路径投递（_process_file_with_task /
-        _process_file_with_instruction，用户确实发了文件时才带）。
-        纯文字任务不带任何附件——历史缺陷：文本路径无条件找接收目录
-        "最新"文件，用户没发文件时把无关旧文件投给 agent 造成误判。
+        附件只由文件消息路径投递（_process_file_with_instruction，用户确实
+        发了文件时才带）。纯文字任务不带任何附件——历史缺陷：文本路径无条件
+        找接收目录"最新"文件，用户没发文件时把无关旧文件投给 agent 造成误判。
+        vision 调用失败（None）时降级回退普通聊天（API 失败默认非任务，与现状一致）。
         """
         is_group = getattr(self.wx, "_current_is_group", None)
         if is_group is None:
@@ -949,17 +1068,12 @@ class AgentBot(WeChatBot):
         question = content.strip()
         logger.info(f"[MSG] [{chat_name}] {sender}: {question[:80]}")
         if self.task_enabled:
-            cls = self._classify_task(question)
-            if cls["is_task"]:
-                logger.info(f"[任务桥] 判定为任务: {cls['task'][:60]}")
-                self._add_history(chat_name, "user", f"[任务] {question}")
-                self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
-                self._dispatch_and_notify(
-                    chat_name, sender, cls["task"],
-                    attachment_paths=None,
-                    extra={"msg_id": msg_id, "raw_message": content},
-                )
+            resp = self._vision_route(
+                chat_name, sender, question,
+                msg_id=msg_id, raw_message=content)
+            if resp is not None:
                 return True
+            # vision 降级（None）：API 失败默认非任务，回退普通聊天（与现状一致）
         reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group)
         self._send_text(reply, chat_name)
         return True
@@ -1026,8 +1140,11 @@ class AgentBot(WeChatBot):
                      or (m.y is not None and m.y >= win.get("bot_bottom")))
             ]
 
-        # D/R: 截图 + 气泡/媒体分析（无 OCR）
-        win = self.wx.analyze_window(chat_name)
+        # D/R: 截图 + 气泡/媒体分析（无 OCR）。skip_bot：跳过最近 N 条 bot
+        # 占位回复（_pending_placeholders，占位发送时 +1、实质回复归零），
+        # 占位"正在处理中"不顶掉用户的新消息。
+        win = self.wx.analyze_window(
+            chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0))
         if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
             logger.info(f"[跳过] {chat_name} 窗口空（bot 已回复或无对方消息）")
             return False
@@ -1038,7 +1155,8 @@ class AgentBot(WeChatBot):
         # F/H: 有图片（媒体）或有文件 → sleep 10s 防话没说完/文件没下载完，再分析
         if win.get("has_media") or has_file_initial:
             time.sleep(10)
-            win = self.wx.analyze_window(chat_name)
+            win = self.wx.analyze_window(
+                chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0))
             if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                 return False
             window_msgs = _window_msgs(win)
@@ -1129,29 +1247,20 @@ class AgentBot(WeChatBot):
         return True
 
     def _handle_image_with_text(self, chat_name, sender, text_content):
-        """图片 + 文字：文字 LLM 判任务；任务则图截图+文字投递，非任务则图描述+文字组装。"""
+        """图片 + 文字：vision-exp 单调用（图 + 文字一次判断 + 回复）。
+
+        任务 → 图截图 + 文字投递（tool_call 不发送回复文本）；非任务 → 直接
+        回复（不再两段式：GLM-4V 描述转述 + 主模型二次回复）。vision 调用
+        失败（None）→ 降级回退纯文字处理（保持现状）。
+        """
         if self.task_enabled:
-            cls = self._classify_task(text_content)
-            if cls["is_task"]:
-                img_path = self._capture_latest_image(chat_name)
-                self._add_history(chat_name, "user", f"[任务] {text_content}")
-                self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
-                self._dispatch_and_notify(
-                    chat_name, sender, cls["task"],
-                    attachment_paths=[img_path] if img_path else None,
-                    extra={"msg_id": None, "raw_message": text_content},
-                )
+            img_path = self._capture_latest_image(chat_name)
+            resp = self._vision_route(
+                chat_name, sender, text_content, img_path=img_path,
+                msg_id=None, raw_message=text_content)
+            if resp is not None:
                 return True
-        # 非任务：图片多模态 + 文字组装
-        vision_reply = self._describe_image(chat_name)
-        if vision_reply:
-            prompt = (f"用户发来一张图片（内容描述：{vision_reply}）和一段文字：\n\n"
-                      f"{text_content}\n\n请结合图片和文字，以{self.nickname}的身份回复用户。")
-            reply = self.call_chat_ai(
-                chat_name, prompt, sender_name=sender, is_group=is_group_chat(chat_name))
-            self._send_text(reply, chat_name)
-            return True
-        # 图片识别失败 → 退回纯文字处理
+        # 降级：vision 失败或任务桥关闭 → 回退纯文字处理
         return self._handle_text(chat_name, sender, text_content, None)
 
 class TianshuController(Controller):
