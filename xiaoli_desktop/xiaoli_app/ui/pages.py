@@ -598,31 +598,13 @@ class CardsPage(QWidget):
         self.ed_nick = QLineEdit()
         self.ed_prompt = QPlainTextEdit()
         self.ed_prompt.setPlaceholderText("角色人格设定（system prompt）")
-        self.cb_chat_provider = QComboBox()
-        self.cb_vision_provider = QComboBox()
-        self.cb_classify_provider = QComboBox()
-        # 模型输入：可编辑下拉（选项来自所选 provider 的 models；未选时展示全部预设模型）
-        self.ed_chat_model = QComboBox()
-        self.ed_chat_model.setEditable(True)
-        self.ed_vision_model = QComboBox()
-        self.ed_vision_model.setEditable(True)
-        self.ed_classify_model = QComboBox()
-        self.ed_classify_model.setEditable(True)
-        self.cb_chat_provider.currentIndexChanged.connect(self._refresh_model_options)
-        self.cb_vision_provider.currentIndexChanged.connect(self._refresh_model_options)
-        self.cb_classify_provider.currentIndexChanged.connect(self._refresh_model_options)
+        # 模型统一在模型页（ModelsPage）编辑，角色卡页不重复提供模型输入框与视觉参数
         self.sp_temp = QDoubleSpinBox()
         self.sp_temp.setRange(0, 2)
         self.sp_temp.setSingleStep(0.1)
         self.sp_topp = QDoubleSpinBox()
         self.sp_topp.setRange(0, 1)
         self.sp_topp.setSingleStep(0.05)
-        self.sp_vtemp = QDoubleSpinBox()
-        self.sp_vtemp.setRange(0, 2)
-        self.sp_vtemp.setSingleStep(0.1)
-        self.sp_vmax = QSpinBox()
-        self.sp_vmax.setRange(1, 100000)
-        self.sp_vmax.setSingleStep(500)
         self.sp_history = QSpinBox()
         self.sp_history.setRange(10, 10000)
         self.sp_history.setSingleStep(50)
@@ -630,23 +612,10 @@ class CardsPage(QWidget):
         form.addRow("表情", self.ed_emoji)
         form.addRow("微信昵称", self.ed_nick)
         form.addRow("人格设定", self.ed_prompt)
-        form.addRow("聊天提供商", self.cb_chat_provider)
-        form.addRow("聊天模型", self.ed_chat_model)
-        form.addRow("视觉提供商", self.cb_vision_provider)
-        form.addRow("视觉模型", self.ed_vision_model)
-        form.addRow("分类提供商", self.cb_classify_provider)
-        form.addRow("分类模型", self.ed_classify_model)
         form.addRow("温度", self.sp_temp)
         form.addRow("top_p", self.sp_topp)
-        form.addRow("视觉温度", self.sp_vtemp)
-        form.addRow("视觉 max_tokens", self.sp_vmax)
         form.addRow("历史条数", self.sp_history)
-        # 用户反馈：聊天/视觉/分类的提供商+模型 6 行冗余（模型页已统一配置），
-        # 隐藏腾出空间给人格设定。控件保留（_collect/_on_select 仍读写，
-        # 不破坏角色卡数据），仅从表单隐藏——QFormLayout.setRowVisible。
-        for _row in range(4, 10):  # 聊天提供商..分类模型 = 第 4~9 行
-            form.setRowVisible(_row, False)
-        # 人格设定撑大：隐藏 6 行后占主导空间。⚠ 不能用固定 min-height 220——
+        # 人格设定撑大：占主导空间。⚠ 不能用固定 min-height 220——
         # 窗口缩小时硬占位会把下方行（温度/top_p）挤出重叠（用户实测「人格设定
         # 下边框和 top_p 重叠」）。改为：小最小高 + Expanding 策略，靠布局伸展
         # 吃剩余空间，窗口缩小时自适应压缩。
@@ -683,19 +652,6 @@ class CardsPage(QWidget):
                 self.list.setCurrentItem(item)
         self.list.blockSignals(False)
 
-    def _reload_providers(self):
-        provs = self.ctx.providers()
-        ids = [p.get("id", "") for p in provs]
-        for cb in (self.cb_chat_provider, self.cb_vision_provider, self.cb_classify_provider):
-            cur = cb.currentData()
-            cb.blockSignals(True)
-            cb.clear()
-            for pid in ids:
-                cb.addItem(pid, pid)
-            if cur in ids:
-                cb.setCurrentIndex(ids.index(cur))
-            cb.blockSignals(False)
-
     # ---------- 事件 ----------
 
     def _on_select(self, cur, _prev):
@@ -705,88 +661,44 @@ class CardsPage(QWidget):
         if card is None:
             return
         self._editing_id = card.get("id")
-        self._reload_providers()
         self.ed_name.setText(card.get("name", ""))
         self.ed_emoji.setText(card.get("emoji", ""))
         self.ed_nick.setText(card.get("nickname", ""))
         self.ed_prompt.setPlainText(card.get("system_prompt", ""))
-        self._set_cb(self.cb_chat_provider, card.get("chat_provider", ""))
-        self._set_cb(self.cb_vision_provider, card.get("vision_provider", ""))
-        self._set_cb(self.cb_classify_provider, card.get("classify_provider", ""))
-        self._refresh_model_options()
-        self.ed_chat_model.setCurrentText(card.get("chat_model", ""))
-        self.ed_vision_model.setCurrentText(card.get("vision_model", ""))
-        self.ed_classify_model.setCurrentText(card.get("classify_model", ""))
         self.sp_temp.setValue(float(card.get("temperature", 0.7)))
         self.sp_topp.setValue(float(card.get("top_p", 0.9)))
-        self.sp_vtemp.setValue(float(card.get("vision_temp", 0.7)))
-        self.sp_vmax.setValue(int(card.get("vision_max_tokens", 10000)))
         self.sp_history.setValue(int(card.get("max_history", 1000)))
 
-    @staticmethod
-    def _set_cb(cb, val):
-        idx = cb.findData(val)
-        cb.setCurrentIndex(idx if idx >= 0 else 0)
-
-    def _refresh_model_options(self, *_):
-        """模型下拉选项 = 对应 provider 的 models；未选 provider 时展示全部预设模型。"""
-        pairs = ((self.ed_chat_model, self.cb_chat_provider),
-                 (self.ed_vision_model, self.cb_vision_provider),
-                 (self.ed_classify_model, self.cb_classify_provider))
-        for cb, cb_prov in pairs:
-            pid = cb_prov.currentData() or ""
-            models = []
-            for p in self.ctx.providers():
-                if p.get("id") == pid:
-                    models = p.get("models") or []
-                    break
-            if not models:
-                models = sorted({m for pp in config_store.PRESET_PROVIDERS
-                                 for m in pp.get("models", [])})
-            cur_text = cb.currentText()
-            cb.blockSignals(True)
-            cb.clear()
-            cb.addItems(models)
-            if cur_text:
-                cb.setCurrentText(cur_text)
-            cb.blockSignals(False)
-
     def _collect(self):
+        # 模型统一在模型页（ModelsPage）编辑，角色卡页不提供模型输入框。
+        # chat_provider/chat_model 沿用卡上既有值；新建卡继承当前活跃配置，
+        # 避免新卡 chat_model 为空导致运行时 400。
+        if self._editing_id:
+            exist = card_store.get_card(self.ctx.cards_dir, self._editing_id) or {}
+        else:
+            exist = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id()) or {}
         card = {
             "id": self._editing_id or "",
             "name": self.ed_name.text().strip(),
             "emoji": self.ed_emoji.text().strip(),
             "nickname": self.ed_nick.text().strip(),
             "system_prompt": self.ed_prompt.toPlainText().strip(),
-            "chat_provider": self.cb_chat_provider.currentData() or "",
-            "chat_model": self.ed_chat_model.currentText().strip(),
-            "vision_provider": self.cb_vision_provider.currentData() or "",
-            "vision_model": self.ed_vision_model.currentText().strip(),
-            "classify_provider": self.cb_classify_provider.currentData() or "",
-            "classify_model": self.ed_classify_model.currentText().strip(),
+            "chat_provider": exist.get("chat_provider", ""),
+            "chat_model": exist.get("chat_model", ""),
             "temperature": self.sp_temp.value(),
             "top_p": self.sp_topp.value(),
-            "vision_temp": self.sp_vtemp.value(),
-            "vision_max_tokens": self.sp_vmax.value(),
             "max_history": self.sp_history.value(),
         }
         return card
 
     def _new_card(self):
         self._editing_id = None
-        self._reload_providers()
         self.ed_name.clear()
         self.ed_emoji.clear()
         self.ed_nick.setText("小漓")
         self.ed_prompt.clear()
-        self.ed_chat_model.clearEditText()
-        self.ed_vision_model.clearEditText()
-        self.ed_classify_model.clearEditText()
-        self._refresh_model_options()
         self.sp_temp.setValue(0.7)
         self.sp_topp.setValue(0.9)
-        self.sp_vtemp.setValue(0.7)
-        self.sp_vmax.setValue(10000)
         self.sp_history.setValue(1000)
 
     def _save_card(self):
@@ -820,6 +732,13 @@ class CardsPage(QWidget):
         except ValueError as e:
             QMessageBox.warning(self, "复制失败", str(e))
             return
+        # 复制卡继承当前活跃配置：原卡模型配置为空时从活跃卡补齐，
+        # 避免新卡 chat_model 为空导致运行时 400。
+        if not dup.get("chat_model") or not dup.get("chat_provider"):
+            act = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id()) or {}
+            dup["chat_provider"] = dup.get("chat_provider") or act.get("chat_provider", "")
+            dup["chat_model"] = dup.get("chat_model") or act.get("chat_model", "")
+            card_store.save_card(self.ctx.cards_dir, dup)
         self.refresh()
         QMessageBox.information(self, "已复制", f"已复制为「{dup['name']}」({dup['id']})")
 
@@ -947,35 +866,22 @@ class ModelsPage(QWidget):
             b.clicked.connect(lambda checked=False, pp=p: self._add_preset(pp))
             preset_row.addWidget(b)
         lay.addLayout(preset_row)
-        # ---- 模型配置区：文字/图片模型独立选择（小白友好）----
-        g_model = QGroupBox("模型配置（文字 / 图片分开选）")
+        # ---- 模型配置区：单模型（聊天），文字/图片不再分开选 ----
+        g_model = QGroupBox("模型配置（聊天）")
         mform = QFormLayout(g_model)
         self.cmb_text_provider = QComboBox()
         self.cmb_text_model = QComboBox()
         self.cmb_text_model.setEditable(True)
-        self.cmb_vision_provider = QComboBox()
-        self.cmb_vision_model = QComboBox()
-        self.cmb_vision_model.setEditable(True)
         row_t = QHBoxLayout()
         row_t.addWidget(self.cmb_text_provider, 1)
         row_t.addWidget(self.cmb_text_model, 2)
-        row_v = QHBoxLayout()
-        row_v.addWidget(self.cmb_vision_provider, 1)
-        row_v.addWidget(self.cmb_vision_model, 2)
         mform.addRow("文字模型（聊天）", row_t)
-        mform.addRow("图片模型（识图）", row_v)
-        tip_model = QLabel("提示：DeepSeek 不支持图片识别，图片模型请选智谱/通义等支持视觉的模型。")
-        tip_model.setWordWrap(True)
-        tip_model.setObjectName("tip")
-        mform.addRow(tip_model)
         self.btn_model_save = QPushButton("保存模型配置")
         self.btn_model_save.clicked.connect(self._save_model_config)
         mform.addRow(self.btn_model_save)
         lay.addWidget(g_model)
         self.cmb_text_provider.currentIndexChanged.connect(
             lambda *_: self._fill_model_options(self.cmb_text_provider, self.cmb_text_model))
-        self.cmb_vision_provider.currentIndexChanged.connect(
-            lambda *_: self._fill_model_options(self.cmb_vision_provider, self.cmb_vision_model))
         lay.addWidget(self.cb_show_key)
         lay.addWidget(self.table)
         lay.addLayout(btn_row)
@@ -998,22 +904,19 @@ class ModelsPage(QWidget):
         """模型配置区：provider 下拉 + 活跃卡当前选择回填。"""
         provs = self.ctx.providers()
         ids = [p.get("id", "") for p in provs]
-        for cb in (self.cmb_text_provider, self.cmb_vision_provider):
-            cur = cb.currentData()
-            cb.blockSignals(True)
-            cb.clear()
-            for pid in ids:
-                cb.addItem(pid, pid)
-            if cur in ids:
-                cb.setCurrentIndex(ids.index(cur))
-            cb.blockSignals(False)
+        cb = self.cmb_text_provider
+        cur = cb.currentData()
+        cb.blockSignals(True)
+        cb.clear()
+        for pid in ids:
+            cb.addItem(pid, pid)
+        if cur in ids:
+            cb.setCurrentIndex(ids.index(cur))
+        cb.blockSignals(False)
         card = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id()) or {}
         self._set_prov(self.cmb_text_provider, ids, card.get("chat_provider", ""))
         self._fill_model_options(self.cmb_text_provider, self.cmb_text_model)
         self.cmb_text_model.setCurrentText(card.get("chat_model", ""))
-        self._set_prov(self.cmb_vision_provider, ids, card.get("vision_provider", ""))
-        self._fill_model_options(self.cmb_vision_provider, self.cmb_vision_model)
-        self.cmb_vision_model.setCurrentText(card.get("vision_model", ""))
 
     @staticmethod
     def _set_prov(cb, ids, val):
@@ -1047,8 +950,6 @@ class ModelsPage(QWidget):
             return
         card["chat_provider"] = self.cmb_text_provider.currentData() or ""
         card["chat_model"] = self.cmb_text_model.currentText().strip()
-        card["vision_provider"] = self.cmb_vision_provider.currentData() or ""
-        card["vision_model"] = self.cmb_vision_model.currentText().strip()
         # providers 表同步落盘：用户在表格添加的 Provider/模型必须在 config.json
         # 持久化，否则重启后 load_config_store 读回旧 providers，添加的模型丢失
         # （用户实测：保存模型配置 → 关掉程序再打开模型没了）

@@ -676,13 +676,11 @@ class AgentBot(WeChatBot):
         with self._model_lock:
             self.system_prompt = card.get("system_prompt", self.system_prompt)
             self.nickname = card.get("nickname") or self.nickname
+            # 单模型化：卡只派生 chat_model（视觉/分类统一走 chat_model，
+            # vision_model/classify_model/vision_temp/vision_max_tokens 已从卡删除）
             self.chat_model = strip_model_prefix(card.get("chat_model") or self.chat_model)
-            self.vision_model = strip_model_prefix(card.get("vision_model") or self.vision_model)
-            self.file_model = strip_model_prefix(card.get("classify_model") or self.file_model)
             self.chat_temperature = float(card.get("temperature", self.chat_temperature))
             self.chat_top_p = float(card.get("top_p", self.chat_top_p))
-            self.vision_temp = float(card.get("vision_temp", self.vision_temp))
-            self.vision_max_tokens = int(card.get("vision_max_tokens", self.vision_max_tokens))
             self.max_history = int(card.get("max_history", self.max_history))
             self.api_url = proj.get("ai_api_url", self.api_url)
             self.api_key = proj.get("ai_api_key", self.api_key)
@@ -690,15 +688,13 @@ class AgentBot(WeChatBot):
             self.vision_api_key = proj.get("vision_api_key", self.vision_api_key)
         logger.info(
             f"[角色卡] 已切换: {card.get('name')} "
-            f"(chat={self.chat_model}, vision={self.vision_model}, temp={self.chat_temperature})"
+            f"(chat={self.chat_model}, temp={self.chat_temperature})"
         )
 
     def _classify_task(self, text):
         if not self.task_enabled:
             return {"is_task": False, "task": ""}
-        # 任务判断用文字模型（chat_model）——classify_model 常为空导致
-        # payload model="" → API 400 → 异常静默降级 is_task=False，
-        # 任务消息全被当聊天处理（用户实测：发两次都当聊天）。
+        # 单模型化后任务判断统一用 chat_model（无独立 classify_model）
         return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
     def _vision_route(self, chat_name, sender, text, img_path=None, msg_id=None,
