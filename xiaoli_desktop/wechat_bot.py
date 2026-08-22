@@ -405,9 +405,10 @@ class WeChatBot:
         唯一参数 content：块列表 list[dict]，格式
           [{"type": "text", "text": ...},
            {"type": "image_url", "image_url": {"url": "data:image/..."}}]
-        图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进唯一一条
-        user 消息；DeepSeek vision 限制：图片只能出现在 user 消息，
-        system/assistant 带图返回 400）。
+        图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
+        消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
+        带图返回 400）。人设（self.system_prompt）前置为 system 纯文本消息
+        （空人设则不插入 system 消息）；图片绝不放 system。
 
         payload 声明 dispatch_task 工具（tool_choice=auto）：模型判定用户消息为
         任务时走 tool_calls 返回，否则返回纯文本描述（上层按 dict 分流）。
@@ -419,7 +420,11 @@ class WeChatBot:
         - 非 200 / 无 choices / content 空白 → None
         """
         headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
-        messages = [{"role": "user", "content": content}]
+        # 方案二：人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
+        # 只能进 user 消息）；persona 为空时不插入空 system 消息（防空消息 400）。
+        persona = (getattr(self, "system_prompt", "") or "").strip()
+        messages = ([{"role": "system", "content": persona}] if persona else []) \
+            + [{"role": "user", "content": content}]
         with self._model_lock:
             # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
             # 空则兜底 vision-exp（防空 model → API 400）
