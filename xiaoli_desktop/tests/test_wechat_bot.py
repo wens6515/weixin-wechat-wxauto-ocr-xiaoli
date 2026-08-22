@@ -369,6 +369,157 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         self.assertEqual(handled, [("哆拉A萝", "@小漓 在吗")],
                          "群聊 @ 消息应正常处理")
 
+
+class TestCallChatAiGroupNameFormat(unittest.TestCase):
+    """群聊名字保真：call_chat_ai 的 decorated 必须含「群聊名+发送者名+内容」
+    （用户原话格式：群聊：XXX XXX：消息内容），私聊保持现有格式不变。
+
+    RED 复现：旧实现 f"群聊 - {sender_name}：{user_msg}" 无群聊名；
+    sender_name 缺失时退化 f"群聊：{user_msg}" 完全无名字。
+    """
+
+    def _make(self):
+        import threading
+
+        import wechat_bot as wb
+
+        bot = wb.WeChatBot.__new__(wb.WeChatBot)
+        bot.api_url = "https://api.test/v1/chat/completions"
+        bot.api_key = "test-key"
+        bot.chat_model = "test-model"
+        bot.chat_temperature = 0.7
+        bot.chat_top_p = 0.9
+        bot.api_retry = 0
+        bot.api_timeout = 5
+        bot.system_prompt = "你是小漓"
+        bot._model_lock = threading.RLock()
+        bot._get_history = lambda chat_id: []
+        bot._add_history = lambda *a, **k: None
+        return bot
+
+    def _user_msg_content(self, bot, **kwargs):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        sent = {}
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            sent["json"] = json
+            return SimpleNamespace(
+                status_code=200,
+                text="{}",
+                json=lambda: {"choices": [{"message": {"content": "ok"}}]},
+            )
+
+        with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
+            reply = bot.call_chat_ai("强盗”集团", "豆包有学生优惠了", **kwargs)
+        self.assertEqual(reply, "ok")
+        return sent["json"]["messages"][-1]["content"]
+
+    def test_group_with_sender(self):
+        bot = self._make()
+        content = self._user_msg_content(
+            bot, sender_name="哆拉A萝", is_group=True)
+        self.assertEqual(content, "群聊：强盗”集团 哆拉A萝：豆包有学生优惠了",
+                         "群聊 decorated 必须为「群聊名+发送者名+内容」")
+
+    def test_group_without_sender_falls_back_chat_name(self):
+        """极端 OCR 失败：sender_name 缺失 → 群聊名兜底并打日志，
+        不退化 f"群聊：{user_msg}" 无名字分支。"""
+        bot = self._make()
+        content = self._user_msg_content(bot, sender_name=None, is_group=True)
+        self.assertEqual(content, "群聊：强盗”集团：豆包有学生优惠了",
+                         "群聊无发送者名时用群聊名兜底，不得退化为无名字")
+
+    def test_private_format_unchanged_with_sender(self):
+        bot = self._make()
+        content = self._user_msg_content(
+            bot, sender_name="王文生", is_group=False)
+        self.assertEqual(content, "私聊 - 王文生：豆包有学生优惠了",
+                         "私聊格式保持现状不变")
+
+    def test_private_format_unchanged_without_sender(self):
+        bot = self._make()
+        content = self._user_msg_content(bot, sender_name=None, is_group=False)
+        self.assertEqual(content, "私聊：豆包有学生优惠了",
+                         "私聊无发送者名时保持现状退化分支不变")
+
+
+class TestGroupMultiSenderText(unittest.TestCase):
+    """群聊 @ 后多条不同发送者消息：text_content 每条必须带各自发送者名
+    （不整批只带最后一条的 sender）。
+
+    RED 复现：旧实现 text_parts 只取 content 合并，多条消息的发送者名
+    全部丢失，AI 只能看到最后一条的 sender。
+    """
+
+    def _run(self, msgs):
+        from unittest import mock as _mock
+
+        from wx_backend.models import MessageType, WeChatMessage
+        from xiaoli_bot import AgentBot
+
+        handled = []
+
+        class FakeWx:
+            _current_is_group = True
+
+            def iter_unread_sessions(self):
+                return iter(["强盗”集团"])
+
+            def analyze_window(self, chat, skip_bot=0):
+                return {"bot_bottom": None, "other_text": [], "other_media": [],
+                        "has_text": True, "has_media": False, "width": 747, "height": 1135}
+
+            def get_messages(self, chat):
+                return [
+                    WeChatMessage(id=m["id"], chat=chat, sender=m["sender"],
+                                  content=m["content"], type=MessageType.TEXT)
+                    for m in msgs
+                ]
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.paused = False
+        bot._sending_lock = False
+        bot.last_reply_time = 0.0
+        bot.cooldown = 0.0
+        bot.wx = FakeWx()
+        bot.nickname = "小漓"
+        bot._pending_files = {}
+        bot._pending_placeholders = {}
+        bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 10
+        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+            handled.append((sender, content))
+        with _mock.patch("xiaoli_bot.should_resume_listen",
+                         return_value=(True, False, None)), \
+             _mock.patch.object(bot, "_tick_poll_outbox"):
+            bot.process_new_messages()
+        return handled
+
+    def test_multi_sender_each_keeps_name(self):
+        """多条不同发送者 @ 消息：合并文本每条带各自发送者名。"""
+        handled = self._run([
+            {"id": "v1", "sender": "哆拉A萝", "content": "豆包有学生优惠了 @小漓"},
+            {"id": "v2", "sender": "王五", "content": "真的假的 @小漓"},
+        ])
+        self.assertEqual(len(handled), 1)
+        self.assertEqual(handled[0][0], "王五", "sender 应为最后一条消息的发送者")
+        self.assertIn("哆拉A萝：豆包有学生优惠了", handled[0][1],
+                      "第一条消息必须带自己的发送者名")
+        self.assertIn("王五：真的假的", handled[0][1],
+                      "第二条消息必须带自己的发送者名")
+
+    def test_single_msg_no_repeated_sender(self):
+        """单条 @ 消息：text_content 不带 sender 前缀（decorated 负责带
+        sender_name），避免「发送者名：发送者名：内容」重复。"""
+        handled = self._run([
+            {"id": "v1", "sender": "哆拉A萝", "content": "@小漓 在吗"},
+        ])
+        self.assertEqual(handled, [("哆拉A萝", "@小漓 在吗")])
+
     def test_group_emoji_is_skipped(self):
         """群聊表情消息（EMOJI）不处理——即使 @ 了小漓也不读表情。"""
         from unittest import mock as _mock

@@ -1168,10 +1168,18 @@ class AgentBot(WeChatBot):
             (m.content.strip() for m in window_msgs if _looks_like_file_text(m.content)),
             None)
         # 文字部分（排除文件名的 OCR 文本）
-        text_parts = [
-            m.content.strip() for m in window_msgs
+        text_candidates = [
+            m for m in window_msgs
             if m.content.strip() and not _looks_like_file_text(m.content)
         ]
+        if len(text_candidates) > 1:
+            # 多发送者合并：每条带各自发送者名（群聊名兜底，不整批只带最后一条）
+            text_parts = [
+                f"{m.sender or chat_name}：{m.content.strip()}"
+                for m in text_candidates
+            ]
+        else:
+            text_parts = [m.content.strip() for m in text_candidates]
         text_content = "\n".join(text_parts)
         has_media = bool(win.get("has_media"))
         # sender 关联：该发送者之前发过文件、现在发来文字指令

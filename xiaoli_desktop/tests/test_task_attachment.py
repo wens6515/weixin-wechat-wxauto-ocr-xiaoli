@@ -570,3 +570,36 @@ class TestRouteVisionResultHook(unittest.TestCase):
         bot._route_vision_result("小明", "王", result, img_path=None)
         self.assertEqual(len(dispatched), n_via_route + 1,
                          "hook 应复用与 _vision_route 相同的投递路径")
+
+
+class TestGroupNameChain(unittest.TestCase):
+    """群聊名字全链路保真：process_new_messages → _handle_unread_session →
+    _handle_text → call_chat_ai(sender_name=发送者名)。
+
+    RED 复现：历史缺陷 sender 在 _window_msgs 过滤/合并中丢失或回落群聊名，
+    call_chat_ai 的 decorated 退化 f"群聊：{user_msg}" 无任何名字。
+    """
+
+    def test_group_at_msg_sender_reaches_call_chat_ai(self):
+        """群聊 @小漓 消息：发送者名必须作为 sender_name 传到 call_chat_ai，
+        is_group=True（decorated 走群聊格式）。"""
+        bot = _make_bot()
+        bot.wx = _FakeWx([_text_msg("哆拉A萝", "豆包有学生优惠了 @小漓", "m1")])
+        bot.wx._current_is_group = True
+        bot._tick_poll_outbox = lambda: None
+        bot.call_vision_api = lambda content: None  # vision 降级 → 回退 call_chat_ai
+        calls = {}
+        bot.call_chat_ai = lambda chat_id, user_msg, sender_name=None, is_group=False: \
+            calls.update(chat_id=chat_id, user_msg=user_msg,
+                         sender_name=sender_name, is_group=is_group) or "ok"
+        bot._add_history = lambda *a, **k: None
+        bot._send_text = lambda *a, **k: None
+        with mock.patch("xiaoli_bot.should_resume_listen",
+                        return_value=(True, False, None)):
+            bot.process_new_messages()
+        self.assertEqual(calls.get("chat_id"), "小明")
+        self.assertEqual(calls.get("user_msg"), "豆包有学生优惠了")
+        self.assertEqual(calls.get("sender_name"), "哆拉A萝",
+                         "发送者名必须传到 call_chat_ai")
+        self.assertTrue(calls.get("is_group"),
+                        "群聊消息 is_group 必须为 True（decorated 走群聊格式）")

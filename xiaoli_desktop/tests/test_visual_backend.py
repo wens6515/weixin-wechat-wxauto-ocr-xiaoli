@@ -24,6 +24,7 @@ from wx_backend import (
 )
 from wx_backend.visual_backend import (
     VisualBackend,
+    _bucket_avatar,
     _norm_cjk,
     ocr_image,
     region_changed,
@@ -35,6 +36,13 @@ from wx_backend.visual_backend import (
     find_window_by_title,
     window_rect,
 )
+
+# 真实群聊截图 fixture（.rivet/scratch/probe_group/，tools 探针抓取）
+_FIXTURE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    ".rivet", "scratch", "probe_group")
+_REGION_1X = os.path.join(_FIXTURE_DIR, "region_1x.png")
+_OCR_CACHE = os.path.join(_FIXTURE_DIR, "ocr_cache.json")
 from wx_backend.models import MessageType
 
 
@@ -1204,6 +1212,230 @@ class TestWindowLookup(unittest.TestCase):
             self.assertTrue(ensure_window_visible(0x222))  # 非最小化 → 不调用 ShowWindow
             show.assert_not_called()
         self.assertFalse(ensure_window_visible(None))
+
+
+# ---- 头像划块归属（_bucket_avatar） ----
+
+
+class TestAvatarBucket(unittest.TestCase):
+    """头像划块：消息框顶部落入排序头像边界序列的哪个区间，归属该区间头像。"""
+
+    def test_interval_membership(self):
+        tops = [38, 801]
+        self.assertEqual(_bucket_avatar(38, tops), 38)    # 区间下边界自身
+        self.assertEqual(_bucket_avatar(400, tops), 38)   # [38, 801) → 38
+        self.assertEqual(_bucket_avatar(800, tops), 38)   # 边界前最后一头像
+        self.assertEqual(_bucket_avatar(801, tops), 801)  # [801, ∞) → 801
+        self.assertEqual(_bucket_avatar(2000, tops), 801)
+
+    def test_below_first_returns_none(self):
+        self.assertIsNone(_bucket_avatar(29, [38, 801]))
+        self.assertIsNone(_bucket_avatar(37, [38, 801]))
+
+    def test_unsorted_and_duplicates(self):
+        self.assertEqual(_bucket_avatar(100, [801, 38, 38]), 38)
+        self.assertEqual(_bucket_avatar(900, [801, 38]), 801)
+
+    def test_empty_tops(self):
+        self.assertIsNone(_bucket_avatar(100, []))
+
+
+# ---- _in_media：媒体框内文字剔除（图片/文件只产 1 条媒体消息） ----
+
+
+class TestGetMessagesInMedia(unittest.TestCase):
+    """media 框内 OCR 文字不得拆成假文字消息；紧贴框顶的发送者名被吞掉。
+
+    真实群聊缺陷（region_1x.png）：图片块内文字 '我不是'/'大肥鱼' 被 OCR
+    读出后拆出 sender='我不是' 的假消息；发送者名 '王文生' 紧贴图片框顶，
+    不得成为独立文字消息——图片消息只产 1 条（由 analyze_window 媒体框承载）。
+    """
+
+    def _backend(self):
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        return b
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window",
+                return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((400, 300), (30, 30, 31)))
+    @mock.patch("wx_backend.visual_backend.ocr_image_sharded")
+    @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
+    @mock.patch("wx_backend.visual_backend.find_media_boxes")
+    def test_media_text_dropped_and_name_consumed(self, _media, _tops, _ocr,
+                                                  _cap, _find, _switch):
+        """1x 坐标：左头像 top=100、右头像 top=30；media 框 (150,250,40,160)
+        顶部 150 落入左头像 100 的区间 → 对方媒体框。
+        发送者名 '王文生'（2x y=280）紧贴 media 框顶（2x y=300）→ 被吞掉。
+        media 框内 '我不是'/'大肥鱼'（2x y=320/360）→ 剔除不产消息。"""
+        _tops.side_effect = lambda img, bg, side: [100] if side == "left" else [30]
+        _media.return_value = [(150, 250, 40, 160)]
+        _ocr.return_value = [
+            {"text": "王文生", "x": 50, "y": 280, "w": 50, "h": 20},
+            {"text": "我不是", "x": 100, "y": 320, "w": 60, "h": 20},
+            {"text": "大肥鱼", "x": 100, "y": 360, "w": 60, "h": 20},
+        ]
+        b = self._backend()
+        with mock.patch.object(b, "read_title", return_value="王文生"):
+            msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 0,
+                         "图片块文字（含发送者名行）不得拆成文字消息")
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window",
+                return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((400, 300), (30, 30, 31)))
+    @mock.patch("wx_backend.visual_backend.ocr_image_sharded")
+    @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
+    @mock.patch("wx_backend.visual_backend.find_media_boxes")
+    def test_text_outside_media_kept(self, _media, _tops, _ocr,
+                                     _cap, _find, _switch):
+        """media 框外的正常文字消息不受影响（仍产消息）。"""
+        _tops.side_effect = lambda img, bg, side: [100] if side == "left" else [30]
+        _media.return_value = [(150, 250, 40, 160)]
+        _ocr.return_value = [
+            # 正常文字（2x y=210，1x=105 落入左头像 100 区间 → 对方消息；
+            # 长度 >8 字符避免触发发送者名候选逻辑——真实短消息在气泡框内）
+            {"text": "这是一条正常的文字消息", "x": 100, "y": 210,
+             "w": 200, "h": 20},
+            # media 框 2x (300,500,80,320) 内文字 → 剔除
+            {"text": "我不是", "x": 100, "y": 320, "w": 60, "h": 20},
+        ]
+        b = self._backend()
+        with mock.patch.object(b, "read_title", return_value="王文生"):
+            msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 1, "media 框外文字消息应保留")
+        self.assertEqual(msgs[0].content, "这是一条正常的文字消息")
+        b.close()
+
+
+# ---- analyze_window：头像划块归属（替换 tol=40 _aligned 对齐） ----
+
+
+class TestAnalyzeWindowAvatarBucket(unittest.TestCase):
+    """气泡/media 框顶落入头像边界序列区间归属对方；bot 长气泡不误判对方。
+
+    几何坐标与真实 fixture region_1x.png 一致：bot 头像 top=38、
+    对方头像 top=801、bot 长气泡 (38,765)、对方气泡 (869,928)、
+    王文生图片块 media (838,1117)。"""
+
+    def _backend(self):
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        return b
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh")
+    @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
+    @mock.patch("wx_backend.visual_backend.find_bubble_boxes")
+    @mock.patch("wx_backend.visual_backend.find_media_boxes")
+    def test_bucket_assigns_other_boxes(self, _media, _bubbles, _tops,
+                                        _refresh, _switch):
+        _refresh.return_value = _solid((747, 1135), (30, 30, 31))
+        _tops.side_effect = lambda img, bg, side: [38] if side == "right" else [801]
+        _bubbles.return_value = [
+            (38, 765, 131, 621, True),    # bot 长气泡（顶 = bot 头像顶 38）
+            (869, 928, 140, 229, False),  # 对方气泡（顶落入对方头像 801 区间）
+        ]
+        _media.return_value = [(838, 1117, 119, 398)]  # 王文生图片块
+        b = self._backend()
+        win = b.analyze_window("王文生")
+        self.assertEqual(win["other_text"], [(869, 928, 140, 229)],
+                         "对方气泡按头像划块归属；bot 长气泡不得误判对方")
+        self.assertEqual(win["other_media"], [(838, 1117, 119, 398)],
+                         "图片块只产 1 条媒体框")
+        self.assertTrue(win["has_text"] and win["has_media"] and win["has_other"])
+        self.assertEqual(win["bot_bottom"], 801,
+                         "最后 bot 头像之后的下一个头像 top")
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh")
+    @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
+    @mock.patch("wx_backend.visual_backend.find_bubble_boxes")
+    @mock.patch("wx_backend.visual_backend.find_media_boxes")
+    def test_no_other_when_only_bot(self, _media, _bubbles, _tops,
+                                    _refresh, _switch):
+        """只有 bot 消息（无对方头像）→ has_other=False，other_* 为空。"""
+        _refresh.return_value = _solid((747, 1135), (30, 30, 31))
+        _tops.side_effect = lambda img, bg, side: [38] if side == "right" else []
+        _bubbles.return_value = [(38, 765, 131, 621, True)]
+        _media.return_value = []
+        b = self._backend()
+        win = b.analyze_window("王文生")
+        self.assertFalse(win["has_other"])
+        self.assertEqual(win["other_text"], [])
+        self.assertEqual(win["other_media"], [])
+        b.close()
+
+
+# ---- 真实群聊截图 fixture 集成验证 ----
+
+
+class TestRealFixtureRegion(unittest.TestCase):
+    """region_1x.png（真实群聊截图）+ 真实 OCR 引擎缓存 的集成验证。
+
+    几何检测（头像/气泡/media）在真实像素上真跑，OCR 文本用真实引擎输出
+    缓存（ocr_cache.json）——确定性且不引入 ~9s OCR 延迟。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not (os.path.exists(_REGION_1X) and os.path.exists(_OCR_CACHE)):
+            raise unittest.SkipTest(
+                "fixture 缺失：.rivet/scratch/probe_group/ 下需 region_1x.png "
+                "与 ocr_cache.json（tools 探针抓取）")
+        import json
+        with open(_OCR_CACHE, encoding="utf-8") as f:
+            cls.ocr_items = json.load(f)
+
+    def test_get_messages_no_fake_media_text(self):
+        """王文生图片块不拆假文字消息：无 sender='我不是'、无图片内文字；
+        我方超长气泡 sender='self'。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        img = Image.open(_REGION_1X)
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+                mock.patch.object(b, "read_title", return_value="王文生"), \
+                mock.patch.object(b, "_refresh", return_value=img), \
+                mock.patch("wx_backend.visual_backend.ocr_image_sharded",
+                           return_value=self.ocr_items):
+            msgs = b.get_messages("王文生")
+        self.assertEqual(len(msgs), 1,
+                         "图片块文字被剔除后只剩我方超长气泡一条")
+        self.assertEqual(msgs[0].sender, "self", "我方超长气泡 sender='self'")
+        contents = " ".join(m.content for m in msgs)
+        for noise in ("我不是", "你这吃白饭的", "蓝色大肥鱼"):
+            self.assertNotIn(noise, contents,
+                             f"media 框内文字 {noise!r} 不得成为消息")
+        b.close()
+
+    def test_analyze_window_media_single(self):
+        """图片块只产 1 条媒体消息（other_media 恰 1 框）；对方气泡 1 条。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        img = Image.open(_REGION_1X)
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+                mock.patch.object(b, "_refresh", return_value=img):
+            win = b.analyze_window("王文生")
+        self.assertEqual(win["other_media"], [(838, 1117, 119, 398)],
+                         "王文生图片块只产 1 条媒体框")
+        self.assertEqual(win["other_text"], [(869, 928, 140, 229)])
+        self.assertTrue(win["has_media"] and win["has_other"])
+        self.assertEqual(win["bot_bottom"], 801)
+        b.close()
 
 
 if __name__ == "__main__":
