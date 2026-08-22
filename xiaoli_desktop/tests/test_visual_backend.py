@@ -795,6 +795,99 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(win["bot_bottom"], 490,
                          "bot_bottom = 下一条消息头像 top（几何）")
 
+    def test_analyze_window_skip_bot_zero_equals_old(self):
+        """skip_bot=0 时 last_bot_top = max(bot_tops)，与旧行为完全一致：
+        bot_bottom = 最后一条 bot 头像之后第一条消息上边框。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [50, 200, 350] if side == "right" else [100, 400]
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
+            win = b.analyze_window("王文生", skip_bot=0)
+        self.assertEqual(win["bot_bottom"], 400,
+                         "skip_bot=0 时 bot_bottom = max(bot_tops)=350 之后第一条消息 top")
+
+    def test_analyze_window_skip_bot_one_skips_last_bot(self):
+        """skip_bot=1 时 last_bot_top = sorted(bot_tops)[-2]（跳过最近一条 bot
+        占位回复），other_new_tops 随之上移。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [50, 200, 350] if side == "right" else [100, 400]
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
+            win = b.analyze_window("王文生", skip_bot=1)
+        self.assertEqual(win["bot_bottom"], 350,
+                         "skip_bot=1 取 sorted(bot_tops)[-2]=200，之后第一条消息 top=350")
+        self.assertEqual(win["other_text"], [],
+                         "100 在 last_bot_top=200 之前，不再算对方新消息")
+        self.assertTrue(win["has_other"],
+                        "400 在 last_bot_top=200 之后保留，other_new_tops 随之上移")
+
+    def test_analyze_window_skip_bot_boundary_clamp(self):
+        """bot_tops 不足时 skip = min(skip_bot, len(bot_tops)-1) 兜底不越界：
+        仅 1 条 bot 时传 skip_bot=5，skip 收敛到 0，等效旧行为（不越界）。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [200] if side == "right" else [300]
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
+            win = b.analyze_window("王文生", skip_bot=5)
+        self.assertEqual(win["bot_bottom"], 300,
+                         "skip 兜底到 0，last_bot_top=max(bot_tops)=200，之后第一条消息 top=300")
+
+    def test_analyze_window_skip_bot_empty_bot_tops(self):
+        """bot_tops 为空时维持现状：bot_bottom=None，即使传 skip_bot>0。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [] if side == "right" else [100]
+
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
+            win = b.analyze_window("王文生", skip_bot=2)
+        self.assertIsNone(win["bot_bottom"],
+                          "无 bot 回复时 bot_bottom 维持 None")
+        self.assertTrue(win["has_other"],
+                        "无 bot 时对方消息全部算新消息")
+
     def test_detect_avatar_tops_geometry(self):
         """detect_avatar_tops 真实实现：窄带非背景块标出头像顶部 y，
         高度超标的块（如滚动条）被丢弃，bg=None 返回空。"""

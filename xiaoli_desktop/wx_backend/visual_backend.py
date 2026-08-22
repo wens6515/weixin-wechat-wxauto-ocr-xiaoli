@@ -1497,7 +1497,8 @@ class VisualBackend:
         return [(msg_l + (l + r) // 2, msg_t + (t + b) // 2)
                 for (t, b, l, r) in boxes]
 
-    def analyze_window(self, chat: str, foreground: bool = True) -> dict:
+    def analyze_window(self, chat: str, foreground: bool = True,
+                       skip_bot: int = 0) -> dict:
         """切会话 + 截图 + 气泡/媒体分析，返回窗口内消息结构（不 OCR 文字）。
 
         供上层先判断「窗口内是否只有文字」还是「有图/文件」，再决定
@@ -1506,6 +1507,12 @@ class VisualBackend:
         bot 消息判定：头像几何（右侧窄带非背景块=bot 头像，左侧=对方头像）。
         无需头像模板、无需绿气泡色、无需宽度阈值——头像大小/位置固定，
         对方长文字/文件即使右边缘靠右也不会被误判为 bot。
+
+        skip_bot：跳过最近 N 条 bot 消息再定位 bot_bottom（占位回复剔除）。
+        跳过的是 bot 头像序列里最新的 N 条，即 last_bot_top 取
+        sorted(bot_tops)[-(1 + skip_bot)]；skip_bot=0 时恒等于 max(bot_tops)，
+        与旧行为完全一致。越界时 skip 收敛到 len(bot_tops)-1 兜底不越界。
+        other_text / other_media / has_other 随新的 last_bot_top 上移。
 
         返回 dict：
         {
@@ -1556,6 +1563,15 @@ class VisualBackend:
             # find_bubble_boxes 检测 bot 气泡算 bottom——气泡色漂移会导致
             # bot 气泡漏检、bot_bottom 偏小或为 None，漏掉对方新消息）。
             last_bot_top = max(bot_tops) if bot_tops else None
+            # skip_bot：跳过最近 N 条 bot 消息（占位回复剔除）。last_bot_top
+            # 取 sorted(bot_tops)[-(1+skip)]——skip=0 时恒等于 max(bot_tops)，
+            # 与旧行为一致；skip 先做 min(skip_bot, len(bot_tops)-1) 兜底，
+            # bot_tops 不足时不越界。other_new_tops 等随后续 last_bot_top 上移。
+            if bot_tops:
+                skip = min(skip_bot, len(bot_tops) - 1)
+                last_bot_top = sorted(bot_tops)[-(1 + skip)]
+            else:
+                last_bot_top = None
             if last_bot_top is not None:
                 all_tops = sorted(set(bot_tops) | set(other_tops))
                 after = [t for t in all_tops if t > last_bot_top]
