@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -38,7 +39,7 @@ class _FakeWx:
     def iter_unread_sessions(self):
         return iter(["小明"])
 
-    def analyze_window(self, chat):
+    def analyze_window(self, chat, foreground=True, skip_bot=0):
         return {
             "bot_bottom": self._bot_bottom,
             "other_text": [],
@@ -63,11 +64,15 @@ def _make_bot(recv_dir=""):
     bot._task_end_time = None
     bot._listen_hold_seconds = 2
     bot._pending_files = {}
+    bot._pending_placeholders = {}
     bot._last_poll_time = 0
     bot.tianshu_poll_interval = 5
     bot.last_reply_time = 0
     bot.cooldown = 3
     bot.file_storage_path = recv_dir
+    bot.tianshu_window_title = ""
+    bot.tianshu_trigger_command = "开始处理"
+    bot.wx = object()  # 仅用于 _handle_text 的 is_group 探测（无 _current_is_group → 回退标题判定）
     return bot
 
 
@@ -85,7 +90,9 @@ class TestTextTaskNoAttachment(unittest.TestCase):
             bot = _make_bot(recv_dir=recv_dir)
             bot.wx = _FakeWx([_text_msg("王", "根据文档做个网站", "m1")])
             bot._tick_poll_outbox = lambda: None
-            bot._classify_task = lambda t: {"is_task": True, "task": "做个网站"}
+            bot.call_vision_api = lambda content: {"kind": "tool_call",
+                                                   "name": "dispatch_task",
+                                                   "arguments": '{"task": "做个网站"}'}
             dispatched = []
             bot._dispatch_and_notify = lambda *a, **k: dispatched.append(
                 k.get("attachment_paths"))
@@ -104,7 +111,9 @@ class TestTextTaskNoAttachment(unittest.TestCase):
         bot = _make_bot()
         bot.wx = _FakeWx([_text_msg("王", "帮我做个PPT", "m2")])
         bot._tick_poll_outbox = lambda: None
-        bot._classify_task = lambda t: {"is_task": True, "task": "做PPT"}
+        bot.call_vision_api = lambda content: {"kind": "tool_call",
+                                               "name": "dispatch_task",
+                                               "arguments": '{"task": "做PPT"}'}
         dispatched = []
         bot._dispatch_and_notify = lambda *a, **k: dispatched.append(
             k.get("attachment_paths"))
@@ -156,8 +165,9 @@ class TestFileTaskClassifyInput(unittest.TestCase):
         闲聊。RED 复现：旧实现传纯指令，文件名丢失。"""
         bot = _make_bot()
         got = []
-        bot._classify_task = lambda t: got.append(t) or {
-            "is_task": True, "task": "做网页"}
+        bot.call_vision_api = lambda content: got.append(content) or {
+            "kind": "tool_call", "name": "dispatch_task",
+            "arguments": '{"task": "做网页"}'}
         bot._dispatch_and_notify = lambda *a, **k: None
         bot._send_text = lambda *a, **k: None
         bot._add_history = lambda *a, **k: None
@@ -165,9 +175,12 @@ class TestFileTaskClassifyInput(unittest.TestCase):
             "小明", "王", r"D:\recv\部门简介+纳新宣传(6).docx",
             "部门简介+纳新宣传(6).docx",
             "把这个做成一个赛博朋克风格的网页")
-        self.assertEqual(
-            got,
-            ["[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页"])
+        self.assertEqual(len(got), 1)
+        text_block = got[0][0]
+        self.assertEqual(text_block["type"], "text")
+        self.assertIn(
+            "[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页",
+            text_block["text"])
 
 
 class TestImageMediaDrive(unittest.TestCase):
@@ -252,7 +265,9 @@ class TestFileTaskNoFileText(unittest.TestCase):
         task.json 里出现多余的 file_text 字段）。"""
         bot = _make_bot()
         dispatched = []
-        bot._classify_task = lambda t: {"is_task": True, "task": "做网页"}
+        bot.call_vision_api = lambda content: {"kind": "tool_call",
+                                               "name": "dispatch_task",
+                                               "arguments": '{"task": "做网页"}'}
         bot._dispatch_and_notify = lambda *a, **k: dispatched.append(k)
         bot._add_history = lambda *a, **k: None
         bot._send_text = lambda *a, **k: None
@@ -288,3 +303,270 @@ class TestFileTaskNoFileText(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(recv_dir, ignore_errors=True)
+
+
+class TestPlaceholderFlag(unittest.TestCase):
+    """占位回复接线：占位类发送（'收到任务啦…' / '天枢窗口没找到…'）必须传
+    placeholder=True（计数 +1），且只发生在 _dispatch_and_notify 这两处。"""
+
+    def _dispatch(self, bot, trigger_ok=True):
+        sent = []
+        bot._send_text = lambda *a, **k: sent.append((a, k))
+        with mock.patch("xiaoli_bot.dispatch_task", return_value="T1"), \
+             mock.patch("xiaoli_app.config_store.grant_tasks_dir_to_tianshu"), \
+             mock.patch("xiaoli_app.setup.resolve_cli_window",
+                        return_value=("天枢", "")), \
+             mock.patch("xiaoli_bot.send_trigger_to_window",
+                        return_value=trigger_ok):
+            bot._dispatch_and_notify("小明", "王", "做个网站",
+                                     extra={"msg_id": "m1"})
+        return sent
+
+    def test_dispatch_placeholder_flag(self):
+        """'收到任务啦，正在处理中，稍等一下哦～' 必须传 placeholder=True。"""
+        bot = _make_bot()
+        sent = self._dispatch(bot, trigger_ok=True)
+        self.assertTrue(
+            any("收到任务啦" in a[0] and k.get("placeholder") is True
+                for a, k in sent),
+            f"占位回复必须传 placeholder=True，实际: {sent}")
+
+    def test_window_not_found_placeholder_flag(self):
+        """'天枢窗口没找到，不过任务已经记下了…' 同样传 placeholder=True。"""
+        bot = _make_bot()
+        sent = self._dispatch(bot, trigger_ok=False)
+        self.assertEqual(
+            [k.get("placeholder") for a, k in sent], [True, True],
+            f"两处占位发送都必须传 placeholder=True，实际: {sent}")
+
+
+class TestVisionRoute(unittest.TestCase):
+    """vision-exp 单调用分流：tool_call → 投递（不回复）；text → 直接回复；
+    None → 降级回退。"""
+
+    def _bot(self):
+        bot = _make_bot()
+        bot.call_vision_api = lambda content: {"kind": "text", "content": "好的"}
+        bot._dispatch_and_notify = lambda *a, **k: None
+        bot._add_history = lambda *a, **k: None
+        bot.call_chat_ai = lambda *a, **k: "降级回复"
+        bot._send_text = lambda *a, **k: None
+        return bot
+
+    def test_tool_call_dispatches_no_reply(self):
+        """kind=tool_call → 投递天枢（纯文字任务 attachment_paths=None），
+        且不发送任何回复文本。"""
+        bot = self._bot()
+        bot.call_vision_api = lambda content: {"kind": "tool_call",
+                                               "name": "dispatch_task",
+                                               "arguments": '{"task": "做个网站"}'}
+        dispatched, sent = [], []
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
+        bot._send_text = lambda *a, **k: sent.append((a, k))
+        bot._handle_text("小明", "王", "根据文档做个网站", "m1")
+        self.assertEqual(len(dispatched), 1)
+        a, k = dispatched[0]
+        self.assertEqual((a[0], a[1], a[2]), ("小明", "王", "做个网站"))
+        self.assertIsNone(k["attachment_paths"], "纯文字任务不得带附件")
+        self.assertEqual(k["extra"]["msg_id"], "m1")
+        self.assertEqual(k["extra"]["raw_message"], "根据文档做个网站")
+        self.assertEqual(sent, [], "tool_call 分支不发送任何回复文本")
+
+    def test_text_reply_sent(self):
+        """kind=text → 直接回复（实质回复，不传 placeholder → 归零）。"""
+        bot = self._bot()
+        sent = []
+        bot._send_text = lambda *a, **k: sent.append((a, k))
+        bot._handle_text("小明", "王", "在吗", None)
+        self.assertEqual(sent, [(("好的", "小明"), {})])
+
+    def test_none_falls_back_to_chat(self):
+        """call_vision_api 返回 None（API 失败）→ 降级回退普通聊天回复。"""
+        bot = self._bot()
+        bot.call_vision_api = lambda content: None
+        sent = []
+        bot._send_text = lambda *a, **k: sent.append((a, k))
+        bot._handle_text("小明", "王", "在吗", None)
+        self.assertEqual(sent, [(("降级回复", "小明"), {})])
+
+    def test_image_with_text_content_blocks(self):
+        """图片+文字：content 块 = text + image_url(data:image base64)，
+        一次 vision 调用完成判断+回复。"""
+        bot = self._bot()
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.write(b"fake-jpeg-bytes")
+        tmp.close()
+        got = []
+        bot.call_vision_api = lambda content: got.append(content) or {
+            "kind": "text", "content": "看到了"}
+        bot._capture_latest_image = lambda chat: tmp.name
+        try:
+            bot._handle_image_with_text("小明", "王", "这是什么")
+        finally:
+            os.unlink(tmp.name)
+        self.assertEqual(len(got), 1)
+        content = got[0]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[1]["type"], "image_url")
+        url = content[1]["image_url"]["url"]
+        self.assertTrue(url.startswith("data:image/jpeg;base64,"))
+        import base64 as _b64
+        self.assertEqual(_b64.b64decode(url.split(",", 1)[1]),
+                         b"fake-jpeg-bytes")
+
+    def test_image_text_none_falls_back_to_text(self):
+        """图片+文字 vision 失败（None）→ 降级回退纯文字处理（保持现状）。"""
+        bot = self._bot()
+        bot.call_vision_api = lambda content: None
+        bot._capture_latest_image = lambda chat: None
+        handled = []
+        bot._handle_text = lambda chat, sender, content, msg_id=None: \
+            handled.append(content)
+        bot._handle_image_with_text("小明", "王", "在吗")
+        self.assertEqual(handled, ["在吗"])
+
+
+class TestSkipBotPassing(unittest.TestCase):
+    """analyze_window 必须传 skip_bot=_pending_placeholders[chat]（占位计数
+    跳过），按 chat_name 隔离、无记录时默认 0（等价旧行为）。"""
+
+    def _run(self, bot, chat_msgs, pending):
+        bot._pending_placeholders = pending
+        seen = []
+
+        class Wx(_FakeWx):
+            def analyze_window(self, chat, foreground=True, skip_bot=0):
+                seen.append((chat, skip_bot))
+                return super().analyze_window(chat)
+
+        bot.wx = Wx(chat_msgs)
+        bot._tick_poll_outbox = lambda: None
+        bot.call_vision_api = lambda content: {"kind": "tool_call",
+                                               "name": "dispatch_task",
+                                               "arguments": '{"task": "做个网站"}'}
+        bot._dispatch_and_notify = lambda *a, **k: None
+        bot._add_history = lambda *a, **k: None
+        bot.call_chat_ai = lambda *a, **k: "ok"
+        bot._send_text = lambda *a, **k: None
+        bot.process_new_messages()
+        return seen
+
+    def test_skip_bot_passed_from_placeholders(self):
+        """_pending_placeholders['小明']=2 → analyze_window 收到 skip_bot=2
+        （占位回复从窗口边界剔除）。"""
+        bot = _make_bot()
+        seen = self._run(bot, [_text_msg("王", "根据文档做个网站", "m1")],
+                         {"小明": 2, "小红": 1})
+        self.assertTrue(any(chat == "小明" and skip == 2
+                            for chat, skip in seen),
+                        f"应传 skip_bot=2，实际: {seen}")
+
+    def test_skip_bot_zero_default(self):
+        """无占位记录 → skip_bot=0（与旧行为完全一致）。"""
+        bot = _make_bot()
+        seen = self._run(bot, [_text_msg("王", "你好", "m1")], {})
+        self.assertTrue(any(chat == "小明" and skip == 0
+                            for chat, skip in seen),
+                        f"默认 skip_bot=0，实际: {seen}")
+
+
+class TestRouteVisionResultHook(unittest.TestCase):
+    """AgentBot 覆写 _route_vision_result：纯图路径（_process_image 系列）vision
+    单调用结果分流——tool_call → 投递天枢（带图附件）；text → 直接回复；None →
+    降级。复用 _vision_route 分流核心（提取公共方法），hook 签名逐字对齐
+    (self, chat_name, sender, result, img_path=None)。"""
+
+    def _bot(self):
+        bot = _make_bot()
+        bot._add_history = lambda *a, **k: None
+        bot._send_text = lambda *a, **k: None
+        return bot
+
+    def test_tool_call_dispatches_with_img_attachment(self):
+        """tool_call + dispatch_task → 投递天枢（attachment_paths=[img_path]），
+        不发送任何回复文本。"""
+        bot = self._bot()
+        dispatched, sent = [], []
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
+        bot._send_text = lambda *a, **k: sent.append((a, k))
+        ret = bot._route_vision_result(
+            "小明", "王",
+            {"kind": "tool_call", "name": "dispatch_task",
+             "arguments": '{"task": "根据这张图做网站"}'},
+            img_path=r"D:\tmp\shot.jpg")
+        self.assertTrue(ret)
+        self.assertEqual(len(dispatched), 1)
+        a, k = dispatched[0]
+        self.assertEqual((a[0], a[1], a[2]), ("小明", "王", "根据这张图做网站"))
+        self.assertEqual(k["attachment_paths"], [r"D:\tmp\shot.jpg"],
+                         "纯图任务必须带截图附件投递")
+        self.assertEqual(sent, [], "tool_call 分支不发送任何回复文本")
+
+    def test_tool_call_no_img_no_attachment(self):
+        """tool_call 但无 img_path → attachment_paths=None（不产生假附件）。"""
+        bot = self._bot()
+        dispatched = []
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
+        ret = bot._route_vision_result(
+            "小明", "王",
+            {"kind": "tool_call", "name": "dispatch_task",
+             "arguments": '{"task": "做PPT"}'},
+            img_path=None)
+        self.assertTrue(ret)
+        self.assertIsNone(dispatched[0][1]["attachment_paths"])
+
+    def test_tool_call_json_fail_falls_back_raw(self):
+        """arguments 非 JSON → task 降级用 arguments 原文（不丢失任务信息）。"""
+        bot = self._bot()
+        dispatched = []
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
+        ret = bot._route_vision_result(
+            "小明", "王",
+            {"kind": "tool_call", "name": "dispatch_task",
+             "arguments": "不是json"},
+            img_path=None)
+        self.assertTrue(ret)
+        self.assertEqual(dispatched[0][0][2], "不是json")
+
+    def test_unknown_tool_name_returns_none(self):
+        """tool_call 但 name != dispatch_task → 返回 None（调用方降级）。"""
+        bot = self._bot()
+        dispatched = []
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append(1)
+        ret = bot._route_vision_result(
+            "小明", "王",
+            {"kind": "tool_call", "name": "other_tool", "arguments": "{}"},
+            img_path="x.jpg")
+        self.assertIsNone(ret)
+        self.assertEqual(dispatched, [], "未知工具不得投递")
+
+    def test_text_replies_directly(self):
+        """kind=text → _send_text 直接回复（实质回复，不传 placeholder → 占位归零）。"""
+        bot = self._bot()
+        sent = []
+        bot._send_text = lambda *a, **k: sent.append((a, k))
+        ret = bot._route_vision_result(
+            "小明", "王", {"kind": "text", "content": "图片真好看"})
+        self.assertTrue(ret)
+        self.assertEqual(sent, [(("图片真好看", "小明"), {})],
+                         "实质回复不传 placeholder（占位归零）")
+
+    def test_none_result_returns_none(self):
+        """result=None → 返回 None（调用方降级）。"""
+        bot = self._bot()
+        self.assertIsNone(bot._route_vision_result("小明", "王", None))
+
+    def test_reuses_vision_route_core(self):
+        """复用 _vision_route 分流核心：同一 tool_call dict 走同一投递路径
+        （_vision_route 与 hook 对相同结果分流一致，不重复实现）。"""
+        bot = self._bot()
+        dispatched = []
+        bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
+        result = {"kind": "tool_call", "name": "dispatch_task",
+                  "arguments": '{"task": "做PPT"}'}
+        bot.call_vision_api = lambda content: result
+        bot._vision_route("小明", "王", "做PPT")
+        n_via_route = len(dispatched)
+        bot._route_vision_result("小明", "王", result, img_path=None)
+        self.assertEqual(len(dispatched), n_via_route + 1,
+                         "hook 应复用与 _vision_route 相同的投递路径")
