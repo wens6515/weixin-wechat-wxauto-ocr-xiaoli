@@ -239,7 +239,11 @@ def _get_ocr_engine():
     try:
         from rapidocr_onnxruntime import RapidOCR
 
-        _OCR_ENGINE = RapidOCR()
+        # intra_op_num_threads=2：限制 ONNX Runtime 推理线程数，避免 OCR
+        # 全核打满（真机实测：小漓.exe 发现新消息时 CPU 100% 根因即此）。
+        # 单次推理耗时 +5.6%（2954ms→3120ms，tools/ocr_benchmark.py 真机
+        # 实测），文本匹配率 100%，CPU 占用从全核降到 2 核。
+        _OCR_ENGINE = RapidOCR(intra_op_num_threads=2)
         return _OCR_ENGINE
     except Exception as e:
         logger.warning(f"RapidOCR 不可用: {e}")
