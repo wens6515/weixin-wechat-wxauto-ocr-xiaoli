@@ -152,13 +152,14 @@ class FadeStackedWidget(QStackedWidget):
     动画期间再点导航：记录 pending，当前动画结束直接续切（不跳帧）。
     """
 
-    def __init__(self, parent=None, duration=150):
+    def __init__(self, parent=None, duration=450):
         super().__init__(parent)
-        self._duration = max(80, duration)
+        self._duration = max(150, duration)
         self._snap = None        # 旧页快照 QLabel（动画完删除）
         self._snap_base = None   # 旧页快照原始 pixmap（逐帧合成 alpha 用）
         self._lift = None        # 正在升起的新页 widget
         self._lift_start = 0     # 升起起始 y
+        self._drift = 14         # 旧页上飘距离（px，加大「散掉」的距离感）
         self._animating = False
         self._pending = -1
         self._seq = 0
@@ -194,33 +195,48 @@ class FadeStackedWidget(QStackedWidget):
         self._snap = snap
         # 新页初始偏下（升起起点），随动画升到 0
         self._lift = new
-        self._lift_start = max(30, int(self.height() * 0.16))
+        self._lift_start = max(36, int(self.height() * 0.22))
         new.move(0, self._lift_start)
-        steps = max(5, self._duration // 15)
-        step_ms = max(8, self._duration // steps)
+        # 固定帧间隔 12ms（~83fps）平滑推进；帧数 = 时长/间隔。帧间隔固定
+        # 而非随 duration 放大——间隔变大会让过渡「跳帧式」闪烁（用户反馈
+        # 240ms 太快像卡顿闪烁，就是帧间隔 15ms + 帧数不足造成的）。加长
+        # 时长只加帧数，帧间隔不变，过渡更顺滑从容。
+        step_ms = 12
+        steps = max(6, self._duration // step_ms)
         for i in range(1, steps + 1):
             t = i / steps
             QTimer.singleShot(i * step_ms, lambda t=t, seq=seq: self._frame(t, seq))
         QTimer.singleShot((steps + 1) * step_ms, lambda seq=seq: self._done(seq))
 
+    @staticmethod
+    def _ease_out(t):
+        """cubic ease-out：先快后慢，结尾从容停住。
+
+        线性 t（匀速直线）视觉上像生硬的「一闪而过」；ease-out 让动画
+        开头有力、收尾温柔，才有过渡的质感（用户反馈 150ms 太快太轻）。
+        """
+        t = max(0.0, min(1.0, t))
+        return 1.0 - (1.0 - t) ** 3
+
     def _frame(self, t, seq):
         if seq != self._seq or not self._animating:
             return
-        # 旧页快照：painter 软件合成 alpha（1-t）+ 轻微上飘（「散掉」感）
+        e = self._ease_out(t)  # 缓动后的进度，替代线性 t
+        # 旧页快照：painter 软件合成 alpha（1-e）+ 上飘（「散掉」感）
         base = self._snap_base
         if base is not None and self._snap is not None:
             pm = QPixmap(base.size())
             pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            p.setOpacity(max(0.0, 1.0 - t))
+            p.setOpacity(max(0.0, 1.0 - e))
             p.drawPixmap(0, 0, base)
             p.end()
             self._snap.setPixmap(pm)
-            self._snap.move(0, -int(8 * t))
+            self._snap.move(0, -int(self._drift * e))
         # 新页：从下方升起（start → 0）
         if self._lift is not None:
-            self._lift.move(0, int(self._lift_start * (1.0 - t)))
+            self._lift.move(0, int(self._lift_start * (1.0 - e)))
 
     def _done(self, seq):
         if seq != self._seq:
