@@ -152,9 +152,9 @@ class FadeStackedWidget(QStackedWidget):
     动画期间再点导航：记录 pending，当前动画结束直接续切（不跳帧）。
     """
 
-    def __init__(self, parent=None, duration=450):
+    def __init__(self, parent=None, duration=900):
         super().__init__(parent)
-        self._duration = max(150, duration)
+        self._duration = max(300, duration)
         self._snap = None        # 旧页快照 QLabel（动画完删除）
         self._snap_base = None   # 旧页快照原始 pixmap（逐帧合成 alpha 用）
         self._lift = None        # 正在升起的新页 widget

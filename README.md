@@ -2,15 +2,15 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v2.1.0「视觉版」** · 适配微信 PC **4.x** · 弃用 wxauto4（其 UIA 通道在新版微信 4.1.12 结构性失效），全面迁移到 **OCR 视觉方案**（PrintWindow 截图 + RapidOCR + 像素检测），4.x 全版本可用。
+> **v2.1.1「视觉版」** · 适配微信 PC **4.x** · 弃用 wxauto4（其 UIA 通道在新版微信 4.1.12 结构性失效），全面迁移到 **OCR 视觉方案**（PrintWindow 截图 + RapidOCR + 像素检测），4.x 全版本可用。
 
 ---
 
 ## ⬇️ 下载安装（桌面版）
 
-**v2.1.0 完整桌面版安装包**（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻）：
+**v2.1.1 完整桌面版安装包**（PySide6 图形界面 + 12 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v2.1.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.1.0/xiaoli-setup-v2.1.0.exe)
+👉 [点击下载 `xiaoli-setup-v2.1.1.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.1.1/xiaoli-setup-v2.1.1.exe)
 
 - **系统要求**：Windows 10+、已登录的**微信 PC 4.x**（4.x 版本均可）；**微信主界面需放置在屏幕右半边**（视觉方案依赖窗口位置）
 - **无需安装 Python / Node.js**：安装包已内置 Python 运行时和全部依赖（含 OCR 引擎）；Node.js（天枢 CLI 依赖）在安装时自动检测，缺失则自动下载安装
