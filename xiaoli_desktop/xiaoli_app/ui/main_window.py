@@ -135,15 +135,20 @@ class NavItemDelegate(QStyledItemDelegate):
 
 
 class FadeStackedWidget(QStackedWidget):
-    """带过渡动画的页面容器：旧页渐渐散掉 + 新页从下方升起。
+    """带过渡动画的页面容器：旧页上飘淡出 + 新页从下方升起淡入。
 
     实现（纯软件合成，零 GPU effect）：
-      - 切换瞬间抓旧页静态快照（grab），立即切到新页（新页完整显示在下层）
-      - 旧页快照：QPainter 逐帧按 alpha 重新合成 pixmap 显示（1.0 → 0.0，
-        约 150ms）+ 轻微上飘——painter 的 setOpacity 是 CPU 合成，
-        不触发 DWM/半透明窗口的 effect 合成路径，真机不再闪烁
-      - 新页：QTimer 逐帧 move 从下方（height*0.16）升到 0，随旧页淡出
-        同步「从下方升起露出」
+      - 切换瞬间抓旧页 + 新页两张静态快照（grab），真实页面不动
+      - 旧页快照：QPainter 逐帧 alpha 1→0 + 上飘（「旧页从上方飘走」）
+      - 新页快照：QPainter 逐帧 alpha 0→1 + 从下方（height*0.22）升到 0
+        （「新页从下方升起淡入」）
+      - 动画结束删两张快照，露出底层真实新页（已就位，无跳变）
+
+    关键：新旧页都用快照 QLabel 做动画，不 move 真实子页面——
+    QStackedWidget 由 QStackedLayout 管理子页面几何，直接 move 真实页会被
+    布局系统拉回原位（实测：_frame 里 move 生效瞬间 y 正常递降，但事件循环
+    空闲后子页面被拉回 0——旧版只有旧页快照能飘，新页 move 无效，看起来
+    就像「只有旧页淡出、没有新页升起」，正是用户反馈的卡顿闪烁感来源）。
 
     为何弃用 QGraphicsOpacityEffect：本应用是 WA_TranslucentBackground
     无边框圆角窗口 + 粒子背景层，effect 的 alpha 动画走 GPU 合成路径，
@@ -152,14 +157,15 @@ class FadeStackedWidget(QStackedWidget):
     动画期间再点导航：记录 pending，当前动画结束直接续切（不跳帧）。
     """
 
-    def __init__(self, parent=None, duration=900):
+    def __init__(self, parent=None, duration=500):
         super().__init__(parent)
-        self._duration = max(300, duration)
+        self._duration = max(200, duration)
         self._snap = None        # 旧页快照 QLabel（动画完删除）
         self._snap_base = None   # 旧页快照原始 pixmap（逐帧合成 alpha 用）
-        self._lift = None        # 正在升起的新页 widget
-        self._lift_start = 0     # 升起起始 y
-        self._drift = 14         # 旧页上飘距离（px，加大「散掉」的距离感）
+        self._lift_snap = None   # 新页快照 QLabel（从下方升起+淡入）
+        self._lift_base = None   # 新页快照原始 pixmap
+        self._lift_start = 0     # 升起起始 y（相对本 widget）
+        self._drift = 0          # 旧页上飘距离（px，动画前按窗口高度计算）
         self._animating = False
         self._pending = -1
         self._seq = 0
@@ -173,7 +179,7 @@ class FadeStackedWidget(QStackedWidget):
             self._pending = index
             return
         old = self.currentWidget()
-        # 立即切换（新页完整显示在下层，不透明、无闪烁）
+        # 立即切换（真实新页在下层就位，动画期间被快照盖住）
         super().setCurrentIndex(index)
         new = self.currentWidget()
         if old is None or new is None:
@@ -181,7 +187,8 @@ class FadeStackedWidget(QStackedWidget):
         self._seq += 1
         seq = self._seq
         self._animating = True
-        # 旧页快照：原始图缓存，逐帧软件合成 alpha
+        rect = self.rect()
+        # 旧页快照：原始图缓存，逐帧软件合成 alpha（1→0）+ 上飘
         base = old.grab()
         if base.isNull():
             self._animating = False
@@ -189,17 +196,28 @@ class FadeStackedWidget(QStackedWidget):
         self._snap_base = base
         snap = QLabel(self)
         snap.setPixmap(base)
-        snap.setGeometry(self.rect())
+        snap.setGeometry(rect)
         snap.show()
         snap.raise_()
         self._snap = snap
-        # 新页初始偏下（升起起点），随动画升到 0
-        self._lift = new
+        # 新页快照：同样用 QLabel 做动画（不 move 真实页——QStackedLayout
+        # 会把真实子页面拉回原位，旧版因此「新页升不起来」）。快照盖在旧页
+        # 快照之上，从下方升起 + 淡入；结束删快照露出真实新页（已就位）。
+        new_base = new.grab()
+        self._lift_base = new_base
+        lift = QLabel(self)
+        lift.setPixmap(new_base)
+        lift.setGeometry(rect)
+        lift.move(0, 0)  # 初始完全透明即可，位置由 _frame 逐帧 move
+        lift.show()
+        lift.raise_()    # 叠在最上层（旧页快照之上）
+        self._lift_snap = lift
         self._lift_start = max(36, int(self.height() * 0.22))
-        new.move(0, self._lift_start)
+        # 旧页上飘距离：窗口高度 8%（~30px @400px）——太小位移不可见，
+        # 旧页只剩透明度变化会像原地闪烁（用户反馈的卡顿感）。
+        self._drift = max(24, int(self.height() * 0.08))
         # 固定帧间隔 12ms（~83fps）平滑推进；帧数 = 时长/间隔。帧间隔固定
-        # 而非随 duration 放大——间隔变大会让过渡「跳帧式」闪烁（用户反馈
-        # 240ms 太快像卡顿闪烁，就是帧间隔 15ms + 帧数不足造成的）。加长
+        # 而非随 duration 放大——间隔变大会让过渡「跳帧式」闪烁。加长
         # 时长只加帧数，帧间隔不变，过渡更顺滑从容。
         step_ms = 12
         steps = max(6, self._duration // step_ms)
@@ -221,22 +239,36 @@ class FadeStackedWidget(QStackedWidget):
     def _frame(self, t, seq):
         if seq != self._seq or not self._animating:
             return
-        e = self._ease_out(t)  # 缓动后的进度，替代线性 t
-        # 旧页快照：painter 软件合成 alpha（1-e）+ 上飘（「散掉」感）
+        e = self._ease_out(t)   # 缓动后的进度（新页升起用：先快后慢）
+        # 旧页：位移 + 淡出都用线性 t——两者同步，旧页「边飘边隐」，
+        # 下区持续让位给从下方升起的新页，交融自然。若淡出用 ease-in
+        # 会前段几乎不透明（300ms 才淡 1%），旧页像整块平移而非淡出。
+        # 旧页快照：alpha（1-t）+ 线性上飘（「从上方飘走」的位移感）
         base = self._snap_base
         if base is not None and self._snap is not None:
             pm = QPixmap(base.size())
             pm.fill(Qt.GlobalColor.transparent)
             p = QPainter(pm)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            p.setOpacity(max(0.0, 1.0 - e))
+            p.setOpacity(max(0.0, 1.0 - t))
             p.drawPixmap(0, 0, base)
             p.end()
             self._snap.setPixmap(pm)
-            self._snap.move(0, -int(self._drift * e))
-        # 新页：从下方升起（start → 0）
-        if self._lift is not None:
-            self._lift.move(0, int(self._lift_start * (1.0 - e)))
+            self._snap.move(0, -int(self._drift * t))
+        # 新页快照：从下方（lift_start）升到 0 + 淡入（alpha 0→1）。
+        # 走快照而非 move 真实页——QStackedLayout 会把真实子页面拉回原位，
+        # 旧版因此新页升不起来（用户反馈「只有旧页淡出，没有新页升起」）。
+        lb = self._lift_base
+        if lb is not None and self._lift_snap is not None:
+            pm = QPixmap(lb.size())
+            pm.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pm)
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.setOpacity(max(0.0, min(1.0, e)))
+            p.drawPixmap(0, 0, lb)
+            p.end()
+            self._lift_snap.setPixmap(pm)
+            self._lift_snap.move(0, int(self._lift_start * (1.0 - e)))
 
     def _done(self, seq):
         if seq != self._seq:
@@ -246,9 +278,10 @@ class FadeStackedWidget(QStackedWidget):
             self._snap.deleteLater()
             self._snap = None
         self._snap_base = None
-        if self._lift is not None:
-            self._lift.move(0, 0)   # 复位到布局位置
-            self._lift = None
+        if self._lift_snap is not None:
+            self._lift_snap.deleteLater()
+            self._lift_snap = None
+        self._lift_base = None
         if self._pending >= 0:
             idx, self._pending = self._pending, -1
             self.setCurrentIndex(idx)
