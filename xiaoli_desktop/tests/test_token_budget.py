@@ -67,6 +67,48 @@ class TestFitMessagesInBudget(unittest.TestCase):
     def test_empty_messages_ok(self):
         self.assertEqual(fit_messages_in_budget([], budget=100), [])
 
+    def test_multimodal_block_list_preserved_within_budget(self):
+        """多模态块列表（vision user 消息：text + image_url 块）在预算内
+        必须原样保留结构——content 仍是 list[dict]，image_url 的 base64
+        完整，绝不被 str() 转成 repr 字符串。
+        RED：修复前 fit_messages_in_budget 对 content 做 str(...)，list 被
+        repr 化 → vision payload 结构破坏（图片丢失）。"""
+        blocks = [
+            {"type": "text", "text": "描述"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,iVBORy1mYWtl"}},
+        ]
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": blocks}]
+        out = fit_messages_in_budget(msgs, budget=100000)
+        self.assertIsInstance(out[-1]["content"], list,
+                              "多模态块列表必须保留 list 结构")
+        self.assertEqual(out[-1]["content"], blocks,
+                         "预算内多模态块原样保留（不被 repr 化）")
+
+    def test_multimodal_block_list_truncates_text_keeps_image(self):
+        """多模态块列表超预算 → 只截断 text 块文本，image_url 块保留原样
+        （截断 base64 会损坏图片）；content 仍为 list[dict]。
+        RED：修复前整个 list 被 repr 化并按字符截断，base64 被截断
+        → 模型拿到损坏图片。"""
+        blocks = [
+            {"type": "text", "text": "x" * 100000},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,iVBORy1mYWtl"}},
+        ]
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": blocks}]
+        out = fit_messages_in_budget(msgs, budget=1000)
+        c = out[-1]["content"]
+        self.assertIsInstance(c, list, "截断后 content 仍为块列表")
+        text_block = next(b for b in c if b["type"] == "text")
+        self.assertLess(len(text_block["text"]), 100000,
+                        "超预算的 text 块必须被截断")
+        img_block = next(b for b in c if b["type"] == "image_url")
+        self.assertEqual(img_block["image_url"]["url"],
+                         "data:image/png;base64,iVBORy1mYWtl",
+                         "image_url 块必须原样保留（base64 不可截断）")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
