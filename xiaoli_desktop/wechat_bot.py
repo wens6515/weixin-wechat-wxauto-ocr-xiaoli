@@ -484,12 +484,16 @@ class WeChatBot:
         图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
         消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
         带图返回 400）。人设（self.system_prompt）前置为 system 纯文本消息
-        （空人设则不插入 system 消息）；图片绝不放 system。
+        （空人设则不插入人设 system 消息）；其后无条件追加「当前时间：」system
+        消息（逐字对齐 call_chat_ai：time.strftime('%Y-%m-%d %H:%M:%S')；
+        persona 为空时本条保证 messages 至少一条 system，消除空 messages 隐患）。
+        图片绝不放 system。
 
-        chat_id 可选（默认 None）：非空时在 system 人设之后、最后 user 多模态
-        块之前注入 _get_history(chat_id) 历史（语义逐字对齐 call_chat_ai：
-        有 time 字段带 [ts] 前缀，否则原文；不重排，_get_history 已按时间有序）。
-        为空时 messages 结构与现状完全一致（图片/文件描述路径不受影响）。
+        chat_id 可选（默认 None）：非空时在 system（人设 + 当前时间）之后、
+        最后 user 多模态块之前注入 _get_history(chat_id) 历史（语义逐字对齐
+        call_chat_ai：有 time 字段带 [ts] 前缀，否则原文；不重排，
+        _get_history 已按时间有序）。为空时仍注入当前时间 system
+        （图片/文件描述路径自动受益）。
 
         payload 声明 dispatch_task 工具（tool_choice=auto）：模型判定用户消息为
         任务时走 tool_calls 返回，否则返回纯文本描述（上层按 dict 分流）。
@@ -502,9 +506,15 @@ class WeChatBot:
         """
         headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
         # 方案二：人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
-        # 只能进 user 消息）；persona 为空时不插入空 system 消息（防空消息 400）。
+        # 只能进 user 消息）；persona 为空时不插入空 system 消息（防空消息 400，
+        # 当前时间 system 保证 messages 至少一条）。
         persona = (getattr(self, "system_prompt", "") or "").strip()
         messages = [{"role": "system", "content": persona}] if persona else []
+        # 当前时间 system：无条件注入（与 chat_id 无关、persona 为空也注入），
+        # 逐字对齐 call_chat_ai 的 time.strftime("%Y-%m-%d %H:%M:%S") 格式；
+        # persona 为空时本条保证 messages 至少一条 system，消除空 messages 隐患。
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
         if chat_id:
             # 历史注入：语义逐字对齐 call_chat_ai（system 之后、user 之前；
             # 有 time 字段带 [ts] 前缀，否则原文；不重排——_get_history 返回
