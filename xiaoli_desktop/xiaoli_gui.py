@@ -188,7 +188,6 @@ def main():
     from PySide6.QtCore import Qt
     app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
     app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, False)
-    app.setEffectEnabled(Qt.UIEffect.UI_FadePopup, False)
     # 灰度抗锯齿：Windows ClearType 亚像素渲染在深色/渐变背景上会让文字
     # 产生红绿彩色描边（用户反馈"文字阴影难看"）。PreferAntialias 走灰度
     # AA，消除 subpixel fringe。
