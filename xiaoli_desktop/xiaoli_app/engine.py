@@ -159,5 +159,23 @@ class EngineThread(threading.Thread):
                 return True
         return False
 
+    def clear_memory(self):
+        """清空运行中 bot 的记忆（内存 memory_db + 落盘）。返回是否已清空。
+
+        bot 未就绪（未初始化）或清空失败时返回 False，调用方据此回退到
+        直接清文件。历史缺陷：GUI 只写空文件、不动 bot 内存 memory_db，
+        bot 节流写盘（_schedule_save_memory/_flush_memory）会把旧记忆覆盖
+        回磁盘，导致「清空全部记忆」按钮失效。
+        """
+        with self._lock:
+            bot = self.bot
+            if bot is not None and hasattr(bot, "clear_history"):
+                try:
+                    bot.clear_history()
+                    return True
+                except Exception:
+                    return False
+        return False
+
     def is_running(self):
         return self.state == "running"
