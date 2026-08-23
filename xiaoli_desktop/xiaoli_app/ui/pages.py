@@ -835,10 +835,12 @@ class ModelsPage(QWidget):
             3, QHeaderView.ResizeMode.Stretch)  # 模型列拉满剩余
         # 禁止单元格换行（长内容单行截断，避免行高不足内容溢出下边框）
         self.table.setWordWrap(False)
-        # 单击即进入编辑（key 框可直接 Ctrl+V 粘贴，不用先敲字符）
+        # 双击/按键才进入编辑：SelectedClicked（单击即编辑）会让 key 单元格
+        # 单击就弹编辑器——编辑器按内容宽度收缩、位置相对单元格偏移（用户实测
+        # 「点击选中框很窄且双击后弹出的框位置偏移」）。改为单击只选中不编辑，
+        # 双击/F2/直接打字才进编辑；key 框粘贴改用「先选中再 Ctrl+V」或双击。
         self.table.setEditTriggers(
-            QTableWidget.EditTrigger.SelectedClicked
-            | QTableWidget.EditTrigger.EditKeyPressed
+            QTableWidget.EditTrigger.EditKeyPressed
             | QTableWidget.EditTrigger.DoubleClicked
             | QTableWidget.EditTrigger.AnyKeyPressed)
         self._probe_done.connect(self._show_probe_result)
@@ -916,7 +918,16 @@ class ModelsPage(QWidget):
         card = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id()) or {}
         self._set_prov(self.cmb_text_provider, ids, card.get("chat_provider", ""))
         self._fill_model_options(self.cmb_text_provider, self.cmb_text_model)
-        self.cmb_text_model.setCurrentText(card.get("chat_model", ""))
+        # 回填模型下拉：卡上 chat_model 有值优先；空则回填当前 provider 的
+        # 第一个模型（避免下拉空白让用户误以为没配模型 → 保存空 → 重启 400）
+        model = card.get("chat_model") or ""
+        if not model:
+            pid = self.cmb_text_provider.currentData() or ""
+            for p in self.ctx.providers():
+                if p.get("id") == pid and p.get("models"):
+                    model = p["models"][0]
+                    break
+        self.cmb_text_model.setCurrentText(model)
 
     @staticmethod
     def _set_prov(cb, ids, val):
@@ -948,8 +959,14 @@ class ModelsPage(QWidget):
         if card is None:
             QMessageBox.warning(self, "提示", "未找到活跃角色卡")
             return
-        card["chat_provider"] = self.cmb_text_provider.currentData() or ""
-        card["chat_model"] = self.cmb_text_model.currentText().strip()
+        cp = self.cmb_text_provider.currentData() or ""
+        cm = self.cmb_text_model.currentText().strip()
+        # 空选择防护：下拉为空（provider 无 models / 用户未选）时保留卡上
+        # 旧值，不用空串覆盖——否则重启后模型丢失 → bot 启动 400。
+        if cp:
+            card["chat_provider"] = cp
+        if cm:
+            card["chat_model"] = cm
         # providers 表同步落盘：用户在表格添加的 Provider/模型必须在 config.json
         # 持久化，否则重启后 load_config_store 读回旧 providers，添加的模型丢失
         # （用户实测：保存模型配置 → 关掉程序再打开模型没了）
@@ -1021,6 +1038,23 @@ class ModelsPage(QWidget):
     def _save(self):
         provs = self._collect_providers()
         self.ctx.cfg["providers"] = provs
+        # 同步模型配置区选择到活跃卡：仅靠 providers 落盘不够——重启后模型
+        # 下拉从「卡」回填（_reload_model_config），卡 chat_model 不写则重启
+        # 后模型丢失 → bot 启动 model 空 → API 400（用户实测「重启后变
+        # deepseek 空，启动 bot 报 400」）。此处把当前下拉选择一并写入卡。
+        card = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id())
+        if card is not None:
+            cp = self.cmb_text_provider.currentData() or ""
+            cm = self.cmb_text_model.currentText().strip()
+            if cp:
+                card["chat_provider"] = cp
+            if cm:
+                card["chat_model"] = cm
+            try:
+                card_store.save_card(self.ctx.cards_dir, card)
+            except ValueError as e:
+                QMessageBox.warning(self, "校验失败", str(e))
+                return
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         # 重新投影 + 引擎热应用
         card = card_store.get_card(self.ctx.cards_dir, self.ctx.active_card_id())

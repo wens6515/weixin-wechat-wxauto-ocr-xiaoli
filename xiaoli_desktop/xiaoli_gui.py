@@ -182,6 +182,13 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("小漓")
     app.setQuitOnLastWindowClosed(False)  # 关窗不退出（隐藏到托盘）
+    # 禁用 QComboBox 展开动画：Qt 系统级 AnimateCombo 在深色大列表（模型下拉
+    # 几十项）下逐帧重绘卡顿（用户实测「展开动画卡顿」）。禁掉后展开即现，
+    # 不掉帧；视觉上只少了淡入过渡，不影响可用性。
+    from PySide6.QtCore import Qt
+    app.setEffectEnabled(Qt.UIEffect.UI_AnimateCombo, False)
+    app.setEffectEnabled(Qt.UIEffect.UI_FadeMenu, False)
+    app.setEffectEnabled(Qt.UIEffect.UI_FadePopup, False)
     # 灰度抗锯齿：Windows ClearType 亚像素渲染在深色/渐变背景上会让文字
     # 产生红绿彩色描边（用户反馈"文字阴影难看"）。PreferAntialias 走灰度
     # AA，消除 subpixel fringe。

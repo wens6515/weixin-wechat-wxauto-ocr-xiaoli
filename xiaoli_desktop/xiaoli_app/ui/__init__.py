@@ -208,11 +208,14 @@ QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background: $input_bg; border: 1px solid $border; border-radius: 10px;
     padding: 5px 10px; min-height: 30px; }
 /* 下拉弹层（QComboBox 弹出的列表）：深色系统主题下 palette 文字是白色，
-   必须显式设深灰文字 + 白底，否则浅色界面上下拉项白字看不清 */
+   必须显式设深灰文字 + 白底，否则浅色界面上下拉项白字看不清。
+   动画卡顿排查：item 圆角 + padding 在展开动画逐帧重绘时开销大（模型下拉
+   几十项 + 圆角 → 展开明显卡顿，用户实测）。去 item 圆角、减 padding，
+   弹层整体保留圆角。 */
 QComboBox QAbstractItemView {
     color: $text; background: $input_bg; border: 1px solid $border;
-    border-radius: 10px; padding: 4px; selection-background-color: $hover; selection-color: $text; }
-QComboBox QAbstractItemView::item { padding: 9px 12px; border-radius: 6px; }
+    border-radius: 10px; padding: 2px; selection-background-color: $hover; selection-color: $text; }
+QComboBox QAbstractItemView::item { padding: 6px 10px; }
 QComboBox QAbstractItemView::item:selected { background: $hover; color: $text; }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid $focus; background: $input_bg; }
@@ -253,7 +256,10 @@ QListWidget#themeGrid::item, QListWidget#wpGrid::item { border: 2px solid transp
 QListWidget#themeGrid::item:hover, QListWidget#wpGrid::item:hover { background: $hover; }
 QListWidget#themeGrid::item:selected, QListWidget#wpGrid::item:selected { background: $hover;
                               color: $text; }
-QTableWidget::item { padding: 11px 8px; min-height: 26px; }
+/* 表格单元格：不设 item padding——QSS 的 item padding 会让双击编辑框
+   （QLineEdit 编辑器）几何与单元格内容错位（用户实测「双击后弹出的框位置
+   偏移」）。行高由 min-height 撑起，内容上下居中靠 QTableWidget 默认对齐。 */
+QTableWidget::item { min-height: 30px; }
 QTableWidget::item:selected { background: $sel_row; color: $text; }
 QTableWidget::item:hover { background: $hover; }
 QHeaderView::section { background: $header; border: none;

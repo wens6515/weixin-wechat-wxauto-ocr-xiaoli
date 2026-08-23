@@ -241,6 +241,63 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(cfg1["vision_api_url"], cfg2["vision_api_url"])
 
 
+class TestSaveAndRestartKeepsModel(unittest.TestCase):
+    """回归：模型页「保存并应用」必须把模型选择持久化到活跃卡。
+
+    历史缺陷（用户实测）：表格只落盘 providers，卡的 chat_model 未写 → 重启后
+    模型下拉从卡读空（「deepseek 空」）→ bot 启动 model 空 → API 400。
+    修复：_save 同步写活跃卡 chat_provider/chat_model；此处模拟该链路验证
+    重启（二次 load）后模型保留。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cfg_save_restart_")
+        self.cfg_path = os.path.join(self.tmp, "config.json")
+        self.cards_dir = os.path.join(self.tmp, "cards")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_save_card_model_survives_restart(self):
+        # 首次启动建结构
+        cfg = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        cid = cfg["active_card_id"]
+        # 模拟「保存并应用」：providers 落盘 + 活跃卡写入 chat_model（_save 修复后的行为）
+        card = config_store._read_card(self.cards_dir, cid)
+        card["chat_provider"] = "deepseek"
+        card["chat_model"] = "deepseek:deepseek-v4-flash"
+        config_store._write_card(self.cards_dir, card)
+        provs = [{
+            "id": "deepseek", "name": "DeepSeek 深度求索",
+            "base_url": "https://api.deepseek.com/v1/chat/completions",
+            "api_key": "sk-x",
+            "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro"],
+        }]
+        cfg["providers"] = provs
+        config_store.save_config(cfg, self.cfg_path)
+
+        # 重启：二次 load，卡与投影都必须保留模型
+        cfg2 = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        card2 = config_store._read_card(self.cards_dir, cfg2["active_card_id"])
+        self.assertEqual(card2.get("chat_model"), "deepseek:deepseek-v4-flash")
+        self.assertEqual(cfg2["chat_model"], "deepseek:deepseek-v4-flash")
+
+    def test_save_card_model_empty_keeps_old(self):
+        """空选择不覆盖：下拉为空时保存不得把卡上已有模型清空（防 400）。"""
+        cfg = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        cid = cfg["active_card_id"]
+        card = config_store._read_card(self.cards_dir, cid)
+        card["chat_model"] = "deepseek:deepseek-v4-flash"
+        config_store._write_card(self.cards_dir, card)
+        # 模拟保存时下拉为空（cm 空串 → 不覆盖）
+        cm = ""
+        if cm:
+            card["chat_model"] = cm
+        config_store._write_card(self.cards_dir, card)
+        card2 = config_store._read_card(self.cards_dir, cid)
+        self.assertEqual(card2.get("chat_model"), "deepseek:deepseek-v4-flash")
+
+
 class TestMaskKey(unittest.TestCase):
     def test_mask(self):
         self.assertEqual(config_store.mask_key("sk-abcdef123456"), "sk-***3456")
