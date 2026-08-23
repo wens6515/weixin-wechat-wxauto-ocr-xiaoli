@@ -12,6 +12,8 @@
 
 👉 [点击下载 `xiaoli-setup-v2.1.1.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.1.1/xiaoli-setup-v2.1.1.exe)
 
+> 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
+
 - **系统要求**：Windows 10+、已登录的**微信 PC 4.x**（4.x 版本均可）；**微信主界面需放置在屏幕右半边**（视觉方案依赖窗口位置）
 - **无需安装 Python / Node.js**：安装包已内置 Python 运行时和全部依赖（含 OCR 引擎）；Node.js（天枢 CLI 依赖）在安装时自动检测，缺失则自动下载安装
 - **安装**：双击安装（免管理员权限），完成后从开始菜单/桌面启动小漓
@@ -133,7 +135,6 @@ tools/                       # 配套标定/调试工具
 | `ai_api_url` | `https://api.deepseek.com/v1/chat/completions` | 聊天 LLM 接口（OpenAI 兼容） |
 | `ai_api_key` | 空 | **API Key（勿提交）** |
 | `chat_model` | `deepseek:deepseek-v4-flash` | 聊天模型（`provider:model` 格式） |
-| `vision_model` | `zhipu:glm-4.6v` | 视觉模型 |
 | `system_prompt` | 通用人设 | 小漓人设（发布版不含个人信息，可自定义） |
 | `bot_nickname` | 小漓 | 机器人昵称 |
 | `tasks_dir` | `%USERPROFILE%\小漓\wxauto` | 任务桥工作目录 |
@@ -145,7 +146,7 @@ tools/                       # 配套标定/调试工具
 | `cooldown` | 3 | 回复冷却（秒） |
 | `start_paused` | true | 启动时是否暂停自动回复 |
 
-控制台可用命令：`pause` / `resume` / `model [名称]` / `vision-model [名称]` / `chat-temp <0~2>` / `chat-top-p <0~1>` / `vision-temp <0~2>` / `tianshu-window` / `task-status` / `clear [聊天ID]` / `del <聊天ID> <序号...>` / `memory <聊天ID>` / `status` / `quit` / `help`
+控制台可用命令：`pause` / `resume` / `model [名称]` / `chat-temp <0~2>` / `chat-top-p <0~1>` / `vision-temp <0~2>` / `tianshu-window` / `task-status` / `clear [聊天ID]` / `del <聊天ID> <序号...>` / `memory <聊天ID>` / `status` / `quit` / `help`
 
 ## 隐私与安全
 
@@ -162,4 +163,5 @@ tools/                       # 配套标定/调试工具
 
 ## 更新记录
 
+[v2.1.1 完整更新记录](docs/更新记录-2026-08-23-2.md)（模型配置页修复/角色卡中文名/动画 600ms）
 [v2.1.0 完整更新记录](docs/更新记录-2026-08-23.md)（单模型化/人设修复/sender 修复）
