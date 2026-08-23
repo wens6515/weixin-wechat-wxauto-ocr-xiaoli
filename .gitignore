@@ -40,3 +40,6 @@ AGENTS.md
 # 桌面端构建脚本（仅本地参与打包，不入开源仓库）
 tools/install-node.ps1
 tools/小漓.iss
+
+# OCR 探针产物（可再生产物，含真机截图识别文本）
+tools/ocr_benchmark_result.json
