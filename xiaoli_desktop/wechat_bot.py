@@ -264,6 +264,28 @@ def _extract_file_name_token(text):
     return toks[0] if toks else None
 
 
+# 模型偶发复读进回复的开头标记：历史注入的 [time] 前缀、私聊/群聊装饰
+# 「私聊 - sender」「群聊 - 群名」。剥除后再记录历史 + 发送，避免污染记忆
+# 并防止后续回复继续复读。
+_REPLY_PREFIX_RE = re.compile(
+    r'^\s*(?:'
+    r'\[\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}(?::\d{2}|:xx)?\]'
+    r'|\[(?:私聊|群聊)(?:\s*[-—:：]\s*[^\]]*)?\]'
+    r')\s*'
+)
+
+
+def strip_reply_prefix(reply):
+    """剥掉模型偶发复读进回复的开头标记，可叠加（如 [ts][私聊 - 王文生]），循环剥到干净。"""
+    if not reply:
+        return reply
+    while True:
+        cleaned = _REPLY_PREFIX_RE.sub("", reply, count=1)
+        if cleaned == reply:
+            return reply
+        reply = cleaned
+
+
 class WeChatBot:
     def __init__(self, cfg, stop_event=None, max_connect_retries=None):
         """stop_event：微信连接重试可被外部中断（GUI 引擎停止时用，None=不中断）。
@@ -547,10 +569,9 @@ class WeChatBot:
             if not content:
                 logger.warning("视觉模型返回空 content")
                 return None
-            # 时间戳前缀过滤：逐字复用 call_chat_ai 的 re.sub 表达式
-            # （模型偶发把注入的历史 [ts] 前缀复读进回复时去除）
-            content = re.sub(
-                r'^\[\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}(:\d{2}|:xx)?\]\s*', '', content)
+            # 回复前缀过滤：时间戳 [ts]、[私聊 - 名字]、[群聊 - 名字]
+            # （模型偶发把注入的历史/装饰前缀复读进回复时去除）
+            content = strip_reply_prefix(content)
             return {"kind": "text", "content": content}
         except Exception as e:
             logger.error(f"视觉模型调用失败: {e}")
@@ -1340,7 +1361,7 @@ class WeChatBot:
                     else:
                         logger.error(f"API返回异常 choices 为空: {data}")
                         return "API 返回数据异常，请检查模型名称或 API 状态"
-                    reply = re.sub(r'^\[\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}(:\d{2}|:xx)?\]\s*', '', reply)
+                    reply = strip_reply_prefix(reply)
                     self._add_history(chat_id, "user", decorated)
                     self._add_history(chat_id, "assistant", reply)
                     return reply

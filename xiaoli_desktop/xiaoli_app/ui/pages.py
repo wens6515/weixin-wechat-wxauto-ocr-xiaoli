@@ -1668,11 +1668,17 @@ class SettingsPage(QWidget):
     def _clear_memory(self):
         if QMessageBox.question(self, "确认", "清空全部对话记忆？此操作不可撤销") != QMessageBox.StandardButton.Yes:
             return
-        cfg = self.ctx.cfg or {}
-        mem_file = cfg.get("memory_file", "memory.json")
-        if os.path.isfile(mem_file):
-            with open(mem_file, "w", encoding="utf-8") as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
+        # 优先清运行中 bot 的内存记忆（memory_db）并落盘——bot 运行时会用
+        # 内存里的旧记忆覆盖磁盘文件，只清文件会被节流写盘复活（历史缺陷）。
+        eng = getattr(self.ctx, "engine", None)
+        bot_cleared = bool(eng is not None and eng.clear_memory())
+        if not bot_cleared:
+            # bot 未就绪/清空失败 → 直接清文件兜底
+            cfg = self.ctx.cfg or {}
+            mem_file = cfg.get("memory_file", "memory.json")
+            if os.path.isfile(mem_file):
+                with open(mem_file, "w", encoding="utf-8") as f:
+                    json.dump({}, f, ensure_ascii=False, indent=2)
         self.refresh()
         QMessageBox.information(self, "已清空", "记忆已清空")
 

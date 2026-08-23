@@ -538,6 +538,25 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         self.assertEqual(content, "私聊：豆包有学生优惠了",
                          "私聊无发送者名时保持现状退化分支不变")
 
+    def test_reply_strips_private_chat_prefix(self):
+        """模型复读 [私聊 - 名字] 前缀 → call_chat_ai 返回前剥除（不污染历史）。"""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        bot = self._make()
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            return SimpleNamespace(
+                status_code=200,
+                text="{}",
+                json=lambda: {"choices": [{"message": {
+                    "content": "[私聊 - 王文生] 你好呀"}}]},
+            )
+
+        with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
+            out = bot.call_chat_ai("王文生", "在吗", sender_name="王文生")
+        self.assertEqual(out, "你好呀", "回复开头的 [私聊 - 名字] 前缀应被剥除")
+
 
 class TestGroupMultiSenderText(unittest.TestCase):
     """群聊 @ 后多条不同发送者消息：text_content 每条必须带各自发送者名
@@ -822,6 +841,38 @@ class TestFileDisplayNameAndSnapshot(unittest.TestCase):
 # ---- call_vision_api 单调用形态 + _send_text 占位计数 + vision 模型默认迁移 ----
 
 
+class TestClearHistory(unittest.TestCase):
+    """清空记忆语义：clear_history() 必须同时清内存 memory_db 与磁盘文件，
+    GUI「清空全部记忆」按钮依赖此方法（历史缺陷：按钮只写空文件、不动
+    memory_db，bot 节流写盘把旧记忆覆盖回来 → 点按钮后 bot 仍有记忆）。"""
+
+    def _make(self):
+        import wechat_bot
+        bot = object.__new__(wechat_bot.WeChatBot)
+        bot._memory_dirty = False
+        bot._last_memory_save = 0.0
+        return bot
+
+    def test_clear_history_clears_ram_and_disk_and_flush_does_not_resurrect(self):
+        import json
+        import os
+
+        bot = self._make()
+        with tempfile.TemporaryDirectory() as tmp:
+            bot.memory_file = os.path.join(tmp, "memory.json")
+            bot.memory_db = {"王文生": [
+                {"role": "user", "content": "旧记忆", "time": "2026-06-14 10:00:00"}]}
+            bot.clear_history()
+            self.assertEqual(bot.memory_db, {}, "内存记忆应清空")
+            with open(bot.memory_file, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {}, "磁盘文件应清空")
+            # 模拟节流 flush：清空后即使有脏标记，flush 也不得复活旧记忆
+            bot._memory_dirty = True
+            bot._flush_memory()
+            with open(bot.memory_file, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {}, "节流 flush 后不复活旧记忆")
+
+
 class TestCallVisionApi(unittest.TestCase):
     """call_vision_api 单参契约：唯一参数 content 为块列表 list[dict]
     [{"type":"text","text":...}, {"type":"image_url","image_url":{"url":"data:image/..."}}]
@@ -1047,6 +1098,17 @@ class TestCallVisionApi(unittest.TestCase):
         captured, patcher = self._post(
             {"body": {"choices": [{"message": {
                 "content": "[2026-06-14 10:00:00] 你上一条说的是吃饭"}}]}})
+        with patcher:
+            result = bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+        self.assertEqual(result, {"kind": "text", "content": "你上一条说的是吃饭"})
+
+    def test_text_reply_strips_private_chat_prefix(self):
+        """text 响应 content 带 [私聊 - 名字] 前缀 → 返回前过滤。"""
+        bot = self._make()
+        bot._get_history = lambda chat_id: []
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {
+                "content": "[私聊 - 王文生] 你上一条说的是吃饭"}}]}})
         with patcher:
             result = bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
         self.assertEqual(result, {"kind": "text", "content": "你上一条说的是吃饭"})
