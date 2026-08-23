@@ -290,6 +290,43 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(msgs[0].chat, "王文生")
         b.close()
 
+    def test_analyze_window_force_reswitch_on_wrong_title(self):
+        """RED 复现：点击后标题 != 目标会话（切错/未切换，前台锁/坐标漂移）
+        → analyze_window 必须 force 重切。否则读的是微信已选中会话的内容
+        （has_other=False 判空跳过），红圈不消导致 5 轮循环漏消息——
+        真机日志：王文生新消息 5 轮未处理，后 4 轮无 [切换] 日志。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b._title_region = (0.0, 0.0, 1.0, 0.5)
+
+        def fake_avatar_tops(img, bg, side):
+            return [0, 50] if side == "right" else [100]
+
+        # read_title 第一次返回错误会话（点击落空），force 重切后返回目标会话
+        title_seq = iter(["强盗”集团(5)", "王文生"])
+        with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
+             mock.patch.object(b, "read_title", side_effect=lambda foreground=False: next(title_seq)), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                        return_value=[
+                            (100, 130, 10, 160, False),  # 对方长文字
+                        ]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes",
+                        return_value=[]):
+            b.connect()
+            win = b.analyze_window("王文生")
+        # force 重切应被触发：第一次 read_title 标题 != 目标会话
+        force_calls = [c for c in m_switch.call_args_list if c.kwargs.get("force")]
+        self.assertTrue(force_calls, "标题 != 目标会话时应触发 force 重切")
+        # 重切后读到正确标题，继续分析应返回对方消息
+        self.assertTrue(win.get("has_other"), "force 重切后应读到王文生的对方新消息")
+        b.close()
+
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
                 return_value=True)
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)

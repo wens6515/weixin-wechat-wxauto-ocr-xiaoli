@@ -1125,10 +1125,11 @@ class VisualBackend:
         # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）。
         # 处理新消息的动作路径，置前截图保证微信不被遮挡时也能读到标题。
         title = self.read_title(foreground=True)
-        if not title:
-            # 标题区空：可能 toggle 取消选中（force 重复点击同一会话会取消），
-            # force 重切恢复选中后再读一次（与读 0 条重试同模式）
-            logger.warning(f"[读取] {chat!r} 标题区为空（微信未选中任何会话？），force 重切")
+        if not title or not parse_title(title)[0].startswith(chat):
+            # 标题区空或非目标会话：可能 toggle 取消选中（force 重复点击
+            # 同一会话会取消）或点击落空切到别处——force 重切恢复后再读
+            # 一次（与读 0 条重试同模式；不重复校验，避免消息识别延迟）
+            logger.warning(f"[读取] {chat!r} 标题={title!r}（空或非目标会话），force 重切")
             self._switch_chat(chat, force=True)
             title = self.read_title(foreground=True)
         logger.info(f"[读取] {chat!r} 标题={title!r}")
@@ -1579,8 +1580,13 @@ class VisualBackend:
         # 必须在这里拿到权威 is_group 随返回带出——否则调用方回落到上一轮
         # 会话的旧缓存，私聊被误判群聊（实测日志「私聊王文生被判群聊跳过」）。
         title = self.read_title(foreground=True)
-        if not title:
-            logger.warning(f"[读取] {chat!r} 标题区为空（微信未选中任何会话？），force 重切")
+        # 标题为空（微信未选中/黑图）或标题不是目标会话（点击落空切到别处）
+        # → force 重切一次。重切后不重复校验：校验失败也继续用当次窗口
+        # 内容分析（不引入消息识别延迟，失败兜底交给上层/下一轮红圈）。
+        # 命中判定用前缀容错（name.startswith）：OCR 偶尔在标题尾部带
+        # 时间戳噪声（'王文生18:47'），严格相等会误判切错多白点一次。
+        if not title or not parse_title(title)[0].startswith(chat):
+            logger.warning(f"[读取] {chat!r} 标题={title!r}（空或非目标会话），force 重切")
             self._switch_chat(chat, force=True)
             title = self.read_title(foreground=True)
         if title:
