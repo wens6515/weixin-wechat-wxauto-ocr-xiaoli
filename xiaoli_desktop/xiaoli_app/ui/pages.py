@@ -710,7 +710,12 @@ class CardsPage(QWidget):
             QMessageBox.warning(self, "提示", "请填写人格设定")
             return
         if not card["id"]:
-            base = "".join(ch for ch in card["name"] if ch.isalnum() or ch in "-_")
+            # id 只允许 ASCII 字母数字_-（card_store._ID_RE）：isalnum() 对
+            # 中文返回 True，直接用会让中文名进 id → save_card 抛「非法卡 id」
+            # （用户实测：卡名「郭勇宏」→ id「郭勇宏_65709」→ 校验失败）。
+            # 中文/符号名过滤后为空 → fallback 时间戳前缀。
+            base = "".join(ch for ch in card["name"]
+                           if ch.isascii() and (ch.isalnum() or ch in "-_"))
             card["id"] = base or f"card_{int(time.time())}"
             card["id"] = f"{card['id']}_{int(time.time()) % 100000}"
         try:

@@ -298,6 +298,50 @@ class TestSaveAndRestartKeepsModel(unittest.TestCase):
         self.assertEqual(card2.get("chat_model"), "deepseek:deepseek-v4-flash")
 
 
+class TestCardIdChineseName(unittest.TestCase):
+    """回归：角色卡中文名保存不得生成中文 id（用户实测「郭勇宏」→ id
+    「郭勇宏_65709」→ 校验失败弹窗）。
+
+    UI 层 _save_card 用 isalnum() 过滤生成 base——isalnum() 对中文返回
+    True，导致中文进 id，而 card_store._ID_RE 只允许 ASCII。修复：过滤加
+    isascii()，中文名走 fallback 时间戳 id。此处锁定生成逻辑 + 校验闭环。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cfg_cardid_")
+        self.cards_dir = os.path.join(self.tmp, "cards")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_chinese_name_generates_ascii_id(self):
+        from xiaoli_app import card_store
+        name = "郭勇宏"
+        # 复现 UI _save_card 的 id 生成（修复后：isascii 过滤）
+        base = "".join(ch for ch in name
+                       if ch.isascii() and (ch.isalnum() or ch in "-_"))
+        card_id = base or f"card_{int(1724400000)}"
+        card_id = f"{card_id}_{1724400000 % 100000}"
+        self.assertNotIn("郭", card_id)
+        # 生成的 id 必须能通过 card_store 校验（闭环：不会弹「校验失败」）
+        card = {
+            "id": card_id, "name": name,
+            "system_prompt": "测试人格", "nickname": "小漓",
+        }
+        clean = card_store.validate_card(card)  # 抛异常 = 失败
+        self.assertEqual(clean["id"], card_id)
+        self.assertEqual(clean["name"], "郭勇宏")  # 显示名仍保留中文
+
+    def test_ascii_name_keeps_old_behavior(self):
+        from xiaoli_app import card_store
+        name = "XiaoLi-Bot_2"
+        base = "".join(ch for ch in name
+                       if ch.isascii() and (ch.isalnum() or ch in "-_"))
+        self.assertEqual(base, name)  # 纯 ASCII 名行为不变
+        card = {"id": f"{base}_12345", "name": name, "system_prompt": "p"}
+        self.assertEqual(card_store.validate_card(card)["id"], f"{base}_12345")
+
+
 class TestMaskKey(unittest.TestCase):
     def test_mask(self):
         self.assertEqual(config_store.mask_key("sk-abcdef123456"), "sk-***3456")
