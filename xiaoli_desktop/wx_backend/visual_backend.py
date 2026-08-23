@@ -657,6 +657,20 @@ def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
                 or a[3] + gap < b[1] or b[3] + gap < a[1])
 
 
+# 自学习选中高亮：微信列表选中条目有浅灰高亮背景（浅色主题 ≈ #F0F0F0，
+# 未选中纯白 #FFFFFF，差值 15~25）。PrintWindow 像素稳定（噪声 <3），
+# 容差取 12 夹在两者之间——既能容忍截图噪声，又不会把纯白误判成高亮。
+_ROW_COLOR_TOL = 12
+# 红圈锚定点击偏移：红圈在头像左上角，条目主体在头像右侧 ~45px
+# （与 _anchor_badge 同一真机标定）。
+_BADGE_CLICK_OFFSET_X = 45
+
+
+def _color_close(a: tuple, b: tuple, tol: int = _ROW_COLOR_TOL) -> bool:
+    """两个 RGB 颜色是否在每通道容差内相等（自学习选中高亮判定）。"""
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
 # ---------- 后端实现 ----------
 
 # 微信窗口布局（4.1.12.51 默认窗口，相对窗口客户区比例）
@@ -783,6 +797,8 @@ class VisualBackend:
         self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
         self._current_title: str | None = None  # 当前会话标题（read_title 权威名称）
         self._current_is_group: bool = False  # 当前会话是否群聊（标题含括号人数）
+        self._selected_row_color: tuple[int, int, int] | None = None  # 自学习选中高亮背景色（进程内缓存）
+        self._badge_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 红圈中心屏幕坐标（点击直用）
         # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
         cfg = _load_region_config()
         self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
@@ -1011,6 +1027,7 @@ class VisualBackend:
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
         seen: set[str] = set()
+        self._badge_coords.clear()  # 每轮重建（红圈坐标通道：供 _switch_chat 点击直用）
         for (bl, bt, br, bb) in badges:
             bcx = win_l + (bl + br) // 2
             bcy = win_t + (bt + bb) // 2
@@ -1027,6 +1044,7 @@ class VisualBackend:
                     best = name
             if best is not None and best not in seen:
                 seen.add(best)
+                self._badge_coords[best] = (bcx, bcy)  # 红圈坐标供点击直用
                 logger.debug(f"[未读] {best!r} 红圈屏幕 ({bcx},{bcy})")
                 yield best
             elif best is not None:
@@ -1037,6 +1055,7 @@ class VisualBackend:
                 anchored = self._anchor_badge(bcx, bcy)
                 if anchored and anchored not in seen:
                     seen.add(anchored)
+                    self._badge_coords[anchored] = (bcx, bcy)
                     yield anchored
 
     def _anchor_badge(self, bcx: int, bcy: int) -> str | None:
@@ -1076,14 +1095,32 @@ class VisualBackend:
         就取消选中了）。force=True 强制点击，绕过已选中判断——用于
         get_messages 读到 0 条时的 toggle 兜底重试。
 
-        已选中判定优先用 UI 信号（标题区 OCR）：_current_chat 是进程内
-        状态，与微信 UI 实际选中可能失同步——bot 重启后 _current_chat
-        清空、或用户手动切换过会话，盲点会把已选中的会话点击成取消选中
-        （消息区读空、get_messages 读 0 条，真机复现）。标题区显示目标
-        会话 = 微信 UI 已选中，直接返回不点击。
+        已选中判定优先级（force=False）：
+        1. 选中高亮（自学习，_is_row_selected）——最强信号：微信 UI 直接
+           用背景高亮标出选中条目，不受 OCR 全半角/emoji 差异影响。
+        2. UI 标题区 OCR（read_title）——_current_chat 是进程内状态，与
+           微信 UI 实际选中可能失同步（bot 重启清空/用户手动切换）。
+        3. 内存 _current_chat——前两者失败时的兜底。
+
+        坐标来源优先级：OCR 会话名坐标 → _badge_coords 红圈坐标直点
+        （OCR 名漏读时点红圈右下条目主体，复用 _anchor_badge 标定）。
+        点击成功后若标题非空（微信确认选中），采样该条目行背景色
+        自学习缓存选中高亮（_learn_selected_row_color）。
         """
         if not force:
-            # UI 检测：标题区显示目标会话 = 已选中（后台静默截图，不置前）
+            # 1) 选中高亮检测（自学习；后台静默截图，不置前打断用户）
+            try:
+                item_y = None
+                if chat in self._session_coords:
+                    item_y = self._session_coords[chat][1]
+                elif chat in self._badge_coords:
+                    item_y = self._badge_coords[chat][1]
+                if item_y is not None and self._is_row_selected(item_y):
+                    self._current_chat = chat
+                    return True
+            except Exception:
+                pass
+            # 2) UI 检测：标题区显示目标会话 = 已选中（后台静默截图，不置前）
             try:
                 title = self.read_title(foreground=False)
                 if title and parse_title(title)[0] == chat:
@@ -1098,8 +1135,13 @@ class VisualBackend:
             list(self.iter_sessions())
         coord = self._session_coords.get(chat)
         if coord is None:
-            logger.warning(f"[切换] 未找到会话 {chat!r} 的坐标")
-            return False
+            # 红圈坐标通道：OCR 名漏读/坐标缺失时，点红圈右下条目主体
+            badge = self._badge_coords.get(chat)
+            if badge is not None:
+                coord = (badge[0] + _BADGE_CLICK_OFFSET_X, badge[1])
+            else:
+                logger.warning(f"[切换] 未找到会话 {chat!r} 的坐标")
+                return False
         try:
             import pyautogui
             self._foreground()  # 点击依赖前台，先置前微信窗口
@@ -1107,10 +1149,74 @@ class VisualBackend:
             pyautogui.click(coord[0], coord[1])
             self._current_chat = chat
             time.sleep(0.5)  # 等待消息区刷新
+            # 自学习选中高亮：点击成功且标题非空（微信确认已选中）→ 采样该
+            # 条目行背景色。标题解析名与 chat 宽容匹配才采样——点击落空切到
+            # 别处时（标题非空但非目标会话）不采样，避免把未选中行缓存成
+            # 选中色导致后续误判。
+            try:
+                title = self.read_title(foreground=False)
+                parsed = parse_title(title)[0] if title else ""
+                if title and (parsed == chat or parsed.startswith(chat)
+                              or chat.startswith(parsed)):
+                    self._learn_selected_row_color(coord[1])
+            except Exception:
+                pass
             return True
         except Exception as e:
             logger.warning(f"[切换] 点击会话失败: {e}")
             return False
+
+    def _is_row_selected(self, red_badge_y_or_item_y: int) -> bool:
+        """判断条目行背景是否命中缓存选中高亮色（阈值容差）。
+
+        输入为条目行 y（屏幕坐标，红圈 y 或 OCR 名中心 y 均可——两者都落在
+        该条目行内）。命中 = 微信 UI 已选中该会话，调用方不点击避免 toggle
+        取消选中。缓存缺失（_selected_row_color None）→ False，回退旧判定。
+        后台静默截图（不置前）；状态检测必须 force 截图——region_changed
+        相对上一帧 diff 不能用于当前状态检测（红圈已存在时两帧相同会漏读）。
+        """
+        if self._selected_row_color is None or self._hwnd is None:
+            return False
+        shot = self._refresh(force=True, foreground=False)
+        if shot is None:
+            return False
+        w, h = shot.size
+        rect = wt.RECT()
+        u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        py = red_badge_y_or_item_y - rect.top
+        px = int(w * self._session_region[0]) + 5  # 列表区左缘内侧空白带（避开头像/文字）
+        if not (0 <= py < h and 0 <= px < w):
+            return False
+        try:
+            rgb = shot.convert("RGB").getpixel((px, py))
+        except Exception:
+            return False
+        return _color_close(rgb, self._selected_row_color)
+
+    def _learn_selected_row_color(self, screen_y: int) -> None:
+        """点击成功且标题非空后，采样该会话条目行背景色缓存为选中高亮色。
+
+        进程内缓存即可（无需持久化）：微信主题变化后，下一次点击成功会
+        重新采样覆盖旧值。采样点取列表区左缘内侧空白带（避开头像/文字）。
+        """
+        if self._hwnd is None:
+            return
+        shot = self._refresh(force=True, foreground=False)
+        if shot is None:
+            return
+        w, h = shot.size
+        rect = wt.RECT()
+        u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        py = screen_y - rect.top
+        px = int(w * self._session_region[0]) + 5
+        if not (0 <= py < h and 0 <= px < w):
+            return
+        try:
+            rgb = shot.convert("RGB").getpixel((px, py))
+        except Exception:
+            return
+        self._selected_row_color = rgb
+        logger.info(f"[高亮] 采样选中行背景色 {rgb}（y={screen_y}）")
 
     def get_messages(self, chat: str, limit: int | None = None) -> list[WeChatMessage]:
         """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
@@ -1125,11 +1231,12 @@ class VisualBackend:
         # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）。
         # 处理新消息的动作路径，置前截图保证微信不被遮挡时也能读到标题。
         title = self.read_title(foreground=True)
-        if not title or not parse_title(title)[0].startswith(chat):
-            # 标题区空或非目标会话：可能 toggle 取消选中（force 重复点击
-            # 同一会话会取消）或点击落空切到别处——force 重切恢复后再读
-            # 一次（与读 0 条重试同模式；不重复校验，避免消息识别延迟）
-            logger.warning(f"[读取] {chat!r} 标题={title!r}（空或非目标会话），force 重切")
+        if not title:
+            # 标题区空（toggle 取消选中或截图失败）→ force 重切恢复后再读
+            # 一次。名字比较退出切换判定——群名全半角/符号/emoji 的 OCR
+            # 差异会让 startswith 误失败，白点 force 点击已选中会话导致
+            # toggle 取消选中（真机日志：群聊名字后多带（数字）反复点击）。
+            logger.warning(f"[读取] {chat!r} 标题={title!r}（空），force 重切")
             self._switch_chat(chat, force=True)
             title = self.read_title(foreground=True)
         logger.info(f"[读取] {chat!r} 标题={title!r}")
@@ -1580,13 +1687,14 @@ class VisualBackend:
         # 必须在这里拿到权威 is_group 随返回带出——否则调用方回落到上一轮
         # 会话的旧缓存，私聊被误判群聊（实测日志「私聊王文生被判群聊跳过」）。
         title = self.read_title(foreground=True)
-        # 标题为空（微信未选中/黑图）或标题不是目标会话（点击落空切到别处）
-        # → force 重切一次。重切后不重复校验：校验失败也继续用当次窗口
-        # 内容分析（不引入消息识别延迟，失败兜底交给上层/下一轮红圈）。
-        # 命中判定用前缀容错（name.startswith）：OCR 偶尔在标题尾部带
-        # 时间戳噪声（'王文生18:47'），严格相等会误判切错多白点一次。
-        if not title or not parse_title(title)[0].startswith(chat):
-            logger.warning(f"[读取] {chat!r} 标题={title!r}（空或非目标会话），force 重切")
+        # 标题为空（微信未选中/黑图）→ force 重切一次。重切后不重复校验：
+        # 校验失败也继续用当次窗口内容分析（不引入消息识别延迟，失败兜底
+        # 交给上层/下一轮红圈）。名字比较退出切换判定——群名全半角/符号/
+        # emoji 的 OCR 差异会让 startswith 误失败，白点 force 点击已选中
+        # 会话导致 toggle 取消选中（真机日志：群聊名字后多带（数字）反复
+        # 点击）。标题非空即信任已选中（has_other 几何防线兜底误切）。
+        if not title:
+            logger.warning(f"[读取] {chat!r} 标题={title!r}（空），force 重切")
             self._switch_chat(chat, force=True)
             title = self.read_title(foreground=True)
         if title:

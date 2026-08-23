@@ -290,11 +290,12 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(msgs[0].chat, "王文生")
         b.close()
 
-    def test_analyze_window_force_reswitch_on_wrong_title(self):
-        """RED 复现：点击后标题 != 目标会话（切错/未切换，前台锁/坐标漂移）
-        → analyze_window 必须 force 重切。否则读的是微信已选中会话的内容
-        （has_other=False 判空跳过），红圈不消导致 5 轮循环漏消息——
-        真机日志：王文生新消息 5 轮未处理，后 4 轮无 [切换] 日志。"""
+    def test_analyze_window_force_reswitch_on_empty_title(self):
+        """RED 复现：点击后标题区空（toggle 取消选中/黑图）→ analyze_window
+        必须 force 重切。否则读的是空消息区（has_other=False 判空跳过），
+        红圈不消导致 5 轮循环漏消息——真机日志：王文生新消息 5 轮未处理。
+        名字比较退出切换判定：标题非空即信任已选中（群名全半角/符号/emoji
+        的 OCR 差异不再触发 force 白点重切）。"""
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b._title_region = (0.0, 0.0, 1.0, 0.5)
@@ -302,8 +303,8 @@ class TestVisualBackend(unittest.TestCase):
         def fake_avatar_tops(img, bg, side):
             return [0, 50] if side == "right" else [100]
 
-        # read_title 第一次返回错误会话（点击落空），force 重切后返回目标会话
-        title_seq = iter(["强盗”集团(5)", "王文生"])
+        # read_title 第一次 None（标题区空），force 重切后返回目标会话
+        title_seq = iter([None, "王文生"])
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
              mock.patch.object(b, "read_title", side_effect=lambda foreground=False: next(title_seq)), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
@@ -320,11 +321,47 @@ class TestVisualBackend(unittest.TestCase):
                         return_value=[]):
             b.connect()
             win = b.analyze_window("王文生")
-        # force 重切应被触发：第一次 read_title 标题 != 目标会话
+        # force 重切应被触发：第一次 read_title 为 None（标题区空）
         force_calls = [c for c in m_switch.call_args_list if c.kwargs.get("force")]
-        self.assertTrue(force_calls, "标题 != 目标会话时应触发 force 重切")
+        self.assertTrue(force_calls, "标题为空时应触发 force 重切")
         # 重切后读到正确标题，继续分析应返回对方消息
         self.assertTrue(win.get("has_other"), "force 重切后应读到王文生的对方新消息")
+        b.close()
+
+    def test_analyze_window_name_mismatch_no_reswitch(self):
+        """RED 复现：标题非空但名字与目标会话不匹配（群名全半角/emoji 的
+        OCR 差异，如 chat='🎉庆祝群'、标题读成 '庆祝群(5)'）→ 不得 force 重切。
+        旧逻辑 startswith 失败 → 白点 force 点击已选中会话 → toggle 取消选中
+        → 消息区读空 → 再 force……死循环重复点击（真机日志群聊名字后多带
+        （数字））。新逻辑：名字比较退出切换判定，标题非空即信任已选中。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+
+        def fake_avatar_tops(img, bg, side):
+            return [0, 50] if side == "right" else [100]
+
+        with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
+             mock.patch.object(b, "read_title", return_value="庆祝群(5)"), \
+             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.detect_bubble_colors",
+                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
+                                      "self": (53, 210, 141)}), \
+             mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                        side_effect=fake_avatar_tops), \
+             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
+                        return_value=[
+                            (100, 130, 10, 160, False),  # 对方长文字
+                        ]), \
+             mock.patch("wx_backend.visual_backend.find_media_boxes",
+                        return_value=[]):
+            b.connect()
+            win = b.analyze_window("🎉庆祝群")
+        # 标题非空 → 不触发 force 重切（名字比较退出切换判定）
+        force_calls = [c for c in m_switch.call_args_list if c.kwargs.get("force")]
+        self.assertFalse(force_calls, "标题非空时名字不匹配不得 force 重切")
+        # has_other 几何防线保留：对方头像在 bot 之后 → 仍有新消息
+        self.assertTrue(win.get("has_other"),
+                        "has_other 几何判据不得因名字不匹配而失效")
         b.close()
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
@@ -572,6 +609,35 @@ class TestVisualBackend(unittest.TestCase):
         force_calls = [c for c in _switch.call_args_list
                        if c == mock.call("王文生", force=True)]
         self.assertTrue(force_calls, "None 后应 force 重切会话恢复选中")
+        b.close()
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
+                return_value=True)
+    @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    {"text": "你好", "x": 100, "y": 50, "w": 30, "h": 20},
+                ])
+    def test_get_messages_name_mismatch_no_reswitch(self, _ocr, _cap, _find,
+                                                    _switch):
+        """RED 复现：标题非空但解析名与目标会话不匹配（群名 emoji/全半角
+        OCR 差异，chat='🎉庆祝群'、标题读成 '庆祝群(5)'）→ 不得 force 重切。
+        旧逻辑 startswith 失败 → 白点 force 点击已选中会话 → toggle 取消选中
+        → 读 0 条 → 再 force……群聊新消息反复点击（真机日志：私聊不带数字、
+        群聊名字后多带（数字））。新逻辑：标题为空才 force 重切。"""
+        b = VisualBackend()
+        b._message_region = (0.0, 0.0, 1.0, 1.0)
+        b.connect()
+        with mock.patch.object(b, "read_title", return_value="庆祝群(5)") as _rt:
+            msgs = b.get_messages("🎉庆祝群")
+        self.assertEqual(_rt.call_count, 1, "标题非空时只读一次，不重切重读")
+        force_calls = [c for c in _switch.call_args_list
+                       if c == mock.call("🎉庆祝群", force=True)]
+        self.assertFalse(force_calls, "标题非空时名字不匹配不得 force 重切")
+        self.assertTrue(msgs, "名字不匹配不得影响消息读取")
+        self.assertIn("你好", msgs[0].content)
         b.close()
 
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
@@ -1038,6 +1104,18 @@ def _solid_with_badge(size=(200, 200)):
     return img
 
 
+def _solid_with_highlight_rows(size=(200, 200)):
+    """白底图 + y∈[40,70] 一条浅灰选中高亮行（微信列表选中背景 ≈ #F0F0F0）。
+
+    其余行保持纯白（未选中背景）——用于「高亮行 vs 非高亮行」两种背景断言。
+    """
+    from PIL import ImageDraw
+    img = _solid(size, (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0, 40, 200, 70], fill=(240, 240, 240))  # 选中高亮行
+    return img
+
+
 class TestDetectRedClusters(unittest.TestCase):
     def test_finds_badge_cluster(self):
         from wx_backend.visual_backend import _detect_red_clusters
@@ -1142,6 +1220,91 @@ class TestIterUnreadSessions(unittest.TestCase):
         b = self._backend()
         list(b.iter_unread_sessions())
         self.assertEqual(_refresh.call_args, mock.call(force=True, foreground=False))
+
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid_with_badge())
+    @mock.patch("wx_backend.visual_backend.ocr_image",
+                return_value=[
+                    # 红块中心整窗 (30,56)；王文生名中心 (35,50) → 红圈在其左上邻近
+                    {"text": "王文生", "x": 20, "y": 40, "w": 30, "h": 20},
+                ])
+    def test_iter_unread_records_badge_coords(self, _ocr, _refresh):
+        """红圈坐标通道：iter_unread_sessions 匹配红圈与名字后，把红圈中心
+        屏幕坐标记入 _badge_coords——_switch_chat 在 OCR 名漏读/坐标缺失时
+        可直接点红圈右下条目（复用 _anchor_badge 思路），不再依赖 OCR 名坐标。
+        """
+        b = self._backend()
+        names = list(b.iter_unread_sessions())
+        self.assertEqual(names, ["王文生"])
+        # 红圈整窗中心 (30,56)，窗口偏移 0 → 屏幕坐标 (30,56)
+        self.assertEqual(b._badge_coords.get("王文生"), (30, 56))
+
+
+class TestSelectedRowHighlight(unittest.TestCase):
+    """自学习选中高亮检测：点击成功后采样条目行背景色缓存为选中色，
+    _is_row_selected 命中缓存 → 已选中不点击（防 toggle 重复点击取消选中）。"""
+
+    def _backend(self):
+        b = VisualBackend()
+        b._hwnd = 0x1234  # 不 connect，直接设句柄（GetWindowRect 失败 rect 零值）
+        b._last_shot = None
+        b._session_coords = {"王文生": (30, 50)}  # 屏幕坐标（窗口偏移 0 = 截图坐标）
+        return b
+
+    @mock.patch("pyautogui.click")
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid_with_highlight_rows())
+    @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
+                return_value="王文生")
+    def test_switch_chat_learns_selected_color(self, _rt, _refresh, _click):
+        """点击成功且标题非空 → 采样该条目行背景色缓存为选中色；
+        _is_row_selected 对高亮行 True、对非高亮行 False（两种背景断言）。"""
+        b = self._backend()
+        self.assertTrue(b._switch_chat("王文生", force=True))
+        _click.assert_called_once_with(30, 50)
+        self.assertEqual(b._selected_row_color, (240, 240, 240),
+                         "点击成功后应采样该行背景色缓存为选中色")
+        self.assertTrue(b._is_row_selected(50), "高亮行（选中）应命中缓存选中色")
+        self.assertFalse(b._is_row_selected(150), "非高亮行（未选中）不应命中")
+
+    @mock.patch("pyautogui.click")
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid_with_highlight_rows())
+    def test_switch_chat_highlight_hit_skips_click(self, _refresh, _click):
+        """高亮命中缓存选中色 → 已选中，不点击直接返回 True（防 toggle 重复点击）。"""
+        b = self._backend()
+        b._selected_row_color = (240, 240, 240)
+        self.assertTrue(b._switch_chat("王文生"))
+        _click.assert_not_called()
+
+    @mock.patch("pyautogui.click")
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid((200, 200), (255, 255, 255)))
+    @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
+                return_value="王文生")
+    def test_switch_chat_fallback_title_when_no_highlight(self, _rt, _refresh,
+                                                          _click):
+        """高亮缓存缺失 → 回退 UI 标题比较：标题=目标会话 → 已选中不点击。"""
+        b = self._backend()  # _selected_row_color 默认 None（缓存缺失）
+        self.assertTrue(b._switch_chat("王文生"))
+        _click.assert_not_called()
+
+    @mock.patch("pyautogui.click")
+    @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
+                return_value=_solid_with_highlight_rows())
+    @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])
+    @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
+                return_value="杨冬梅")
+    def test_switch_chat_badge_coord_fallback(self, _rt, _ocr, _refresh,
+                                              _click):
+        """OCR 坐标缺失但 _badge_coords 有红圈坐标 → 点红圈右下条目主体
+        （bcx+45, bcy，复用 _anchor_badge 思路），不再因缺坐标放弃切换。"""
+        b = self._backend()
+        b._session_coords = {}  # 目标会话 OCR 名漏读 → 无坐标
+        b._badge_coords = {"杨冬梅": (30, 56)}  # 红圈中心屏幕坐标
+        self.assertTrue(b._switch_chat("杨冬梅", force=True))
+        _click.assert_called_once_with(75, 56)  # 30+45, 56（条目主体）
+        self.assertEqual(b._current_chat, "杨冬梅")
 
 
 # ---- 用户圈定区域配置加载 ----
