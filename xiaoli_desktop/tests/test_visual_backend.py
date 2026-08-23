@@ -131,6 +131,20 @@ class TestOcrImageMocked(unittest.TestCase):
             {"text": "[图片]", "x": 5, "y": 80, "w": 55, "h": 20},
         ])
 
+    def test_engine_construction_limits_threads(self):
+        """契约：引擎构造必须限制 ONNX Runtime 线程数（CPU 治理），防回退。"""
+        from wx_backend import visual_backend as vb
+
+        old = vb._OCR_ENGINE
+        vb._OCR_ENGINE = None
+        try:
+            with mock.patch("rapidocr_onnxruntime.RapidOCR") as m_cls:
+                m_cls.return_value = object()
+                vb._get_ocr_engine()
+                m_cls.assert_called_once_with(intra_op_num_threads=2)
+        finally:
+            vb._OCR_ENGINE = old
+
 
 # ---- 气泡色探测 + 连通域分气泡 ----
 
