@@ -744,7 +744,7 @@ class AgentBot(WeChatBot):
             except OSError as e:
                 logger.error(f"[vision] 图片读取失败，忽略图片: {e}")
         try:
-            resp = self.call_vision_api(content)
+            resp = self.call_vision_api(content, chat_id=chat_name)
         except Exception as e:
             logger.error(f"[vision] 调用异常: {e}")
             return None

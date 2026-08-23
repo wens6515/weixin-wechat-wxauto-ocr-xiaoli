@@ -988,6 +988,108 @@ class TestCallVisionApi(unittest.TestCase):
         with patcher:
             self.assertIsNone(bot.call_vision_api([{"type": "text", "text": "描述"}]))
 
+    def test_chat_id_injects_history_with_timestamp_prefix(self):
+        """传 chat_id 时在 system 人设之后、最后 user 多模态块之前注入
+        _get_history(chat_id) 历史，每条带 [time] 前缀（逐字对齐 call_chat_ai
+        语义，不重排：_get_history 返回序即注入序）。RED：修复前 call_vision_api
+        无 chat_id 参数，payload 不含任何历史 → 模型答"我上一条说的什么"时
+        无记忆可查。"""
+        bot = self._make()
+        bot.system_prompt = "你是小漓"
+        history = [
+            {"role": "user", "content": "我上一条说的什么",
+             "time": "2026-06-14 10:00:00"},
+            {"role": "assistant", "content": "你上一条说的是吃饭",
+             "time": "2026-06-14 10:00:05"},
+        ]
+        bot._get_history = lambda chat_id: history
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "ok"}}]}})
+        with patcher:
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+        msgs = captured["json"]["messages"]
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
+        hist_msgs = msgs[1:-1]
+        self.assertEqual([m["role"] for m in hist_msgs], ["user", "assistant"],
+                         "历史注入在 system 之后、user 之前，保持 _get_history 原序")
+        self.assertEqual(hist_msgs[0]["content"],
+                         "[2026-06-14 10:00:00] 我上一条说的什么",
+                         "历史消息带 [time] 前缀")
+        self.assertEqual(hist_msgs[1]["content"],
+                         "[2026-06-14 10:00:05] 你上一条说的是吃饭",
+                         "assistant 历史同样带 [time] 前缀")
+        self.assertEqual(msgs[-1]["role"], "user")
+        self.assertEqual(msgs[-1]["content"], self.TEXT_ONLY,
+                         "最后一条 user 为多模态块列表原样透传")
+
+    def test_history_without_time_field_passes_content_raw(self):
+        """历史条目无 time 字段 → 不加前缀原样注入（对齐 call_chat_ai 的
+        else 分支）。"""
+        bot = self._make()
+        bot._get_history = lambda chat_id: [
+            {"role": "user", "content": "没时间戳的历史"},
+        ]
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "ok"}}]}})
+        with patcher:
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+        msgs = captured["json"]["messages"]
+        # 无 persona → 无 system 消息，history 为第一条
+        self.assertEqual(msgs[0]["content"], "没时间戳的历史",
+                         "无 time 字段的历史原样注入，不加前缀")
+
+    def test_text_reply_strips_timestamp_prefix(self):
+        """text 响应 content 带时间戳前缀 → 返回前过滤（逐字复用
+        call_chat_ai 的 re.sub 正则：模型偶发复读 [ts] 前缀时去除）。"""
+        bot = self._make()
+        bot._get_history = lambda chat_id: []
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {
+                "content": "[2026-06-14 10:00:00] 你上一条说的是吃饭"}}]}})
+        with patcher:
+            result = bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+        self.assertEqual(result, {"kind": "text", "content": "你上一条说的是吃饭"})
+
+    def test_history_trimmed_by_budget_before_payload(self):
+        """传 chat_id 时在 user 多模态块 append 之后、payload 构造之前调用
+        fit_messages_in_budget（逐字对齐 call_chat_ai:1263-1264 的上下文预算
+        裁剪：budget 取 getattr(self, 'max_context_tokens', 100000)）。
+        RED：修复前 call_vision_api 不裁剪，超长历史/文件全文会撑爆模型
+        上下文上限（实测请求 272 万 token → API 400 "maximum context length"）。"""
+        from unittest import mock as _mock
+        bot = self._make()
+        bot.system_prompt = "你是小漓"
+        bot.max_context_tokens = 8000
+        history = [
+            {"role": "user", "content": "历史一", "time": "2026-06-14 10:00:00"},
+            {"role": "assistant", "content": "历史二", "time": "2026-06-14 10:00:05"},
+        ]
+        bot._get_history = lambda chat_id: history
+        captured, patcher = self._post(
+            {"body": {"choices": [{"message": {"content": "ok"}}]}})
+        calls = []
+
+        def fake_fit(messages, **kw):
+            calls.append((messages, kw.get("budget")))
+            return messages
+
+        with _mock.patch("wechat_bot.fit_messages_in_budget", side_effect=fake_fit), \
+             patcher:
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+
+        self.assertEqual(len(calls), 1,
+                         "payload 构造前必须调用一次 fit_messages_in_budget")
+        msgs, budget = calls[0]
+        self.assertEqual(budget, 8000,
+                         "budget 取 getattr(self, 'max_context_tokens', 100000)")
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(msgs[0]["content"], "你是小漓", "裁剪收到 system 人设")
+        self.assertEqual([m["role"] for m in msgs[1:-1]], ["user", "assistant"],
+                         "裁剪收到历史（system 之后、user 之前）")
+        self.assertEqual(msgs[-1]["content"], self.TEXT_ONLY,
+                         "裁剪收到最后一条 user 多模态块（append 之后才裁剪）")
+
 
 class TestSendTextPlaceholder(unittest.TestCase):
     """_send_text 占位计数：按 chat_name 隔离（非全局），placeholder=True 递增 /
@@ -1168,6 +1270,7 @@ class TestVisionRoutePersona(unittest.TestCase):
         bot.vision_temp = 0.7
         bot.vision_max_tokens = 10000
         bot._model_lock = threading.RLock()
+        bot.memory_db = {}  # __new__ 绕过 __init__，需补齐 _get_history 依赖
         return bot
 
     def _capture_payload(self, bot):

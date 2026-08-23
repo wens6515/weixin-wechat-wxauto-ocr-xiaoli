@@ -79,6 +79,54 @@ def estimate_tokens(text):
     return int(cjk * 0.8 + ascii_n * 0.3 + other * 0.6) + 1
 
 
+def _content_to_text(content):
+    """把消息 content 转成纯文本估算串（仅供 estimate_tokens 估算用，
+    不修改原消息）。多模态块列表（vision user 消息）取 text 块的文本
+    拼接，image_url 等非文本块按固定占位计——base64 字符数不代表
+    token 数（图片 token 由视觉模型内部处理），按字符算会误判超预算。
+    """
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(str(b.get("text") or ""))
+            else:
+                parts.append("[image]")
+        return "".join(parts)
+    return str(content or "")
+
+
+def _trim_blocks(blocks, keep):
+    """多模态块列表按字符预算裁剪：text 块截断文本，image_url 等非文本
+    块必须保留（截断 base64 会损坏图片；视觉调用图片是识别对象）。
+    预算优先分配给非文本块（每块按固定成本计），text 块共享剩余预算
+    按序截断。返回裁剪后的块列表。
+    """
+    fixed = sum(500 for b in blocks
+                if not (isinstance(b, dict) and b.get("type") == "text"))
+    text_budget = max(0, keep - fixed)
+    out = []
+    used_text = 0
+    for b in blocks:
+        if isinstance(b, dict) and b.get("type") == "text":
+            text = str(b.get("text") or "")
+            room = text_budget - used_text
+            if room <= 0:
+                out.append({"type": "text", "text": "[内容过长已截断]…"})
+                continue
+            if len(text) > room:
+                out.append({"type": "text",
+                            "text": text[:room] + "[内容过长已截断]…"})
+                used_text = text_budget
+            else:
+                out.append(b)
+                used_text += len(text)
+        else:
+            # 非文本块（image_url 等）：token 大头，原样保留
+            out.append(b)
+    return out
+
+
 def fit_messages_in_budget(messages, budget=100000, reserve=2000):
     """把 messages 裁剪到 token 预算内（从最旧历史开始丢弃）。
 
@@ -105,18 +153,24 @@ def fit_messages_in_budget(messages, budget=100000, reserve=2000):
             out.append({"role": "system", "content": content})
             total += estimate_tokens(content)
     # 历史 + user：从最旧开始，超预算的旧消息丢弃、继续往后；
-    # 最后一条 user 若仍超限则截断（可能含文件全文）
+    # 最后一条 user 若仍超限则截断（可能含文件全文/多模态块）
     tail = [m for m in messages if m.get("role") != "system"]
     for i, m in enumerate(tail):
-        content = str(m.get("content") or "")
-        tokens = estimate_tokens(content)
+        raw = m.get("content")
+        is_blocks = isinstance(raw, list)
+        content = raw if is_blocks else str(raw or "")
+        tokens = estimate_tokens(_content_to_text(raw))
         is_last = i == len(tail) - 1
         if total + tokens > cap:
-            if is_last and content:
-                # 最后一条 user（可能含文件全文）截断到预算 60%，带省略号标记
+            if is_last and raw:
+                # 最后一条 user（可能含文件全文/多模态块）截断到预算 60%
                 keep = max(500, int(budget * 0.6))
-                content = content[:keep] + "[内容过长已截断]…"
-                tokens = estimate_tokens(content)
+                if is_blocks:
+                    content = _trim_blocks(raw, keep)
+                    tokens = estimate_tokens(_content_to_text(content))
+                else:
+                    content = content[:keep] + "[内容过长已截断]…"
+                    tokens = estimate_tokens(content)
                 out.append({"role": m.get("role", "user"), "content": content})
                 total += tokens
             continue  # 旧消息超预算 → 丢弃该条，继续尝试更近的消息
@@ -399,16 +453,21 @@ class WeChatBot:
             logger.info(f"  删除: [{ts}] {role}: {msg['content'][:50]}...")
         return True
 
-    def call_vision_api(self, content):
+    def call_vision_api(self, content, chat_id=None):
         """单调用视觉识别（OpenAI 兼容 / chat.completions）。
 
-        唯一参数 content：块列表 list[dict]，格式
+        content：块列表 list[dict]，格式
           [{"type": "text", "text": ...},
            {"type": "image_url", "image_url": {"url": "data:image/..."}}]
         图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
         消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
         带图返回 400）。人设（self.system_prompt）前置为 system 纯文本消息
         （空人设则不插入 system 消息）；图片绝不放 system。
+
+        chat_id 可选（默认 None）：非空时在 system 人设之后、最后 user 多模态
+        块之前注入 _get_history(chat_id) 历史（语义逐字对齐 call_chat_ai：
+        有 time 字段带 [ts] 前缀，否则原文；不重排，_get_history 已按时间有序）。
+        为空时 messages 结构与现状完全一致（图片/文件描述路径不受影响）。
 
         payload 声明 dispatch_task 工具（tool_choice=auto）：模型判定用户消息为
         任务时走 tool_calls 返回，否则返回纯文本描述（上层按 dict 分流）。
@@ -423,13 +482,29 @@ class WeChatBot:
         # 方案二：人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
         # 只能进 user 消息）；persona 为空时不插入空 system 消息（防空消息 400）。
         persona = (getattr(self, "system_prompt", "") or "").strip()
-        messages = ([{"role": "system", "content": persona}] if persona else []) \
-            + [{"role": "user", "content": content}]
+        messages = [{"role": "system", "content": persona}] if persona else []
+        if chat_id:
+            # 历史注入：语义逐字对齐 call_chat_ai（system 之后、user 之前；
+            # 有 time 字段带 [ts] 前缀，否则原文；不重排——_get_history 返回
+            # 列表本身已按时间有序）
+            for h in self._get_history(chat_id):
+                if "time" in h:
+                    ts = h["time"]
+                    msg_content = f"[{ts}] {h['content']}"
+                else:
+                    msg_content = h['content']
+                messages.append({"role": h["role"], "content": msg_content})
+        messages.append({"role": "user", "content": content})
         with self._model_lock:
             # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
             # 空则兜底 vision-exp（防空 model → API 400）
             model = self.chat_model or VISION_MODEL_DEFAULT
             temp = self.vision_temp
+        # 上下文预算裁剪：超长历史/文件全文会撑爆模型上下文上限
+        # （实测请求 272 万 token → API 400 "maximum context length"）。
+        # 逐字对齐 call_chat_ai：从最旧历史开始丢弃，保证单次请求不超模型上下文。
+        messages = fit_messages_in_budget(
+            messages, budget=getattr(self, "max_context_tokens", 100000))
         payload = {
             "model": model,
             "messages": messages,
@@ -472,6 +547,10 @@ class WeChatBot:
             if not content:
                 logger.warning("视觉模型返回空 content")
                 return None
+            # 时间戳前缀过滤：逐字复用 call_chat_ai 的 re.sub 表达式
+            # （模型偶发把注入的历史 [ts] 前缀复读进回复时去除）
+            content = re.sub(
+                r'^\[\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}(:\d{2}|:xx)?\]\s*', '', content)
             return {"kind": "text", "content": content}
         except Exception as e:
             logger.error(f"视觉模型调用失败: {e}")
