@@ -1743,6 +1743,37 @@ class TestOcrImageSharded(unittest.TestCase):
         self.assertEqual(items[0]["w"], right_line["x"] + right_line["w"] - 20,
                          "行宽扩展到右片右边界（按换算后坐标）")
 
+    def test_reverse_order_absorbed(self):
+        """右片段 y 更小（排序后右片段在前）：右片在重叠区边缘把左片完整行
+        的尾部切开识别成子串（如 '已经记下了'），合并方向须按 x 判定——
+        左片段在后时反向吸收，不得产生 '已经记下了 好的我明白了…' 重复。"""
+        img = self._img()
+        left_line = {"text": "好的我明白了这个问题我已经记下了",
+                     "x": 31, "y": 170, "w": 600, "h": 40}
+        right_line = {"text": "已经记下了",
+                      "x": 3, "y": 168, "w": 200, "h": 40}  # 片内 x，换算后 > 左
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[left_line], [right_line]]):
+            items = ocr_image_sharded(img)
+        self.assertEqual(len(items), 1, "尾部子串须被吸收，不得重复")
+        self.assertEqual(items[0]["text"], "好的我明白了这个问题我已经记下了")
+        self.assertEqual(items[0]["x"], 31, "保留左片段坐标")
+
+    def test_reverse_order_merged(self):
+        """右片段 y 更小（排序后右片段在前）：跨边界长行左片段在后，仍须
+        尾-头拼接还原（方向按 x 判定，不依赖 y 排序顺序）。"""
+        img = self._img()
+        left_line = {"text": "你现在应该记忆里面只有两条",
+                     "x": 20, "y": 32, "w": 500, "h": 40}
+        right_line = {"text": "忆里面只有两条我的消息吧",
+                      "x": 80, "y": 30, "w": 500, "h": 40}
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[left_line], [right_line]]):
+            items = ocr_image_sharded(img)
+        self.assertEqual(len(items), 1, "反向排序下仍须合并")
+        self.assertEqual(items[0]["text"], "你现在应该记忆里面只有两条我的消息吧")
+        self.assertEqual(items[0]["x"], 20, "保留左片段坐标")
+
     def test_identical_line_dedup(self):
         """重叠区完整行：两片识别出完全相同文本（旧逻辑能去重的场景），
         新逻辑同样只保留一条。行落在重叠区中央（整图 x=550，1600 宽图的
