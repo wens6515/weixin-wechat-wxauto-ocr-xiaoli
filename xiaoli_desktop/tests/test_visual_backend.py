@@ -27,6 +27,7 @@ from wx_backend.visual_backend import (
     _bucket_avatar,
     _norm_cjk,
     ocr_image,
+    ocr_image_sharded,
     region_changed,
     detect_bubble_colors,
     detect_avatar_tops,
@@ -1710,6 +1711,93 @@ class TestRealFixtureRegion(unittest.TestCase):
         self.assertTrue(win["has_media"] and win["has_other"])
         self.assertEqual(win["bot_bottom"], 801)
         b.close()
+
+
+class TestOcrImageSharded(unittest.TestCase):
+    """ocr_image_sharded 分片合并：跨边界长行左右两片识别出不同子串时
+    必须尾-头合并，不得重复/错位。旧实现去重 key (round(y/10), text)
+    只对完全相同文本去重，跨边界行左右两片 text 不同 → 双份进 items
+    （真机：任务指令 raw_message 只投递前半段且拼装重复）。"""
+
+    def _img(self, w=1600, h=400):
+        return Image.new("RGB", (w, h), (255, 255, 255))
+
+    def test_cross_boundary_line_merged(self):
+        """横跨分片边界的长行：左片识别「前缀」，右片识别「中缀+后缀」，
+        两片 text 不同 → 必须尾-头合并成完整一行，且无重复、无错位。"""
+        img = self._img()
+        left_line = {"text": "你现在应该记忆里面只有两条",
+                     "x": 20, "y": 30, "w": 500, "h": 40}
+        right_line = {"text": "忆里面只有两条我的消息吧",
+                      "x": 80, "y": 32, "w": 500, "h": 40}
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[left_line], [right_line]]) as m:
+            items = ocr_image_sharded(img)
+        self.assertEqual(m.call_count, 2, "宽图走左右两片")
+        self.assertGreater(right_line["x"], 80, "右片 x 已换算到整图（加正偏移）")
+        self.assertEqual(len(items), 1, "跨边界行须合并成单条，不得重复")
+        self.assertEqual(items[0]["text"], "你现在应该记忆里面只有两条我的消息吧",
+                         "尾-头合并不得错位/丢字")
+        self.assertEqual((items[0]["x"], items[0]["y"]), (20, 30),
+                         "合并保留前项（左片）坐标")
+        self.assertEqual(items[0]["w"], right_line["x"] + right_line["w"] - 20,
+                         "行宽扩展到右片右边界（按换算后坐标）")
+
+    def test_identical_line_dedup(self):
+        """重叠区完整行：两片识别出完全相同文本（旧逻辑能去重的场景），
+        新逻辑同样只保留一条。行落在重叠区中央（整图 x=550，1600 宽图的
+        重叠区 [512, 1088]），左片 x=550、右片片内 x=38（换算后同为 550）。"""
+        img = self._img()
+        left_line = {"text": "你好", "x": 550, "y": 30, "w": 100, "h": 40}
+        right_line = {"text": "你好", "x": 38, "y": 30, "w": 100, "h": 40}
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[left_line], [right_line]]):
+            items = ocr_image_sharded(img)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "你好")
+
+    def test_no_overlap_kept(self):
+        """重叠区相邻但 text 无公共前后缀（不同内容）→ 保留两条。"""
+        img = self._img()
+        left_line = {"text": "你好世界", "x": 20, "y": 30, "w": 400, "h": 40}
+        right_line = {"text": "完全不同的内容", "x": 80, "y": 32, "w": 400, "h": 40}
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[left_line], [right_line]]):
+            items = ocr_image_sharded(img)
+        self.assertEqual(len(items), 2, "无公共前后缀不得合并")
+
+    def test_different_rows_not_merged(self):
+        """y 差 >= 20px（2x 坐标）→ 不同行，不得合并。"""
+        img = self._img()
+        left_line = {"text": "第一行", "x": 20, "y": 30, "w": 300, "h": 40}
+        right_line = {"text": "第一行后面", "x": 80, "y": 60, "w": 300, "h": 40}
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[left_line], [right_line]]):
+            items = ocr_image_sharded(img)
+        self.assertEqual(len(items), 2, "y 差超阈值视为不同行")
+
+    def test_sorted_output(self):
+        """输出按 (y, x) 排序（调用处 get_messages 的期望）。"""
+        img = self._img()
+        line_a = {"text": "A行", "x": 20, "y": 30, "w": 300, "h": 40}
+        line_b = {"text": "B行", "x": 30, "y": 80, "w": 300, "h": 40}
+        line_c = {"text": "C行", "x": 40, "y": 50, "w": 300, "h": 40}
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        side_effect=[[line_b], [line_a, line_c]]):
+            items = ocr_image_sharded(img)
+        ys = [it["y"] for it in items]
+        self.assertEqual(ys, sorted(ys), "输出须按 y 排序")
+
+    def test_narrow_image_single_shot(self):
+        """宽度 <= max_side+100 → 单片 ocr_image，不进入分片逻辑。"""
+        img = Image.new("RGB", (500, 300), (255, 255, 255))
+        with mock.patch("wx_backend.visual_backend.ocr_image",
+                        return_value=[{"text": "短行", "x": 5, "y": 5,
+                                       "w": 50, "h": 20}]) as m:
+            items = ocr_image_sharded(img)
+        self.assertEqual(m.call_count, 1)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "短行")
 
 
 if __name__ == "__main__":

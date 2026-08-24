@@ -299,6 +299,41 @@ def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
     return items
 
 
+def _longest_overlap(a: str, b: str) -> int:
+    """a 的后缀与 b 的前缀的最长公共长度 n（0 = 无重叠）。
+
+    用于跨分片边界行合并：左片识别「行开头+中间」，右片识别「中间+结尾」，
+    n 即中间段长度，拼接 前项 + 后项[n:] 还原完整行。
+    """
+    max_n = min(len(a), len(b))
+    for n in range(max_n, 0, -1):
+        if a[-n:] == b[:n]:
+            return n
+    return 0
+
+
+def _try_merge_shard(prev: dict, cur: dict, mid: int, overlap: int) -> bool:
+    """尝试把 cur 尾-头合并进 prev（同一行被分片切断的左右两段）。
+
+    判据（2x 坐标）：
+    - y 差 < 20px → 同一行
+    - x 区间都伸进重叠区 [mid-overlap, mid+overlap] → 该行确实跨边界被切断
+    - 前项 text 后缀 == 后项 text 前缀的最长公共长度 n > 0 → 有可拼接内容
+    合并后保留前项坐标，text = 前项 + 后项[n:]，行宽扩展到后项右边界。
+    否则返回 False，两项各自保留。
+    """
+    if abs(prev["y"] - cur["y"]) >= 20:
+        return False
+    if not (prev["x"] + prev["w"] > mid - overlap and cur["x"] < mid + overlap):
+        return False
+    n = _longest_overlap(prev["text"], cur["text"])
+    if n <= 0:
+        return False
+    prev["text"] = prev["text"] + cur["text"][n:]
+    prev["w"] = cur["x"] + cur["w"] - prev["x"]
+    return True
+
+
 def ocr_image_sharded(img: Image.Image, max_side: int = 736) -> list[dict]:
     """宽图左右分片 OCR：避免长文本行被检测模型压缩截断。
 
@@ -307,30 +342,32 @@ def ocr_image_sharded(img: Image.Image, max_side: int = 736) -> list[dict]:
     （用户的长任务指令）检测框不完整 → 内容截断（真机：task.json raw_message
     只投递前半段「镜头1：缓」）。分片让每片宽度 ≈ 检测限制，长文本行不被压缩。
     返回 items 坐标与输入 img 同一坐标系（2x 整图）。
+
+    分片合并：左右两片对跨边界长行各识别出不同子串，旧去重 key
+    (round(y/10), text) 只对完全相同文本去重 → 两段都进 items，拼装后
+    重复/错位（真机：任务指令 raw_message 只投递前半段且拼装重复）。现改为：
+    右片 x 加 offset 后与左片合并按 (y, x) 排序，相邻项满足同行 + 伸进重叠区
+    + 尾-头公共重叠时拼接还原。
     """
     if img.width <= max_side + 100:  # 宽度在检测限制附近，单片即可
         return ocr_image(img)
-    overlap = int(img.width * 0.12)
+    overlap = int(img.width * 0.18)  # 12% → 18%：更大重叠给跨边界行更多
+    # 可拼接的公共子串，缓解边界行漏合并
     mid = img.width // 2
     left = img.crop((0, 0, mid + overlap, img.height))
     right = img.crop((mid - overlap, 0, img.width, img.height))
     left_items = ocr_image(left)
     right_items = ocr_image(right)
     offset_x = mid - overlap  # 右片 x 坐标换算到整图
-    items: list[dict] = []
-    seen: set = set()
-    for it in left_items:
-        key = (round(it["y"] / 10), it["text"])
-        if key not in seen:
-            seen.add(key)
-            items.append(it)
     for it in right_items:
         it["x"] += offset_x
-        key = (round(it["y"] / 10), it["text"])
-        if key not in seen:
-            seen.add(key)
-            items.append(it)
-    return items
+    items = sorted(left_items + right_items, key=lambda it: (it["y"], it["x"]))
+    merged: list[dict] = []
+    for it in items:
+        if merged and _try_merge_shard(merged[-1], it, mid, overlap):
+            continue  # 已并入前项
+        merged.append(it)
+    return merged
 
 
 def detect_bubble_colors(img: Image.Image) -> dict:
