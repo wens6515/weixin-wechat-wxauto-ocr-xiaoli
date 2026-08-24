@@ -313,19 +313,26 @@ def _longest_overlap(a: str, b: str) -> int:
 
 
 def _try_merge_shard(prev: dict, cur: dict, mid: int, overlap: int) -> bool:
-    """尝试把 cur 尾-头合并进 prev（同一行被分片切断的左右两段）。
+    """尝试把 cur 合并进 prev（同一行被分片切断/重复识别的片段）。
 
+    调用方保证 prev 是 x 较小（左）片段、cur 是 x 较大（右）片段——y 排序
+    可能让同一行左右片段顺序颠倒（右片段 y 更小），主循环按 x 判定方向。
     判据（2x 坐标）：
     - y 差 < 20px → 同一行
     - x 区间都伸进重叠区 [mid-overlap, mid+overlap] → 该行确实跨边界被切断
-    - 前项 text 后缀 == 后项 text 前缀的最长公共长度 n > 0 → 有可拼接内容
-    合并后保留前项坐标，text = 前项 + 后项[n:]，行宽扩展到后项右边界。
+    - 右片段是左片段行的连续子串（重叠区边缘把行尾部切开重复识别）→ 吸收
+    - 左片段 text 后缀 == 右片段 text 前缀的最长公共长度 n > 0 → 拼接还原
+    合并后保留前项（左片段）坐标，text = 左 + 右[n:]，行宽扩展到右边界。
     否则返回 False，两项各自保留。
     """
     if abs(prev["y"] - cur["y"]) >= 20:
         return False
     if not (prev["x"] + prev["w"] > mid - overlap and cur["x"] < mid + overlap):
         return False
+    # 重叠区重复识别：右片段是左片段行的子串 → 吸收，不改变文本
+    if cur["text"] in prev["text"]:
+        prev["w"] = max(prev["w"], cur["x"] + cur["w"] - prev["x"])
+        return True
     n = _longest_overlap(prev["text"], cur["text"])
     if n <= 0:
         return False
@@ -364,8 +371,17 @@ def ocr_image_sharded(img: Image.Image, max_side: int = 736) -> list[dict]:
     items = sorted(left_items + right_items, key=lambda it: (it["y"], it["x"]))
     merged: list[dict] = []
     for it in items:
-        if merged and _try_merge_shard(merged[-1], it, mid, overlap):
-            continue  # 已并入前项
+        if merged and abs(merged[-1]["y"] - it["y"]) < 20:
+            prev = merged[-1]
+            if it["x"] >= prev["x"]:
+                # 常规方向：prev 在左、it 在右 → 拼 prev 尾 + it 头
+                if _try_merge_shard(prev, it, mid, overlap):
+                    continue
+            elif _try_merge_shard(it, prev, mid, overlap):
+                # y 排序颠倒：it 在左、prev 在右 → 反向拼 it 尾 + prev 头，
+                # 合并结果保留 it（左片段）坐标
+                merged[-1] = it
+                continue
         merged.append(it)
     return merged
 
