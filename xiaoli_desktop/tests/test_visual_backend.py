@@ -27,7 +27,6 @@ from wx_backend.visual_backend import (
     _bucket_avatar,
     _norm_cjk,
     ocr_image,
-    ocr_image_sharded,
     region_changed,
     detect_bubble_colors,
     detect_avatar_tops,
@@ -1537,7 +1536,7 @@ class TestGetMessagesInMedia(unittest.TestCase):
                 return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
                 return_value=_solid((400, 300), (30, 30, 31)))
-    @mock.patch("wx_backend.visual_backend.ocr_image_sharded")
+    @mock.patch("wx_backend.visual_backend.ocr_image")
     @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
     @mock.patch("wx_backend.visual_backend.find_media_boxes")
     def test_media_text_dropped_and_name_consumed(self, _media, _tops, _ocr,
@@ -1566,7 +1565,7 @@ class TestGetMessagesInMedia(unittest.TestCase):
                 return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
                 return_value=_solid((400, 300), (30, 30, 31)))
-    @mock.patch("wx_backend.visual_backend.ocr_image_sharded")
+    @mock.patch("wx_backend.visual_backend.ocr_image")
     @mock.patch("wx_backend.visual_backend.detect_avatar_tops")
     @mock.patch("wx_backend.visual_backend.find_media_boxes")
     def test_text_outside_media_kept(self, _media, _tops, _ocr,
@@ -1587,6 +1586,35 @@ class TestGetMessagesInMedia(unittest.TestCase):
             msgs = b.get_messages("王文生")
         self.assertEqual(len(msgs), 1, "media 框外文字消息应保留")
         self.assertEqual(msgs[0].content, "这是一条正常的文字消息")
+        b.close()
+
+    def test_message_region_uses_single_shot_ocr(self):
+        """消息区 OCR 走单片 ocr_image（v2.1.3 废弃分片：分片切边界把整字
+        切成两半误识，真机「排」被切左半成「非」、探针稳定复现碎片「丙」
+        「马」；单片读 40+ 字超长行一字不差）。锁死 get_messages 不再走
+        分片路径。"""
+        b = self._backend()
+        with mock.patch.object(b, "_switch_chat", return_value=True), \
+                mock.patch("wx_backend.visual_backend.find_wechat_window",
+                           return_value=0x1234), \
+                mock.patch("wx_backend.visual_backend.capture_window",
+                           return_value=_solid((400, 300), (255, 255, 255))), \
+                mock.patch("wx_backend.visual_backend.ocr_image",
+                           return_value=[{"text": "单行消息", "x": 20, "y": 30,
+                                          "w": 120, "h": 30}]) as m_ocr, \
+                mock.patch("wx_backend.visual_backend.detect_avatar_tops",
+                           return_value=[]), \
+                mock.patch("wx_backend.visual_backend.find_media_boxes",
+                           return_value=[]), \
+                mock.patch.object(b, "read_title", return_value="测试"):
+            msgs = b.get_messages("测试")
+        m_ocr.assert_called_once()
+        self.assertNotIn(
+            "ocr_image_sharded",
+            sys.modules["wx_backend.visual_backend"].__dict__,
+            "分片函数已删除，消息区不得再走分片")
+        self.assertTrue(msgs, "消息区 OCR items 应正常产出消息")
+        self.assertEqual(msgs[0].content, "单行消息")
         b.close()
 
 
@@ -1683,7 +1711,7 @@ class TestRealFixtureRegion(unittest.TestCase):
         with mock.patch.object(b, "_switch_chat", return_value=True), \
                 mock.patch.object(b, "read_title", return_value="王文生"), \
                 mock.patch.object(b, "_refresh", return_value=img), \
-                mock.patch("wx_backend.visual_backend.ocr_image_sharded",
+                mock.patch("wx_backend.visual_backend.ocr_image",
                            return_value=self.ocr_items):
             msgs = b.get_messages("王文生")
         self.assertEqual(len(msgs), 1,
@@ -1711,125 +1739,6 @@ class TestRealFixtureRegion(unittest.TestCase):
         self.assertTrue(win["has_media"] and win["has_other"])
         self.assertEqual(win["bot_bottom"], 801)
         b.close()
-
-
-class TestOcrImageSharded(unittest.TestCase):
-    """ocr_image_sharded 分片合并：跨边界长行左右两片识别出不同子串时
-    必须尾-头合并，不得重复/错位。旧实现去重 key (round(y/10), text)
-    只对完全相同文本去重，跨边界行左右两片 text 不同 → 双份进 items
-    （真机：任务指令 raw_message 只投递前半段且拼装重复）。"""
-
-    def _img(self, w=1600, h=400):
-        return Image.new("RGB", (w, h), (255, 255, 255))
-
-    def test_cross_boundary_line_merged(self):
-        """横跨分片边界的长行：左片识别「前缀」，右片识别「中缀+后缀」，
-        两片 text 不同 → 必须尾-头合并成完整一行，且无重复、无错位。"""
-        img = self._img()
-        left_line = {"text": "你现在应该记忆里面只有两条",
-                     "x": 20, "y": 30, "w": 500, "h": 40}
-        right_line = {"text": "忆里面只有两条我的消息吧",
-                      "x": 80, "y": 32, "w": 500, "h": 40}
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[left_line], [right_line]]) as m:
-            items = ocr_image_sharded(img)
-        self.assertEqual(m.call_count, 2, "宽图走左右两片")
-        self.assertGreater(right_line["x"], 80, "右片 x 已换算到整图（加正偏移）")
-        self.assertEqual(len(items), 1, "跨边界行须合并成单条，不得重复")
-        self.assertEqual(items[0]["text"], "你现在应该记忆里面只有两条我的消息吧",
-                         "尾-头合并不得错位/丢字")
-        self.assertEqual((items[0]["x"], items[0]["y"]), (20, 30),
-                         "合并保留前项（左片）坐标")
-        self.assertEqual(items[0]["w"], right_line["x"] + right_line["w"] - 20,
-                         "行宽扩展到右片右边界（按换算后坐标）")
-
-    def test_reverse_order_absorbed(self):
-        """右片段 y 更小（排序后右片段在前）：右片在重叠区边缘把左片完整行
-        的尾部切开识别成子串（如 '已经记下了'），合并方向须按 x 判定——
-        左片段在后时反向吸收，不得产生 '已经记下了 好的我明白了…' 重复。"""
-        img = self._img()
-        left_line = {"text": "好的我明白了这个问题我已经记下了",
-                     "x": 31, "y": 170, "w": 600, "h": 40}
-        right_line = {"text": "已经记下了",
-                      "x": 3, "y": 168, "w": 200, "h": 40}  # 片内 x，换算后 > 左
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[left_line], [right_line]]):
-            items = ocr_image_sharded(img)
-        self.assertEqual(len(items), 1, "尾部子串须被吸收，不得重复")
-        self.assertEqual(items[0]["text"], "好的我明白了这个问题我已经记下了")
-        self.assertEqual(items[0]["x"], 31, "保留左片段坐标")
-
-    def test_reverse_order_merged(self):
-        """右片段 y 更小（排序后右片段在前）：跨边界长行左片段在后，仍须
-        尾-头拼接还原（方向按 x 判定，不依赖 y 排序顺序）。"""
-        img = self._img()
-        left_line = {"text": "你现在应该记忆里面只有两条",
-                     "x": 20, "y": 32, "w": 500, "h": 40}
-        right_line = {"text": "忆里面只有两条我的消息吧",
-                      "x": 80, "y": 30, "w": 500, "h": 40}
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[left_line], [right_line]]):
-            items = ocr_image_sharded(img)
-        self.assertEqual(len(items), 1, "反向排序下仍须合并")
-        self.assertEqual(items[0]["text"], "你现在应该记忆里面只有两条我的消息吧")
-        self.assertEqual(items[0]["x"], 20, "保留左片段坐标")
-
-    def test_identical_line_dedup(self):
-        """重叠区完整行：两片识别出完全相同文本（旧逻辑能去重的场景），
-        新逻辑同样只保留一条。行落在重叠区中央（整图 x=550，1600 宽图的
-        重叠区 [512, 1088]），左片 x=550、右片片内 x=38（换算后同为 550）。"""
-        img = self._img()
-        left_line = {"text": "你好", "x": 550, "y": 30, "w": 100, "h": 40}
-        right_line = {"text": "你好", "x": 38, "y": 30, "w": 100, "h": 40}
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[left_line], [right_line]]):
-            items = ocr_image_sharded(img)
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["text"], "你好")
-
-    def test_no_overlap_kept(self):
-        """重叠区相邻但 text 无公共前后缀（不同内容）→ 保留两条。"""
-        img = self._img()
-        left_line = {"text": "你好世界", "x": 20, "y": 30, "w": 400, "h": 40}
-        right_line = {"text": "完全不同的内容", "x": 80, "y": 32, "w": 400, "h": 40}
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[left_line], [right_line]]):
-            items = ocr_image_sharded(img)
-        self.assertEqual(len(items), 2, "无公共前后缀不得合并")
-
-    def test_different_rows_not_merged(self):
-        """y 差 >= 20px（2x 坐标）→ 不同行，不得合并。"""
-        img = self._img()
-        left_line = {"text": "第一行", "x": 20, "y": 30, "w": 300, "h": 40}
-        right_line = {"text": "第一行后面", "x": 80, "y": 60, "w": 300, "h": 40}
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[left_line], [right_line]]):
-            items = ocr_image_sharded(img)
-        self.assertEqual(len(items), 2, "y 差超阈值视为不同行")
-
-    def test_sorted_output(self):
-        """输出按 (y, x) 排序（调用处 get_messages 的期望）。"""
-        img = self._img()
-        line_a = {"text": "A行", "x": 20, "y": 30, "w": 300, "h": 40}
-        line_b = {"text": "B行", "x": 30, "y": 80, "w": 300, "h": 40}
-        line_c = {"text": "C行", "x": 40, "y": 50, "w": 300, "h": 40}
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        side_effect=[[line_b], [line_a, line_c]]):
-            items = ocr_image_sharded(img)
-        ys = [it["y"] for it in items]
-        self.assertEqual(ys, sorted(ys), "输出须按 y 排序")
-
-    def test_narrow_image_single_shot(self):
-        """宽度 <= max_side+100 → 单片 ocr_image，不进入分片逻辑。"""
-        img = Image.new("RGB", (500, 300), (255, 255, 255))
-        with mock.patch("wx_backend.visual_backend.ocr_image",
-                        return_value=[{"text": "短行", "x": 5, "y": 5,
-                                       "w": 50, "h": 20}]) as m:
-            items = ocr_image_sharded(img)
-        self.assertEqual(m.call_count, 1)
-        self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["text"], "短行")
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
