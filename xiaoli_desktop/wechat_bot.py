@@ -1387,18 +1387,35 @@ class WeChatBot:
 
     def _send_text(self, text, chat, placeholder=False):
         """发送文本到指定聊天。placeholder=True 表示这是"处理中"占位消息
-        （计数 +1）；默认 False（普通回复）把该聊天的占位计数归零。
+        （永不拆分、计数 +1）；默认 False（普通回复）按"至少一个空行"拆分
+        成多条发送，并把该聊天的占位计数归零。
         计数按 chat_name 隔离（_pending_placeholders），非全局。"""
         try:
-            cleaned_text = text.strip()
-            self.wx.send_text(chat, cleaned_text)
-            preview = cleaned_text[:50].replace('\n', ' ')
-            logger.info(f"🤖 → [{chat}]: {preview}")
+            # 占位消息永不拆分，单条发送，计数语义不变
             if placeholder:
+                cleaned_text = text.strip()
+                self.wx.send_text(chat, cleaned_text)
+                preview = cleaned_text[:50].replace('\n', ' ')
+                logger.info(f"🤖 → [{chat}]: {preview}")
                 self._pending_placeholders[chat] = self._pending_placeholders.get(chat, 0) + 1
+                return
+
+            # 按"至少一个空行"拆分（兼容 \n\n、空行带空格、连续多换行）；
+            # 空段丢弃。拆不出多段时走原单条发送（现有回复行为零变化）
+            parts = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+            if len(parts) <= 1:
+                cleaned_text = text.strip()
+                self.wx.send_text(chat, cleaned_text)
+                preview = cleaned_text[:50].replace('\n', ' ')
+                logger.info(f"🤖 → [{chat}]: {preview}")
             else:
-                # 删除键而非留 0（防 dict 膨胀）；pop 对未占位过的 chat 安全
-                self._pending_placeholders.pop(chat, None)
+                for part in parts:
+                    self.wx.send_text(chat, part)
+                    preview = part[:50].replace('\n', ' ')
+                    logger.info(f"🤖 → [{chat}]: {preview}")
+
+            # 实质回复归零占位，只执行一次（pop 对未占位过的 chat 安全）
+            self._pending_placeholders.pop(chat, None)
         except Exception as e:
             logger.error(f"发送失败: {e}")
 
