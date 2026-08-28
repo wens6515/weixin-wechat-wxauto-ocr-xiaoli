@@ -49,7 +49,7 @@ class _FakeWx:
             "width": 747, "height": 1135,
         }
 
-    def get_messages(self, chat):
+    def get_messages(self, chat, assume_switched=False):
         return self._msgs
 
 
@@ -72,6 +72,8 @@ def _make_bot(recv_dir=""):
     bot.file_storage_path = recv_dir
     bot.tianshu_window_title = ""
     bot.tianshu_trigger_command = "开始处理"
+    bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+    bot._fail_backoff = 8.0
     bot.wx = object()  # 仅用于 _handle_text 的 is_group 探测（无 _current_is_group → 回退标题判定）
     return bot
 
