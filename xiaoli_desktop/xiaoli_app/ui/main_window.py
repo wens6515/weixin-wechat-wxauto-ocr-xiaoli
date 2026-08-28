@@ -5,7 +5,8 @@ import os
 from PySide6.QtCore import (QTimer, Qt, QSize, QByteArray, QRectF, QPoint,
                             QPointF)
 from PySide6.QtGui import (QIcon, QPixmap, QPainter, QColor, QFont,
-                           QPainterPath, QLinearGradient, QBrush)
+                           QPainterPath, QLinearGradient, QBrush, QPen,
+                           QRegion)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QMainWindow, QListWidget, QListWidgetItem, QLabel,
                                QSystemTrayIcon, QMessageBox, QHBoxLayout, QWidget,
@@ -83,6 +84,7 @@ class NavItemDelegate(QStyledItemDelegate):
         self.icon_size = icon_size
         self.font = _NAV_FONT
         self.accent = QColor("#5B8CFF")
+        self.nav_indicator = "bar"  # bar(左竖条)/underline(下划线)/pill(圆角块)，默认 bar 与历史一致
 
     def paint(self, painter, option, index):
         # 先画默认底（含 QSS 渐变选中背景 / hover 背景）
@@ -121,12 +123,29 @@ class NavItemDelegate(QStyledItemDelegate):
             painter.drawText(text_rect.toRect(),
                              Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                              text)
-        # 选中态左侧高亮条（现代侧边栏风格）
+        # 选中态指示器（形态由主题 nav_indicator 键决定：bar/underline/pill，默认 bar 与历史一致）
         if selected:
-            bar = QRectF(r.left() + 4, r.top() + 6, 3, r.height() - 12)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self.accent)
-            painter.drawRoundedRect(bar, 1.5, 1.5)
+            ind = getattr(self, "nav_indicator", "bar")
+            if ind == "underline":
+                bw = max(26, int(r.width() * 0.4))
+                bar = QRectF(r.center().x() - bw / 2, r.bottom() - 5, bw, 3)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self.accent)
+                painter.drawRoundedRect(bar, 1.5, 1.5)
+            elif ind == "pill":
+                pill = r.adjusted(8, 4, -8, -4)
+                fill = QColor(self.accent)
+                fill.setAlpha(34)
+                painter.setBrush(fill)
+                edge = QColor(self.accent)
+                edge.setAlpha(190)
+                painter.setPen(QPen(edge, 1.2))
+                painter.drawRoundedRect(pill, 10, 10)
+            else:
+                bar = QRectF(r.left() + 4, r.top() + 6, 3, r.height() - 12)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self.accent)
+                painter.drawRoundedRect(bar, 1.5, 1.5)
         painter.restore()
 
     def sizeHint(self, option, index):
@@ -135,33 +154,25 @@ class NavItemDelegate(QStyledItemDelegate):
 
 
 class FadeStackedWidget(QStackedWidget):
-    """带过渡动画的页面容器：旧页渐渐散掉 + 新页从下方升起。
+    """带过渡动画的页面容器：方向感知的整叠推挤（push）过渡。
 
-    实现（纯软件合成，零 GPU effect）：
-      - 切换瞬间抓旧页静态快照（grab），立即切到新页（新页完整显示在下层）
-      - 旧页快照：QPainter 逐帧按 alpha 重新合成 pixmap 显示（1.0 → 0.0，
-        约 150ms）+ 轻微上飘——painter 的 setOpacity 是 CPU 合成，
-        不触发 DWM/半透明窗口的 effect 合成路径，真机不再闪烁
-      - 新页：QTimer 逐帧 move 从下方（height*0.16）升到 0，随旧页淡出
-        同步「从下方升起露出」
-
-    为何弃用 QGraphicsOpacityEffect：本应用是 WA_TranslucentBackground
-    无边框圆角窗口 + 粒子背景层，effect 的 alpha 动画走 GPU 合成路径，
-    真机实测每帧闪烁 + 卡顿（快照 label 的 effect 同样中招）。
-    painter 软件合成完全绕开该路径。
-    动画期间再点导航：记录 pending，当前动画结束直接续切（不跳帧）。
+    实现（用户定稿 2026-08-29 四稿）：切换瞬间 stack 切页，旧页重新
+    show 出来参与动画——新旧两页锁同速沿导航方向整体滑动（目标在导航
+    下方 → 内容上推，在上方 → 下拉），像一叠纸整体推移：新旧两页边缘
+    严丝合缝，露出来的一律是真实渲染内容（亮色卡片/文字），无深色块、
+    无 alpha 合成（前三版教训：半透明面板做快照淡入/交叉淡化/升起，
+    在壁纸上都会读成「黑块移动」，两轮真机截图实证后废弃）。
+    动画期间再点导航：立即定格当前过渡并马上开新的——快速连点不排队
+    不等待，永远响应最新一次点击。
     """
 
-    def __init__(self, parent=None, duration=600):
+    def __init__(self, parent=None, duration=420):
         super().__init__(parent)
         self._duration = max(200, duration)
-        self._snap = None        # 旧页快照 QLabel（动画完删除）
-        self._snap_base = None   # 旧页快照原始 pixmap（逐帧合成 alpha 用）
-        self._lift = None        # 正在升起的新页 widget
-        self._lift_start = 0     # 升起起始 y
-        self._drift = 14         # 旧页上飘距离（px，加大「散掉」的距离感）
+        self._old = None          # 参与推挤的旧页（动画完复位并隐藏）
+        self._new = None          # 推入的新页
+        self._dir = 1             # 1=上推（目标在导航下方） / -1=下拉（在上方）
         self._animating = False
-        self._pending = -1
         self._seq = 0
 
     def setCurrentIndex(self, index):
@@ -169,38 +180,25 @@ class FadeStackedWidget(QStackedWidget):
             return
         if index == self.currentIndex():
             return
+        # 动画中再点导航：立即定格当前过渡再开新的，不排队不等待
         if self._animating:
-            self._pending = index
-            return
+            self._finish_transition()
         old = self.currentWidget()
-        # 立即切换（新页完整显示在下层，不透明、无闪烁）
+        old_index = self.currentIndex()
         super().setCurrentIndex(index)
         new = self.currentWidget()
-        if old is None or new is None:
+        if old is None or new is None or old is new:
             return
         self._seq += 1
         seq = self._seq
         self._animating = True
-        # 旧页快照：原始图缓存，逐帧软件合成 alpha
-        base = old.grab()
-        if base.isNull():
-            self._animating = False
-            return
-        self._snap_base = base
-        snap = QLabel(self)
-        snap.setPixmap(base)
-        snap.setGeometry(self.rect())
-        snap.show()
-        snap.raise_()
-        self._snap = snap
-        # 新页初始偏下（升起起点），随动画升到 0
-        self._lift = new
-        self._lift_start = max(36, int(self.height() * 0.22))
-        new.move(0, self._lift_start)
-        # 固定帧间隔 12ms（~83fps）平滑推进；帧数 = 时长/间隔。帧间隔固定
-        # 而非随 duration 放大——间隔变大会让过渡「跳帧式」闪烁（用户反馈
-        # 240ms 太快像卡顿闪烁，就是帧间隔 15ms + 帧数不足造成的）。加长
-        # 时长只加帧数，帧间隔不变，过渡更顺滑从容。
+        self._dir = 1 if index > old_index else -1
+        self._old = old
+        self._new = new
+        # stack 切页即藏旧页；推挤需要旧页露面参与动画
+        old.setVisible(True)
+        new.move(0, self.height() * self._dir)
+        # 固定帧间隔 12ms（~83fps）平滑推进；加长时长只加帧数，帧间隔不变
         step_ms = 12
         steps = max(6, self._duration // step_ms)
         for i in range(1, steps + 1):
@@ -208,50 +206,40 @@ class FadeStackedWidget(QStackedWidget):
             QTimer.singleShot(i * step_ms, lambda t=t, seq=seq: self._frame(t, seq))
         QTimer.singleShot((steps + 1) * step_ms, lambda seq=seq: self._done(seq))
 
-    @staticmethod
-    def _ease_out(t):
-        """cubic ease-out：先快后慢，结尾从容停住。
+    def _finish_transition(self):
+        """立即定格进行中的过渡（供新切换顶掉旧动画）。"""
+        self._seq += 1          # 作废所有在途帧回调
+        self._animating = False
+        if self._old is not None:
+            self._old.move(0, 0)
+            self._old.setVisible(False)   # 恢复 stack 语义：非当前页隐藏
+            self._old = None
+        if self._new is not None:
+            self._new.move(0, 0)
+            self._new = None
 
-        线性 t（匀速直线）视觉上像生硬的「一闪而过」；ease-out 让动画
-        开头有力、收尾温柔，才有过渡的质感（用户反馈 150ms 太快太轻）。
-        """
+    @staticmethod
+    def _ease(t):
+        """smoothstep（缓入缓出）：推挤起步柔和、收尾稳当，两端都不突兀。"""
         t = max(0.0, min(1.0, t))
-        return 1.0 - (1.0 - t) ** 3
+        return t * t * (3.0 - 2.0 * t)
 
     def _frame(self, t, seq):
         if seq != self._seq or not self._animating:
             return
-        e = self._ease_out(t)  # 缓动后的进度，替代线性 t
-        # 旧页快照：painter 软件合成 alpha（1-e）+ 上飘（「散掉」感）
-        base = self._snap_base
-        if base is not None and self._snap is not None:
-            pm = QPixmap(base.size())
-            pm.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-            p.setOpacity(max(0.0, 1.0 - e))
-            p.drawPixmap(0, 0, base)
-            p.end()
-            self._snap.setPixmap(pm)
-            self._snap.move(0, -int(self._drift * e))
-        # 新页：从下方升起（start → 0）
-        if self._lift is not None:
-            self._lift.move(0, int(self._lift_start * (1.0 - e)))
+        if self._old is None or self._new is None:
+            return
+        e = self._ease(t)
+        h = self.height()
+        off = int(h * (1.0 - e))     # 尚未走完的位移
+        # 锁同速平移：旧页 0 → -dir*h，新页 dir*h → 0，两页边缘始终贴合
+        self._old.move(0, -self._dir * (h - off))
+        self._new.move(0, self._dir * off)
 
     def _done(self, seq):
         if seq != self._seq:
             return
-        self._animating = False
-        if self._snap is not None:
-            self._snap.deleteLater()
-            self._snap = None
-        self._snap_base = None
-        if self._lift is not None:
-            self._lift.move(0, 0)   # 复位到布局位置
-            self._lift = None
-        if self._pending >= 0:
-            idx, self._pending = self._pending, -1
-            self.setCurrentIndex(idx)
+        self._finish_transition()
 
 
 class MainWindow(QMainWindow):
@@ -547,6 +535,15 @@ class MainWindow(QMainWindow):
         wallpaper = wallpaper if wallpaper is not None else self.ctx.wallpaper()
         self.backdrop.set_theme(theme)
         self.backdrop.set_wallpaper(wallpaper)
+
+        # 主题规格同步：导航指示器形态 + 主色 → 左侧导航自绘委托
+        from . import THEMES as _THEMES
+        _tdef = _THEMES.get(theme, _THEMES.get("blue", {}))
+        _dl = self.nav.itemDelegate()
+        if isinstance(_dl, NavItemDelegate):
+            _dl.accent = QColor(_tdef.get("accent") or _tdef.get("p1", "#5B8CFF"))
+            _dl.nav_indicator = _tdef.get("nav_indicator", "bar")
+            self.nav.viewport().update()
         # 页面级主题钩子（首页标题光晕等随主题主色刷新）
         for p in self.pages.values():
             hook = getattr(p, "apply_theme", None)

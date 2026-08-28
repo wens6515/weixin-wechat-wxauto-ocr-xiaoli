@@ -693,7 +693,13 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
                         return_value=(True, False, None)):
             bot.process_new_messages()
         self.assertIn("json", sent, "call_chat_ai 必须真实执行并发出请求")
-        return sent["json"]["messages"][-1]["content"]
+        content = sent["json"]["messages"][-1]["content"]
+        # 首条消息（桩历史恒为空）注入【角色沉浸要求】——decorated 格式
+        # 断言前断言注入存在并剥掉尾缀
+        import wechat_bot as wb
+        suffix = "\n\n" + wb.ROLE_IMMERSION_PROMPT
+        self.assertTrue(content.endswith(suffix), "首条消息必须注入角色沉浸要求")
+        return content[:-len(suffix)]
 
     def test_single_group_msg_decorated(self):
         """单条群聊 @：最终 decorated = 群聊名 + 发送者名 + 内容。"""

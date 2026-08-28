@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QPlainTextEdit, QTextEdit,
     QTableWidget, QTableWidgetItem, QComboBox, QDoubleSpinBox, QSpinBox,
     QFileDialog, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QFrame,
-    QProgressBar, QScrollArea, QSlider, QHeaderView, QLayout,
+    QProgressBar, QScrollArea, QSlider, QHeaderView, QLayout, QStyledItemDelegate,
 )
 
 from xiaoli_app import card_store, config_store
@@ -117,6 +117,50 @@ class _EmptyState(QWidget):
         self.lbl_text.setWordWrap(True)
         lay.addWidget(self.lbl_icon)
         lay.addWidget(self.lbl_text)
+
+
+# =====================================================================
+# 通用：API Key 列遮罩委托（真值存 UserRole，按开关打码/明文显示）
+# =====================================================================
+
+class _KeyMaskDelegate(QStyledItemDelegate):
+    """API Key 列显示遮罩：真值存 Qt.UserRole，绘制时按开关决定打码或明文。
+
+    历史缺陷：旧 _refresh_keys 在 QTableWidgetItem 上找 EchoMode——item 根本
+    没有该属性，「显示 API Key」复选框形同虚设，Key 永远明文。改为委托在
+    绘制前重写显示文本；编辑时加载真值，提交时回写真值并按当前开关刷新显示。
+    """
+
+    MASK = "••••••••"
+
+    def __init__(self, parent, show_getter):
+        super().__init__(parent)
+        self._show = show_getter  # callable() -> bool：当前是否明文显示
+
+    def _real(self, index):
+        real = index.data(Qt.ItemDataRole.UserRole) or ""
+        if not real:
+            disp = index.data(Qt.ItemDataRole.DisplayRole) or ""
+            if disp and disp != self.MASK:  # 直接粘贴的文本（无 UserRole）兜底
+                real = disp
+        return real
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        if index.column() == 2:
+            real = self._real(index)
+            option.text = real if self._show() else (self.MASK if real else "")
+
+    def setEditorData(self, editor, index):
+        editor.setText(self._real(index))
+
+    def setModelData(self, editor, model, index):
+        real = editor.text()
+        model.setData(index, real, Qt.ItemDataRole.UserRole)
+        model.setData(
+            index,
+            real if self._show() else (self.MASK if real else ""),
+            Qt.ItemDataRole.DisplayRole)
 
 
 # =====================================================================
@@ -273,11 +317,12 @@ class HomePage(QWidget):
         lv.addWidget(self.log_view)
         lay.addWidget(log_frame, 1)  # stretch=1 占据下方剩余空间
 
-        # 日志轮询：与 LogPage 同源（bot.log），800ms 拉一次增量
+        # 日志轮询：与 LogPage 同源（bot.log），800ms 拉一次增量。
+        # 仅页面可见时轮询（showEvent 启 / hideEvent 停）——首页与日志页双
+        # 定时器常驻轮询同一文件属浪费（历史性能项）。
         self._log_offset = 0
         self._log_timer = QTimer(self)
         self._log_timer.timeout.connect(self._poll_log)
-        self._log_timer.start(800)
 
     @staticmethod
     def _row(*widgets):
@@ -546,6 +591,16 @@ class HomePage(QWidget):
 
     def _clear_log(self):
         self.log_view.clear()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._poll_log()  # 立即补齐隐藏期间的日志增量
+        if not self._log_timer.isActive():
+            self._log_timer.start(800)
+
+    def hideEvent(self, event):
+        self._log_timer.stop()
+        super().hideEvent(event)
 
 
 # =====================================================================
@@ -852,6 +907,10 @@ class ModelsPage(QWidget):
         self._models_fetched.connect(self._apply_fetched_models)
         self.cb_show_key = QCheckBox("显示 API Key")
         self.cb_show_key.toggled.connect(lambda on: self._refresh_keys(on))
+        # Key 列遮罩委托：默认打码，勾选「显示 API Key」才明文（编辑时显示真值）
+        self._key_delegate = _KeyMaskDelegate(
+            self.table, lambda: self.cb_show_key.isChecked())
+        self.table.setItemDelegateForColumn(2, self._key_delegate)
         btn_row = QHBoxLayout()
         self.btn_add = QPushButton("添加 Provider")
         self.btn_del = QPushButton("删除选中")
@@ -901,7 +960,13 @@ class ModelsPage(QWidget):
             self.table.insertRow(r)
             self.table.setItem(r, 0, QTableWidgetItem(p.get("name", "")))
             self.table.setItem(r, 1, QTableWidgetItem(p.get("base_url", "")))
-            self.table.setItem(r, 2, QTableWidgetItem(p.get("api_key", "")))
+            key_item = QTableWidgetItem()
+            real_key = p.get("api_key", "")
+            key_item.setData(Qt.ItemDataRole.UserRole, real_key)
+            key_item.setData(Qt.ItemDataRole.DisplayRole,
+                             real_key if self.cb_show_key.isChecked()
+                             else (_KeyMaskDelegate.MASK if real_key else ""))
+            self.table.setItem(r, 2, key_item)
             self.table.setItem(r, 3, QTableWidgetItem(", ".join(p.get("models", []))))
             self.table.setItem(r, 4, QTableWidgetItem(p.get("id", "")))
         self._refresh_keys(self.cb_show_key.isChecked())
@@ -991,18 +1056,33 @@ class ModelsPage(QWidget):
         QMessageBox.information(self, "已保存", "模型配置已保存并应用")
 
     def _refresh_keys(self, show):
-        mode = QLineEdit.EchoMode.Normal if show else QLineEdit.EchoMode.Password
+        """打码开关切换：真值始终在 UserRole，委托按开关绘制。
+
+        同步刷新 DisplayRole，保证复制（Ctrl+C）行为与显示一致——打码时
+        复制出来的是掩码而非真 Key。
+        """
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 2)
-            if item is not None:
-                item.setFlags(item.flags() | Qt.ItemIsEditable)
+            if item is None:
+                continue
+            real = item.data(Qt.ItemDataRole.UserRole) or ""
+            if not real:
+                disp = item.text() or ""
+                real = disp if disp != _KeyMaskDelegate.MASK else ""
+            item.setData(Qt.ItemDataRole.DisplayRole,
+                         real if show else (_KeyMaskDelegate.MASK if real else ""))
+        self.table.viewport().update()  # 触发委托重绘
 
     def _collect_providers(self):
         provs = []
         for r in range(self.table.rowCount()):
             name = self.table.item(r, 0).text().strip() if self.table.item(r, 0) else ""
             url = self.table.item(r, 1).text().strip() if self.table.item(r, 1) else ""
-            key = self.table.item(r, 2).text().strip() if self.table.item(r, 2) else ""
+            _ki = self.table.item(r, 2)
+            key = ((_ki.data(Qt.ItemDataRole.UserRole) or _ki.text() or "").strip()
+                   if _ki else "")
+            if key == _KeyMaskDelegate.MASK:
+                key = ""
             models = self.table.item(r, 3).text().strip() if self.table.item(r, 3) else ""
             pid = self.table.item(r, 4).text().strip() if self.table.item(r, 4) else ""
             if not pid:
@@ -1074,7 +1154,11 @@ class ModelsPage(QWidget):
         if r < 0:
             return
         url = self.table.item(r, 1).text().strip() if self.table.item(r, 1) else ""
-        key = self.table.item(r, 2).text().strip() if self.table.item(r, 2) else ""
+        _ki = self.table.item(r, 2)
+        key = ((_ki.data(Qt.ItemDataRole.UserRole) or _ki.text() or "").strip()
+               if _ki else "")
+        if key == _KeyMaskDelegate.MASK:
+            key = ""
         pid = self.table.item(r, 4).text().strip() if self.table.item(r, 4) else ""
         if not url:
             QMessageBox.warning(self, "提示", "请先填写 Base URL")
@@ -1143,7 +1227,6 @@ class TasksPage(QWidget):
         # 末列拉伸填满视口右缘 + 禁止换行（长内容单行截断）
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setWordWrap(False)
-        self.table.horizontalHeader().setStretchLastSection(True)
         self.btn_refresh = QPushButton("刷新")
         self.btn_open = QPushButton("打开任务目录")
         self.btn_refresh.clicked.connect(self.refresh)
@@ -1230,11 +1313,21 @@ class LogPage(QWidget):
         lay.addWidget(self.btn_clear)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
-        self._timer.start(800)
+        # 仅页面可见时轮询（showEvent 启 / hideEvent 停），避免与首页双开轮询
 
     def _clear_view(self):
         self.view.clear()
         self.empty.show()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._poll()  # 立即补齐隐藏期间增量 + 刷新空态显隐
+        if not self._timer.isActive():
+            self._timer.start(800)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
 
     def _poll(self):
         log_path = _BOT_LOG_PATH
@@ -1405,6 +1498,15 @@ class SettingsPage(QWidget):
         pn_row.addWidget(self.lbl_panel_val)
         tv.addLayout(pn_row)
         self._update_panel_label(self.sl_panel.value())
+        # 透明度滑块防抖定时器：停手 180ms 后才真正重建 QSS（见 _on_*_changed）
+        self._op_debounce = QTimer(self)
+        self._op_debounce.setSingleShot(True)
+        self._op_debounce.setInterval(180)
+        self._op_debounce.timeout.connect(self._apply_opacity_now)
+        self._panel_debounce = QTimer(self)
+        self._panel_debounce.setSingleShot(True)
+        self._panel_debounce.setInterval(180)
+        self._panel_debounce.timeout.connect(self._apply_panel_now)
         # 全局字号：小/中/大三档
         fs_row = QHBoxLayout()
         fs_row.setSpacing(8)
@@ -1509,8 +1611,10 @@ class SettingsPage(QWidget):
             pass
         finally:
             self.theme_grid.blockSignals(False)
-        self._select_wallpaper_item(cfg.get("wallpaper_path", ""))
-        self.ed_wallpaper.setText(cfg.get("wallpaper_path", ""))
+        from . import resolve_wallpaper_path
+        _wp = resolve_wallpaper_path(cfg.get("wallpaper_path", ""))
+        self._select_wallpaper_item(_wp)
+        self.ed_wallpaper.setText(_wp)
         self.sl_opacity.setValue(int(cfg.get("card_opacity", 0.5) * 100))
         self.sl_panel.setValue(int(cfg.get("panel_opacity", 0.5) * 100))
         _fi = self.cb_font.findData(cfg.get("font_scale", "medium"))
@@ -1607,9 +1711,16 @@ class SettingsPage(QWidget):
         self.lbl_op_val.setText(f"{val}%")
 
     def _on_opacity_changed(self, val):
-        """卡片透明度滑块：实时重建 QSS（毛玻璃强度）并保存。"""
-        opacity = val / 100.0
+        """卡片透明度滑块：标签实时刷新；QSS 重建防抖（停手 180ms 后统一应用）。
+
+        历史性能项：拖动期间 valueChanged 高频触发，每次全量 QSS 重建 +
+        壁纸重载，拖一次卡几十次。
+        """
         self._update_op_label(val)
+        self._op_debounce.start()
+
+    def _apply_opacity_now(self):
+        opacity = self.sl_opacity.value() / 100.0
         self.ctx.cfg["card_opacity"] = opacity
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"),
@@ -1619,16 +1730,23 @@ class SettingsPage(QWidget):
         self.lbl_panel_val.setText(f"{val}%")
 
     def _on_panel_changed(self, val):
-        """面板透明度滑块：控制日志区/表格/输入框等大白块的透出程度。"""
-        opacity = val / 100.0
+        """面板透明度滑块：标签实时刷新；QSS 重建防抖（同卡片透明度）。"""
         self._update_panel_label(val)
+        self._panel_debounce.start()
+
+    def _apply_panel_now(self):
+        opacity = self.sl_panel.value() / 100.0
         self.ctx.cfg["panel_opacity"] = opacity
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         self._apply_theme_qss(self.ctx.cfg.get("theme", "blue"),
                               self.ed_wallpaper.text().strip())
 
     def _on_theme_picked(self, current, previous):
-        """点击主题缩略图：即时应用并保存（不弹窗）。"""
+        """点击主题缩略图：即时应用并保存（不弹窗）。
+
+        主题配套壁纸：主题声明了推荐壁纸（wallpaper 键）且壁纸库中存在同名
+        文件时联动应用——6+1 差异化主题「主题+壁纸」成套体验。
+        """
         if current is None:
             return
         key = current.data(Qt.ItemDataRole.UserRole)
@@ -1636,7 +1754,19 @@ class SettingsPage(QWidget):
             return
         self.ctx.cfg["theme"] = key
         config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-        self._apply_theme_qss(key, self.ed_wallpaper.text().strip())
+        wp_path = self.ed_wallpaper.text().strip()
+        from . import THEMES, list_wallpapers
+        paired = THEMES.get(key, {}).get("wallpaper")
+        if paired:
+            for _p, _f in list_wallpapers():
+                if _f == paired:
+                    wp_path = _p
+                    self.ctx.cfg["wallpaper_path"] = _p
+                    config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+                    self.ed_wallpaper.setText(_p)
+                    self._select_wallpaper_item(_p)
+                    break
+        self._apply_theme_qss(key, wp_path)
 
     def _on_follow_system(self, on):
         """跟随系统深浅色开关：保存配置并立即按系统深浅应用主题。"""
