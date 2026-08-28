@@ -119,6 +119,7 @@ AI_DEFAULTS = {
     "cooldown": 3,
     "api_retry": 2,
     "api_timeout": 60,
+    "api_wall_budget": 45,
     "start_paused": True,
     "memory_file": "memory.json",
 }

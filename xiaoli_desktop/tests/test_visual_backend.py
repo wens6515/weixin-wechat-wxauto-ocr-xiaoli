@@ -1594,6 +1594,8 @@ class TestGetMessagesInMedia(unittest.TestCase):
         「马」；单片读 40+ 字超长行一字不差）。锁死 get_messages 不再走
         分片路径。"""
         b = self._backend()
+        b._last_shot = None  # 尺寸哨兵基线清空：capture_window 桩返回 400x300，
+        # 与 connect() 时真实窗口截图尺寸无关（哨兵只防真实占位残帧）
         with mock.patch.object(b, "_switch_chat", return_value=True), \
                 mock.patch("wx_backend.visual_backend.find_wechat_window",
                            return_value=0x1234), \

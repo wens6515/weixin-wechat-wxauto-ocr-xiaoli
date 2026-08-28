@@ -3,6 +3,7 @@ import time
 import json
 import os
 import logging
+import random
 import re
 import threading
 import traceback
@@ -16,8 +17,11 @@ from wx_backend.visual_backend import (
     ensure_window_visible,
     find_window_by_title,
     window_rect,
+    default_right_half_rect,
+    position_window,
 )
 from xiaoli_app.config_store import AI_DEFAULTS
+from xiaoli_app.usage_store import UsageStore
 
 
 def models_endpoint(chat_url):
@@ -205,6 +209,33 @@ logger = logging.getLogger("xiaoli")
 # chat_model 为空时兜底 DeepSeek vision-exp（防空 model → API 400）。
 VISION_MODEL_DEFAULT = "deepseek:deepseek-v4-flash-vision-exp"
 
+# ---------- LLM API 调用韧性（chat / vision 共用，见 _post_chat_completions） ----------
+
+RETRY_AFTER_GIVEUP = 15.0     # 服务端 Retry-After 超过该秒数视为长时限流，放弃重试
+BACKOFF_BASE = 1.0            # 指数退避起始秒数：1s → 2s → 4s …
+BACKOFF_CAP = 8.0             # 单次退避封顶
+API_WALL_BUDGET_DEFAULT = 45  # 墙钟预算默认值：重试总时长封顶，杜绝「超时×重试」叠成分钟级等待
+
+
+class ApiCallError(Exception):
+    """LLM API 调用最终失败（4xx 不可重试 / Retry-After 过长 / 重试耗尽 / 预算用尽）。
+
+    status 保留 HTTP 状态码（网络异常时为 None）。调用方负责降级或转
+    友好文案，绝不把异常文本原样发给微信好友。
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+# API 最终失败时的角色内兜底回复（不写入对话历史；池子随机避免机器人复读同句）
+FRIENDLY_API_ERROR_REPLIES = (
+    "呜…API 那头刚刚没了回应(´･ω･`)，不是不理你，稍后再喊我一次好不好",
+    "(>_<) 后端突然开小差了，这句没接住，你再来一次我肯定在",
+    "刚刚信号断了一拍(´･ω･`)，等下再发一遍吧，这次一定接住",
+)
+
 
 def load_config(path="config.json"):
     default_cfg = {
@@ -220,6 +251,8 @@ def load_config(path="config.json"):
         "cooldown": 3,
         "api_retry": 2,
         "api_timeout": 60,
+        "api_wall_budget": API_WALL_BUDGET_DEFAULT,
+        "wechat_window_rect": None,
         "start_paused": True,
         "memory_file": "memory.json"
     }
@@ -331,6 +364,11 @@ class WeChatBot:
         self.cooldown = cfg.get("cooldown", AI_DEFAULTS["cooldown"])
         self.api_retry = cfg.get("api_retry", AI_DEFAULTS["api_retry"])
         self.api_timeout = cfg.get("api_timeout", AI_DEFAULTS["api_timeout"])
+        self.api_wall_budget = cfg.get("api_wall_budget", AI_DEFAULTS["api_wall_budget"])
+        # 用量统计：每次 LLM 调用终态追加一行 JSONL（埋点在 _post_chat_completions）
+        self.usage_store = UsageStore()
+        # 微信窗口定位：None=默认右半屏；[x,y,w,h]=自定义；"off"=保持手动
+        self.wechat_window_rect = cfg.get("wechat_window_rect", None)
         self.paused = cfg.get("start_paused", True)
         self.memory_file = cfg.get("memory_file", "memory.json")
         # 文件处理配置
@@ -408,6 +446,7 @@ class WeChatBot:
                 raise RuntimeError("微信连接已取消")
             try:
                 self.wx = create_backend("auto")
+                self._init_position_wechat()
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:
@@ -424,6 +463,42 @@ class WeChatBot:
                         raise RuntimeError("微信连接已取消")
                     time.sleep(min(0.5, remain))
                     remain -= 0.5
+
+    def _init_position_wechat(self):
+        """初始化微信窗口定位（连接成功时执行一次，用户定案）。
+
+        视觉坐标依赖窗口位置/尺寸稳定——初始化即摆到标准位并告知用户
+        勿动，替代旧「不移动窗口」约定。配置 wechat_window_rect：
+        - None（默认）→ 主屏右半边（README 系统要求）
+        - [x, y, w, h] → 自定义矩形（物理像素）
+        - "off" → 完全保持手动（旧行为）
+        运行期不再核对矩形（用户否决每轮像素核对的成本），仅保留最小化
+        哨兵自动恢复（IsIconic 一次系统调用，微秒级）。
+        """
+        rect = getattr(self, "wechat_window_rect", None)
+        if rect == "off":
+            logger.info("[定位] wechat_window_rect=off，保持手动窗口位置")
+            return
+        hwnd = find_window_by_title("微信")
+        if not hwnd:
+            logger.warning("[定位] 未找到微信窗口，跳过定位")
+            return
+        ensure_window_visible(hwnd)  # 最小化先拉起，定位才有意义
+        if isinstance(rect, (list, tuple)) and len(rect) == 4:
+            try:
+                x, y, w, h = (int(v) for v in rect)
+                source = "配置"
+            except (TypeError, ValueError):
+                x, y, w, h = default_right_half_rect()
+                source = "配置非法，回退默认右半屏"
+        else:
+            x, y, w, h = default_right_half_rect()
+            source = "默认右半屏"
+        if position_window(hwnd, x, y, w, h):
+            logger.info(f"[定位] 微信窗口已定位（{source}）：({x},{y}) {w}x{h}"
+                        "——请勿最小化或调整窗口大小，否则影响消息识别")
+        else:
+            logger.warning("[定位] 微信窗口定位失败，保持当前位置")
 
     def _get_history(self, chat_id):
         if chat_id not in self.memory_db:
@@ -506,6 +581,115 @@ class WeChatBot:
             text = f"{text}\n\n{ROLE_IMMERSION_PROMPT}"
         return text
 
+    def _post_chat_completions(self, url, headers, payload, timeout, label="api", meta=None):
+        """OpenAI 兼容 chat/completions 统一调用入口（chat / vision 两链路共用）。
+
+        重试策略：
+        - 429/5xx/网络异常/坏 JSON → 指数退避重试（1s 起步、封顶 8s）；
+          服务器带 Retry-After 时尊重之，超过 RETRY_AFTER_GIVEUP 直接放弃
+        - 其余 4xx（鉴权/参数错误）不重试——重试无意义，只会拖慢用户感知
+        - 墙钟预算 api_wall_budget（默认 45s）：重试总时长封顶。历史缺陷：
+          每次超时 60s × api_retry 3 次 = 用户干等 3 分钟才收到报错
+        成功返回解析后的 dict；最终失败抛 ApiCallError。绝不返回
+        「API 错误: xxx」这类会原样发给好友的字符串（历史行为，已废）。
+        meta：dict（kind/model/messages），透传给用量统计埋点。
+        """
+        wall_budget = float(getattr(self, "api_wall_budget", API_WALL_BUDGET_DEFAULT))
+        deadline = time.monotonic() + wall_budget
+        attempts = int(getattr(self, "api_retry", 2)) + 1
+        latency_ms = 0.0
+        last_desc = "未发起请求"
+        status = None
+        for attempt in range(attempts):
+            if attempt > 0:
+                remain = deadline - time.monotonic()
+                if remain <= 0:
+                    last_desc = f"墙钟预算耗尽（{wall_budget:.0f}s），停止重试"
+                    break
+            started = time.monotonic()
+            retryable = False
+            retry_after = None
+            data = None
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            except requests.exceptions.RequestException as e:
+                latency_ms += (time.monotonic() - started) * 1000.0
+                last_desc = f"网络异常 {type(e).__name__}: {e}"
+                logger.warning(f"[{label}] {last_desc}（第 {attempt + 1} 次）")
+                retryable = True
+            else:
+                status = resp.status_code
+                latency_ms += (time.monotonic() - started) * 1000.0
+                if status == 200:
+                    try:
+                        data = resp.json()
+                    except ValueError as e:
+                        last_desc = f"响应 JSON 解析失败: {e}"
+                        logger.warning(f"[{label}] {last_desc}")
+                        retryable = True
+                    else:
+                        self._finish_usage(meta, ok=True, status=200,
+                                           latency_ms=latency_ms, data=data)
+                        return data
+                else:
+                    last_desc = f"HTTP {status}: {(getattr(resp, 'text', '') or '')[:200]}"
+                    logger.warning(f"[{label}] {last_desc}")
+                    if status == 429 or 500 <= status < 600:
+                        retryable = True
+                        resp_headers = getattr(resp, "headers", None) or {}
+                        for key in resp_headers:
+                            if str(key).lower() == "retry-after":
+                                try:
+                                    retry_after = float(resp_headers[key])
+                                except (TypeError, ValueError):
+                                    retry_after = None
+                                break
+                    else:
+                        self._finish_usage(meta, ok=False, status=status,
+                                           latency_ms=latency_ms)
+                        raise ApiCallError(last_desc, status=status)
+            if retryable and retry_after is not None and retry_after > RETRY_AFTER_GIVEUP:
+                self._finish_usage(meta, ok=False, status=status, latency_ms=latency_ms)
+                raise ApiCallError(
+                    f"HTTP {status}（Retry-After {retry_after:.0f}s 超过放弃阈值）",
+                    status=status)
+            if attempt + 1 < attempts:
+                delay = (retry_after if retry_after is not None
+                         else min(BACKOFF_CAP, BACKOFF_BASE * (2.0 ** attempt)))
+                delay = min(delay, max(0.0, deadline - time.monotonic()))
+                if delay > 0:
+                    time.sleep(delay)
+        self._finish_usage(meta, ok=False, status=status, latency_ms=latency_ms)
+        raise ApiCallError(f"{label} 调用失败: {last_desc}", status=status)
+
+    def _finish_usage(self, meta, ok, status, latency_ms, data=None):
+        """用量统计埋点（_post_chat_completions 终态调用一次）。
+
+        usage_store 缺失（测试桩 bot / 未初始化）时静默跳过。API 响应缺
+        usage 字段时用 estimate_tokens 兜底估算。"""
+        store = getattr(self, "usage_store", None)
+        if store is None:
+            return
+        try:
+            meta = dict(meta or {})
+            usage = (data or {}).get("usage") or {}
+            prompt_t = usage.get("prompt_tokens")
+            completion_t = usage.get("completion_tokens")
+            if prompt_t is None and meta.get("messages"):
+                prompt_t = estimate_tokens("".join(
+                    str(m.get("content") or "") for m in meta["messages"]))
+            if completion_t is None and data:
+                try:
+                    completion_t = estimate_tokens(
+                        data["choices"][0]["message"]["content"] or "")
+                except (KeyError, IndexError, TypeError):
+                    pass
+            store.record(kind=meta.get("kind"), model=meta.get("model"),
+                         prompt_tokens=prompt_t, completion_tokens=completion_t,
+                         ok=ok, status=status, latency_ms=latency_ms)
+        except Exception as e:
+            logger.debug(f"[用量] 记录失败: {e}")
+
     def call_vision_api(self, content, chat_id=None):
         """单调用视觉识别（OpenAI 兼容 / chat.completions）。
 
@@ -568,33 +752,55 @@ class WeChatBot:
         # 逐字对齐 call_chat_ai：从最旧历史开始丢弃，保证单次请求不超模型上下文。
         messages = fit_messages_in_budget(
             messages, budget=getattr(self, "max_context_tokens", 100000))
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "dispatch_task",
+                "description": "判断用户消息是否为任务，是则投递天枢处理",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string", "description": "任务描述"},
+                    },
+                    "required": ["task"],
+                },
+            },
+        }]
+        if getattr(self, "reminders", None) is not None:
+            # 定时提醒工具：仅 AgentBot（有 reminders 存储）时声明；
+            # 模型依据 system 的「当前时间」消息把相对表达换算成绝对时间
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "set_reminder",
+                    "description": "用户要求定时提醒/定时发消息时调用"
+                                   "（如「明天下午3点提醒我查成绩」「每天早上8点叫我起床」）",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "time": {"type": "string",
+                                     "description": "触发时间，格式 YYYY-MM-DD HH:MM"
+                                                    "（24 小时制；依据当前时间换算相对表达）"},
+                            "content": {"type": "string", "description": "提醒内容（届时原样转告用户）"},
+                            "repeat": {"type": "string", "enum": ["once", "daily", "weekly"],
+                                       "description": "重复规则，默认 once"},
+                        },
+                        "required": ["time", "content"],
+                    },
+                },
+            })
         payload = {
             "model": model,
             "messages": messages,
             "max_tokens": self.vision_max_tokens,
             "temperature": temp,
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "dispatch_task",
-                    "description": "判断用户消息是否为任务，是则投递天枢处理",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "task": {"type": "string", "description": "任务描述"},
-                        },
-                        "required": ["task"],
-                    },
-                },
-            }],
+            "tools": tools,
             "tool_choice": "auto",
         }
         try:
-            resp = requests.post(self.vision_api_url, headers=headers, json=payload, timeout=60)
-            if resp.status_code != 200:
-                logger.warning(f"视觉模型API错误: {resp.status_code} - {resp.text}")
-                return None
-            data = resp.json()
+            data = self._post_chat_completions(
+                self.vision_api_url, headers, payload, 60, label="vision",
+                meta={"kind": "vision", "model": model, "messages": messages})
             choices = data.get("choices", [])
             if not choices:
                 logger.warning("视觉模型返回无 choices")
@@ -1392,31 +1598,23 @@ class WeChatBot:
             "temperature": temp,
             "top_p": top_p
         }
-        last_exc = None
-        for attempt in range(self.api_retry + 1):
-            try:
-                resp = requests.post(self.api_url, headers=headers, json=payload, timeout=self.api_timeout)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    choices = data.get("choices", [])
-                    if choices and "message" in choices[0]:
-                        reply = choices[0]["message"]["content"]
-                    else:
-                        logger.error(f"API返回异常 choices 为空: {data}")
-                        return "API 返回数据异常，请检查模型名称或 API 状态"
-                    reply = strip_reply_prefix(reply)
-                    self._add_history(chat_id, "user", decorated)
-                    self._add_history(chat_id, "assistant", reply)
-                    return reply
-                else:
-                    logger.warning(f"API错误 {resp.status_code}: {resp.text}")
-                    return f"API 错误: {resp.status_code}"
-            except requests.exceptions.RequestException as e:
-                last_exc = e
-                logger.error(f"请求失败 (第{attempt+1}次): {e}")
-                if attempt < self.api_retry:
-                    time.sleep(2 * (attempt + 1))
-        return f"请求失败: {last_exc}"
+        try:
+            data = self._post_chat_completions(
+                self.api_url, headers, payload, self.api_timeout, label="chat",
+                meta={"kind": "chat", "model": model, "messages": messages})
+        except ApiCallError as e:
+            logger.error(f"聊天 API 调用失败: {e}")
+            return random.choice(FRIENDLY_API_ERROR_REPLIES)
+        choices = data.get("choices", [])
+        if choices and "message" in choices[0]:
+            reply = choices[0]["message"]["content"]
+        else:
+            logger.error(f"API返回异常 choices 为空: {data}")
+            return random.choice(FRIENDLY_API_ERROR_REPLIES)
+        reply = strip_reply_prefix(reply)
+        self._add_history(chat_id, "user", decorated)
+        self._add_history(chat_id, "assistant", reply)
+        return reply
 
     def _send_text(self, text, chat, placeholder=False):
         """发送文本到指定聊天。placeholder=True 表示这是"处理中"占位消息
@@ -1498,7 +1696,7 @@ class WeChatBot:
                         if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                             continue
                         bot_bottom = win.get("bot_bottom")
-                msgs = self.wx.get_messages(chat_name)
+                msgs = self.wx.get_messages(chat_name, assume_switched=True)
                 window_msgs = [
                     m for m in msgs
                     if m.sender not in (None, "self", self.nickname)
@@ -1553,7 +1751,7 @@ class WeChatBot:
         except Exception as e:
             logger.error(f"处理消息异常: {e}\n{traceback.format_exc()}")
 
-    def run(self, stop_event=None, poll_interval=2.0):
+    def run(self, stop_event=None, poll_interval=0.5):
         state = "暂停中，输入 resume 开始回复" if self.paused else "运行中"
         logger.info(f"✅ 小漓已启动（{state}）")
         while True:
@@ -1566,6 +1764,7 @@ class WeChatBot:
             except Exception as e:
                 logger.error(f"主循环异常: {e}\n{traceback.format_exc()}")
             # 可中断睡眠：stop 响应延迟 ≤100ms（控制台模式不传 stop_event，行为不变）
+            # poll_interval 0.5s 恒定快档（与 GUI 引擎一致，不间断监听）
             remain = poll_interval
             while remain > 1e-9:
                 if stop_event is not None and stop_event.is_set():

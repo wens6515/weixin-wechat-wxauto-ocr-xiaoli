@@ -83,7 +83,7 @@ class _NoScanWx:
         self._log.append("scan")
         return iter([])
 
-    def get_messages(self, chat):
+    def get_messages(self, chat, assume_switched=False):
         return []
 
 
@@ -106,7 +106,7 @@ class _ProtocolProbeWx:
         self._log.append("sessions")
         return iter([])
 
-    def get_messages(self, chat):
+    def get_messages(self, chat, assume_switched=False):
         return []
 
 

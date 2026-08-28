@@ -195,7 +195,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                 calls["sessions"] += 1
                 return iter(["王文生", "杨冬梅"])
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return []  # 无消息 → 不触发后续处理
 
         bot = self._make(FakeWx())
@@ -212,7 +212,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                 calls["sessions"] += 1
                 return iter(["王文生"])
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return []
 
         bot = self._make(FakeWx())
@@ -247,7 +247,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="未知",
                                   content="你好", type=MessageType.TEXT),
@@ -264,6 +264,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot._pending_placeholders = {}
+        bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+        bot._fail_backoff = 8.0
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -301,7 +303,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
                                   content="豆包有学生优惠了", type=MessageType.TEXT),
@@ -316,6 +318,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot._pending_placeholders = {}
+        bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+        bot._fail_backoff = 8.0
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -356,7 +360,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": False, "width": 747, "height": 1135}
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="王文生",
                                   content="在吗", type=MessageType.TEXT),
@@ -371,6 +375,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot._pending_placeholders = {}
+        bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+        bot._fail_backoff = 8.0
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -404,7 +410,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
                                   content="@小漓 在吗", type=MessageType.TEXT),
@@ -419,6 +425,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot._pending_placeholders = {}
+        bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+        bot._fail_backoff = 8.0
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -639,7 +647,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return [
                     WeChatMessage(id=m["id"], chat=chat, sender=m["sender"],
                                   content=m["content"], type=MessageType.TEXT)
@@ -655,6 +663,8 @@ class TestGroupMultiSenderText(unittest.TestCase):
         bot.nickname = "小漓"
         bot._pending_files = {}
         bot._pending_placeholders = {}
+        bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+        bot._fail_backoff = 8.0
         bot.tasks_dir = tempfile.mkdtemp(prefix="xiaoli_test_")
         bot._task_was_active = False
         bot._task_end_time = None
@@ -703,7 +713,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
             def iter_unread_sessions(self):
                 return iter(["强盗”集团"])
 
-            def get_messages(self, chat):
+            def get_messages(self, chat, assume_switched=False):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
                                   content="@小漓 [动画表情]", type=MessageType.EMOJI),
@@ -1289,6 +1299,8 @@ class TestSendTextPlaceholder(unittest.TestCase):
         import wechat_bot
         bot = object.__new__(wechat_bot.WeChatBot)
         bot._pending_placeholders = {}
+        bot._chat_fail_at = {}   # 失败退避表（process_new_messages 消费）
+        bot._fail_backoff = 8.0
         bot.wx = _mock.MagicMock()
         return bot
 

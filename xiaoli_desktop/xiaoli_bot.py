@@ -9,10 +9,13 @@
 运行：python xiaoli_bot.py --run     自检：python xiaoli_bot.py --test
 """
 import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil, uuid, struct, base64
+import queue
+import threading
 import requests as req
 import pyautogui
 from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat, _extract_file_name_token
 from wx_backend.models import MessageType
+from xiaoli_app.reminders_store import RemindersStore, GRACE_SECONDS
 
 if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
     try:
@@ -567,6 +570,43 @@ def scan_task_status(tasks_dir):
     return entries, waiting, done, archived
 
 
+class ReminderScheduler(threading.Thread):
+    """定时消息闹钟线程（用户定案模型）：只算时间、只投队列，绝不触碰
+    微信窗口——发送必须发生在主循环节点内（与红圈扫描/成果回传共享微信
+    窗口，闹钟线程发消息会撞车，_sending_lock 先例同理）。
+
+    每 ≤scan_seconds 重扫一次 store：到期条目推入队列；(id, fire_at)
+    内存去重防重发；扫描间隔同时兜住设置页的增删改（文件为事实源）。"""
+
+    def __init__(self, store, out_queue, stop_event=None, scan_seconds=5.0):
+        super().__init__(name="xiaoli-reminders", daemon=True)
+        self.store = store
+        self.out_queue = out_queue
+        # 注意不可命名为 _stop——threading.Thread.join 内部调用 self._stop()
+        self._stop_evt = stop_event if stop_event is not None else threading.Event()
+        self._scan_seconds = scan_seconds
+        self._claimed = set()
+
+    def run(self):
+        while not self._stop_evt.is_set():
+            try:
+                now = time.time()
+                pending, _missed = self.store.due(now)
+                for r in pending:
+                    key = (r.get("id"), r.get("fire_at"))
+                    if key in self._claimed:
+                        continue
+                    self._claimed.add(key)
+                    self.out_queue.put(r)
+                    logger.info(f"[定时] 到期入队: {r.get('chat')} <- {str(r.get('content'))[:40]}")
+                if len(self._claimed) > 512:
+                    self._claimed = {k for k in self._claimed
+                                     if (k[1] or 0) >= now - 86400}
+            except Exception as e:
+                logger.error(f"[定时] 调度扫描失败: {e}")
+            self._stop_evt.wait(self._scan_seconds)
+
+
 class AgentBot(WeChatBot):
     """小漓合并版：继承原 WeChatBot（聊天/图片/文件识别），叠加天枢任务桥"""
 
@@ -613,6 +653,16 @@ class AgentBot(WeChatBot):
         self._sent_back_stems = {}
         self._sent_back_stems_file = os.path.join(self.tasks_dir, "sent_back_stems.json")
         self._load_sent_back_stems()
+        # 失败退避：处理未产出回复（红圈滞留）的会话 8s 内不重复处理——
+        # 防滞留红圈在 0.5s 快档下每轮都打一遍整条 OCR 管线，把单核打满
+        self._chat_fail_at = {}
+        self._fail_backoff = 8.0
+        # 定时消息：存储 + 闹钟线程 + 到期队列（发送在主循环节点消费）
+        self.reminders = RemindersStore()
+        self._reminder_queue = queue.Queue()
+        self._reminder_sched = ReminderScheduler(
+            self.reminders, self._reminder_queue, stop_event=stop_event)
+        self._reminder_sched.start()
         logger.info(f"[AgentBot] tasks_dir={self.tasks_dir}, task_enabled={self.task_enabled}")
 
     def _load_sent_back_stems(self):
@@ -769,6 +819,9 @@ class AgentBot(WeChatBot):
         if not result:
             return None
         kind = result.get("kind")
+        if kind == "tool_call" and result.get("name") == "set_reminder":
+            # 定时提醒工具（与 dispatch_task 并列的节点 I 出口）
+            return self._handle_set_reminder(chat_name, sender, result, user_text)
         if kind == "tool_call":
             # 契约：name 必须为 dispatch_task；task 从 arguments JSON 解析
             # （json.loads 后取 task 字段；解析失败降级用原文）
@@ -1068,6 +1121,63 @@ class AgentBot(WeChatBot):
             logger.error(f"[回传] 持久化成果登记失败: {e}")
 
 
+    def _drain_reminders(self):
+        """消费到期提醒队列（主循环节点）。
+
+        发送走 wx.send_text 直发——旁路 _send_text 的占位计数（定时消息
+        不得破坏 skip_bot/N[chat] 语义：占位挂起时定时消息若归零计数，
+        占位会被当成实质回复，用户其后的消息将被漏读）。发送失败也确认
+        出队（mark_fired），避免死循环重发刷屏。"""
+        while True:
+            try:
+                r = self._reminder_queue.get_nowait()
+            except queue.Empty:
+                break
+            rid = r.get("id")
+            try:
+                now = time.time()
+                if now - (r.get("fire_at") or now) > GRACE_SECONDS:
+                    logger.warning(f"[定时] 提醒 {rid} 超宽限（暂停/滞留），按错过处理")
+                    continue
+                self.wx.send_text(r.get("chat"), f"【定时提醒】{r.get('content')}")
+                logger.info(f"[定时] 已发送 -> {r.get('chat')}: {str(r.get('content'))[:40]}")
+            except Exception as e:
+                logger.error(f"[定时] 发送失败 {rid}: {e}")
+            finally:
+                self.reminders.mark_fired(rid)
+
+    def _handle_set_reminder(self, chat_name, sender, result, user_text):
+        """节点 I 的 set_reminder 工具分支：解析时间/内容 → 入库 → 角色内确认。
+
+        时间解析失败 / 已过 / reminders 不可用 → 返回 None 降级普通聊天。"""
+        try:
+            args = json.loads(result.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            return None
+        raw_time = str(args.get("time") or "").strip()
+        content = str(args.get("content") or "").strip()
+        repeat = str(args.get("repeat") or "once").strip()
+        if not raw_time or not content:
+            return None
+        try:
+            fire_at = time.mktime(time.strptime(raw_time, "%Y-%m-%d %H:%M"))
+        except (ValueError, TypeError):
+            logger.info(f"[定时] 时间解析失败: {raw_time!r}，降级聊天")
+            return None
+        if fire_at <= time.time():
+            logger.info(f"[定时] 模型给的触发时间已过: {raw_time}，降级聊天")
+            return None
+        if getattr(self, "reminders", None) is None:
+            return None
+        self.reminders.add(chat_name, content, fire_at, repeat)
+        if user_text:
+            self._add_history(chat_name, "user", user_text)
+        self._add_history(chat_name, "assistant", f"[已设定时提醒 {raw_time} {content}]")
+        reply = f"记住啦，{raw_time} 我会提醒你「{content}」(๑•̀ㅁ•́๑)"
+        logger.info(f"[定时] 已创建提醒 -> {chat_name} @ {raw_time}: {content[:40]}")
+        self._send_text(reply, chat_name)
+        return True
+
     def _handle_text(self, chat_name, sender, content, msg_id=None, multi_sender=False):
         """文本消息统一处理：vision-exp 单调用判断+回复 → 天枢投递 或 普通聊天。
 
@@ -1107,6 +1217,10 @@ class AgentBot(WeChatBot):
             # 成果回传期间彻底暂停：不轮询任务目录、不遍历会话，
             # 防止 ChatWith 切走窗口打断文件发送/发错联系人
             return
+        # 定时消息消费节点：必须在主循环内发送（窗口互斥）；暂停态走到
+        # 不了这里（上面 return），错过的提醒由宽限/滚动逻辑兜底
+        if getattr(self, "_reminder_queue", None) is not None:
+            self._drain_reminders()
         # 任务成果轮询不受 cooldown / 任务暂停限制，必须最先执行
         self._tick_poll_outbox()
         resume, self._task_was_active, self._task_end_time = should_resume_listen(
@@ -1133,10 +1247,21 @@ class AgentBot(WeChatBot):
             for chat_name in sessions:
                 if not chat_name:
                     continue
+                # 失败退避：上次处理未产出回复（红圈滞留）的会话暂跳过
+                if time.time() - self._chat_fail_at.get(chat_name, 0.0) < self._fail_backoff:
+                    logger.debug(f"[退避] {chat_name} 上次处理失败未满 {self._fail_backoff:.0f}s，跳过")
+                    continue
                 logger.info(f"🔔 发现新消息：{chat_name}")
-                if self._handle_unread_session(chat_name):
+                try:
+                    handled = self._handle_unread_session(chat_name)
+                except Exception as e:
+                    logger.error(f"处理会话 {chat_name} 异常: {e}\n{traceback.format_exc()}")
+                    handled = False
+                if handled:
+                    self._chat_fail_at.pop(chat_name, None)  # 处理成功，解除退避
                     self.last_reply_time = time.time()
                     return  # 每轮只处理一个会话，回复后回到红点监听
+                self._chat_fail_at[chat_name] = time.time()
         except Exception as e:
             logger.error(f"Message processing error: {e}\n{traceback.format_exc()}")
 
@@ -1148,7 +1273,9 @@ class AgentBot(WeChatBot):
         at_tag = f"@{self.nickname}"
 
         def _window_msgs(win):
-            msgs = self.wx.get_messages(chat_name)
+            # assume_switched：analyze_window 刚完成切换+读标题（同一处理
+            # 事件），跳过重切与标题重读——事件热路径省一次点击两次 OCR
+            msgs = self.wx.get_messages(chat_name, assume_switched=True)
             return [
                 m for m in msgs
                 if m.sender not in (None, "self", self.nickname)

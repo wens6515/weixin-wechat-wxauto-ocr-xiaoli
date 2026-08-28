@@ -14,7 +14,7 @@
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
-- **系统要求**：Windows 10+、已登录的**微信 PC 4.x**（4.x 版本均可）；**微信主界面需放置在屏幕右半边**（视觉方案依赖窗口位置）
+- **系统要求**：Windows 10+、已登录的**微信 PC 4.x**（4.x 版本均可）；小漓初始化时会自动把微信窗口定位到屏幕右半边（视觉方案依赖窗口位置稳定），之后请勿最小化或调整微信窗口
 - **无需安装 Python / Node.js**：安装包已内置 Python 运行时和全部依赖（含 OCR 引擎）；Node.js（天枢 CLI 依赖）在安装时自动检测，缺失则自动下载安装
 - **安装**：双击安装（免管理员权限），完成后从开始菜单/桌面启动小漓
 - **首次启动**：按引导配置三样东西——任务工作目录、微信文件接收目录、模型 API Key
@@ -30,6 +30,10 @@
 - **对话记忆**：多聊天历史持久化（memory.json）
 - **未读红圈驱动**：列表区像素检测未读角标，只处理有新消息的会话——等效 wxauto4 的"新消息→处理"事件语义
 - **变化检测先行**：截图后本地像素差异检测（毫秒级），无变化跳过识别，不每轮调视觉 API
+- **不间断快档监听**：0.5s 恒定轮询（每轮仅截图+像素检测，约占单核 5%，总 CPU ~1%）；红圈行条带 OCR 先行锚定会话名，消息事件 OCR 次数减半以上
+- **用量统计**：每次模型调用记 token/耗时/成败，「用量」页看今日/近 30 天汇总与按模型明细
+- **定时消息**：微信里说「明天下午 3 点提醒我查成绩」即可创建，到点自动发送；设置页可增删管理，支持每天/每周重复
+- **窗口自动定位**：初始化把微信窗口摆到标准位并提示勿动；被最小化时哨兵自动恢复（最小化态视觉通道是盲的）
 
 ## 快速上手（桌面版）
 
@@ -69,13 +73,15 @@ flowchart TD
     L -->|④ 仅图片| I
     L -->|⑤ 纯文字| I
     I -->|tool_calls 投递任务| K["投递任务桥<br/>发占位 → N[chat]+1"]
+    I -->|tool_calls 定时提醒| R2["登记提醒（reminders.json）<br/>角色内确认回复"]
     I -->|纯文本回复| J["AI 回复<br/>发实质 → N[chat]=0"]
     U --> A
     K --> A
+    R2 --> A
     J --> A
 ```
 
-> 气泡/媒体分析无法区分视频、表情、图片，统一按图片处理；图片消息含文字时 10 秒等待防话没说完；文件消息「回复收到 + 不停摆」，该发送者后续文字指令自动关联待处理文件。
+> 气泡/媒体分析无法区分视频、表情、图片，统一按图片处理；图片消息含文字时 10 秒等待防话没说完；文件消息「回复收到 + 不停摆」，该发送者后续文字指令自动关联待处理文件。API 最终失败自动重试（429/5xx 指数退避 + 墙钟预算），重试耗尽发角色内友好提示，绝不把错误码原样发给好友。
 
 ## 源码运行（开发者）
 
@@ -90,7 +96,8 @@ python -m venv .venv
 # 2. 首次使用：圈选 OCR 区域（列表区/消息区/标题区）
 python tools\pick_ocr_region.py        # 图形框选，结果写入 wx_ocr_region.json
 
-# 3. （可选）固定微信窗口位置尺寸——视觉坐标依赖窗口稳定
+# 3. 微信窗口位置：初始化时自动定位到屏幕右半边（wechat_window_rect=off 可关）
+#    tools\fix_window.py 仅作手动兜底
 python tools\fix_window.py 50 50 900 920
 
 # 4. 启动（CLI 模式，交互式控制台）
@@ -115,15 +122,19 @@ xiaoli_desktop/
 ├── xiaoli_app/
 │   ├── config_store.py      # 配置加载/迁移 + 模型清单 + 人设默认（后端共用）
 │   ├── card_store.py        # 角色卡存储（cards/*.json CRUD/校验/导入导出）
+│   ├── usage_store.py       # 用量统计（usage.jsonl 逐条落盘 + 聚合查询）
+│   ├── reminders_store.py   # 定时消息（reminders.json + 到期/宽限/滚动）
 │   ├── engine.py            # 引擎线程状态机（桌面端宿主用；无 Qt 依赖）
 │   └── setup.py             # 天枢安装/进程检测（GUI 引导部分函数内懒加载 Qt）
-├── tests/                   # unittest 测试套件（后端 12 个测试文件）
+├── tests/                   # unittest 测试套件（后端 15 个测试文件）
 ├── wx_ocr_region.json       # OCR 三区域标定（pick_ocr_region 生成）
 ├── wx_window.json           # 微信窗口固定配置（fix_window 生成）
 └── requirements.txt         # Python 3.12 依赖
 tools/                       # 配套标定/调试工具
 ├── pick_ocr_region.py       # OCR 区域图形框选（列表→消息→标题）
-├── fix_window.py            # 微信窗口位置固定
+├── fix_window.py            # 微信窗口位置固定（手动兜底）
+├── poll_benchmark.py        # 快档轮询真机基准（截图/红圈检测成本+CPU）
+├── minimized_probe.py       # 最小化态监听探测（哨兵依据）
 ├── calibrate_input_box.py   # 输入框坐标标定
 ├── test_read_messages.py    # 消息读取链路调试
 └── cdp_probe.py             # CDP/accessibility 通道验证探针
@@ -147,6 +158,9 @@ tools/                       # 配套标定/调试工具
 | `file_send_method` | `clipboard` | 成果文件发送方式：clipboard（剪贴板，v2.1.0 唯一方式） |
 | `max_history` | 1000 | 单聊天保留的最大历史条数 |
 | `cooldown` | 3 | 回复冷却（秒） |
+| `api_retry` | 2 | API 调用重试次数（429/5xx/网络异常；指数退避） |
+| `api_wall_budget` | 45 | 单次调用重试总时长封顶（秒），防止「超时×重试」叠成分钟级等待 |
+| `wechat_window_rect` | 空 | 微信窗口定位：空=自动定位到屏幕右半边；`[x,y,w,h]`=自定义；`off`=保持手动 |
 | `start_paused` | true | 启动时是否暂停自动回复 |
 
 控制台可用命令：`pause` / `resume` / `model [名称]` / `chat-temp <0~2>` / `chat-top-p <0~1>` / `vision-temp <0~2>` / `tianshu-window` / `task-status` / `clear [聊天ID]` / `del <聊天ID> <序号...>` / `memory <聊天ID>` / `status` / `quit` / `help`
@@ -160,7 +174,7 @@ tools/                       # 配套标定/调试工具
 ## 技术说明与已知边界
 
 - **视觉通道唯一**：微信 4.1.12+ 关闭了 UIA/CDP/窗口消息/本地数据读取等全部高效通道（验证过程见 `docs/微信通道验证结论.md`），PrintWindow 截图 + OCR 是唯一可用通道
-- **窗口稳定性**：视觉坐标依赖微信窗口位置/尺寸稳定，拖动窗口后需重新固定（`tools/fix_window.py`）或重新圈选 OCR 区域
+- **窗口稳定性**：视觉坐标依赖微信窗口位置/尺寸稳定——初始化自动定位后请勿拖动/缩放窗口（`tools/fix_window.py` 可手动兜底）；微信被最小化时视觉通道是盲的，哨兵会自动恢复窗口并告警
 - **群聊判定**：以标题区 OCR（括号人数）为权威信号，群名不含"群/集团"且无人数时可能漏判
 - 中文发送走剪贴板；图片/表情/视频统一按图片走多模态识别
 

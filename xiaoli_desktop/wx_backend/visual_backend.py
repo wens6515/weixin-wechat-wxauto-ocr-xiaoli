@@ -178,6 +178,27 @@ def ensure_window_visible(hwnd) -> bool:
     return True
 
 
+def default_right_half_rect() -> tuple[int, int, int, int]:
+    """默认窗口矩形：主屏右半边（README 系统要求：微信主界面放屏幕右半边），
+    高度留出任务栏。物理像素（进程 DPI 感知由 pyautogui 初始化保证）。"""
+    sw = u32.GetSystemMetrics(0)   # SM_CXSCREEN
+    sh = u32.GetSystemMetrics(1)   # SM_CYSCREEN
+    x = sw // 2
+    return (x, 0, sw - x, max(400, sh - 48))
+
+
+def position_window(hwnd, x: int, y: int, w: int, h: int) -> bool:
+    """把窗口移动/缩放到指定矩形（物理像素）。不置顶不抢焦点（SWP_NOZORDER
+    | SWP_NOACTIVATE）。失败返回 False，调用方降级为保持当前位置。"""
+    if not hwnd:
+        return False
+    try:
+        return bool(u32.SetWindowPos(
+            hwnd, 0, int(x), int(y), int(w), int(h), 0x0004 | 0x0010))
+    except Exception:
+        return False
+
+
 def capture_window(hwnd) -> Image.Image | None:
     """PrintWindow + PW_RENDERFULLCONTENT 截取窗口内容，返回 RGBA PIL Image。
 
@@ -765,7 +786,12 @@ class VisualBackend:
         self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
         self._current_title: str | None = None  # 当前会话标题（read_title 权威名称）
         self._current_is_group: bool = False  # 当前会话是否群聊（标题含括号人数）
-        self._selected_row_color: tuple[int, int, int] | None = None  # 自学习选中高亮背景色（进程内缓存）
+        # 选中行高亮色：真机采样固定值（深色主题 WeChat 4.x，RGB(13,168,105)，
+        # 与消息气泡绿 (53,210,141) 是两个不同色值）。命中该色 = 已选中，
+        # 调用方不点击防 toggle 取消选中——像素判定零 OCR，事件热路径第一道闸。
+        # 微信切浅色主题时该值会变：点击成功后 _learn_selected_row_color 会
+        # 重新采样覆盖；也可直接改这里的默认值。
+        self._selected_row_color: tuple[int, int, int] = (13, 168, 105)
         self._badge_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 红圈中心屏幕坐标（点击直用）
         # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
         cfg = _load_region_config()
@@ -780,9 +806,11 @@ class VisualBackend:
         if hwnd is None:
             raise BackendUnavailableError("未找到微信主窗口（请确认微信已登录并打开）")
         self._hwnd = hwnd
-        # 注意：不移动窗口——窗口位置/大小是用户手动控制的资产（可用
-        # tools/fix_window.py 固定）。坐标换算一律读窗口当前实际 rect，
-        # 与 wx_window.json 配置解耦，避免 bot 连接时覆盖用户调整。
+        # 窗口定位在 bot 初始化时一次性完成（WeChatBot._init_position_wechat，
+        # 默认右半屏 + 告知用户勿动——用户定案，替代旧的「不移动窗口」约定）。
+        # 后端自身运行期不移动窗口，坐标换算一律读窗口当前实际 rect，
+        # 用户连接后手动调整仍以实时 rect 为准。
+        self._ensure_not_iconic()
         shot = capture_window(hwnd)
         if shot is None:
             raise BackendUnavailableError("PrintWindow 截图失败")
@@ -820,6 +848,23 @@ class VisualBackend:
 
     # ---- 协议：会话 ----
 
+    def _ensure_not_iconic(self) -> bool:
+        """最小化哨兵：微信最小化后 GetWindowRect 返回任务栏占位矩形，
+        PrintWindow 只能产出 ~276x45 的垃圾小图，红圈检测恒 0——静默漏
+        消息（真机实测：不报错、不返回 None，就是看不见）。发现即
+        SW_RESTORE 恢复并告警。返回是否刚执行了恢复。"""
+        if self._hwnd is None:
+            return False
+        try:
+            if not u32.IsIconic(self._hwnd):
+                return False
+        except Exception:
+            return False
+        u32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
+        time.sleep(0.3)
+        logger.warning("[哨兵] 微信窗口被最小化，已自动恢复——最小化期间无法监听消息，请勿最小化微信")
+        return True
+
     def _refresh(self, force: bool = False,
                  foreground: bool = True) -> Image.Image | None:
         """截图并做区域变化检测；无变化且非 force 时返回 None。
@@ -837,6 +882,15 @@ class VisualBackend:
         shot = capture_window(self._hwnd)
         if shot is None:
             return None
+        # 尺寸骤缩哨兵：最小化/占位残帧（真机 276x45）远小于正常窗口面积，
+        # 丢弃本帧并触发恢复（第二道防线，IsIconic 哨兵之外兜底）
+        last = self._last_shot
+        if last is not None:
+            lw, lh = last.size
+            if lw * lh > 0 and shot.size[0] * shot.size[1] < (lw * lh) * 0.15:
+                logger.warning("[哨兵] 截图尺寸骤缩（疑似最小化占位帧），丢弃本帧")
+                self._ensure_not_iconic()
+                return None
         if not force and self._last_shot is not None:
             w, h = shot.size
             region = (
@@ -936,72 +990,118 @@ class VisualBackend:
             else:
                 clusters.append([it])
 
-        # 3. 每聚类取主名：优先选不含方括号标签、不含消息预览前缀的行；
-        #    清理 OCR 残留前缀字符（如 '艹王美晨' 的 '艹'）
+        # 3. 每聚类取主名（标签/预览行除外 + OCR 残留清理，与条带路径共用）
         for cluster in clusters:
-            cluster.sort(key=lambda it: it["y"])
-            main_line = None
-            for it in cluster:
-                t = it["text"]
-                if re.match(r"^[\s\[\]【】「」]*$", t):
-                    continue  # 纯括号/空格标签
-                # 消息预览行（'群聊 - 王文生：…' 或含 '：' 的预览）不作为主名
-                if "：" in t or ":" in t:
-                    continue
-                # 纯标签行（'[ 视频 ]' 短文本）
-                if re.match(r"^[\s\[\]]{0,2}[\u4e00-\u9fff]{1,4}[\s\[\]]{0,2}$", t) \
-                        and len(t) <= 6 and ("[" in t or "]" in t):
-                    continue
-                main_line = it
-                break
-            if main_line is None:
+            picked = self._pick_main_name(cluster)
+            if not picked:
                 # 无主名（全是标签/预览）→ 跳过
                 continue
-            name = main_line["text"]
-            # 清理 OCR 残留：
-            # - 去首尾非内容字符（'艹王美晨' → '王美晨'；'艹' 是未读角标误读）
-            # - 引号内空格（'" 强盗 " 集团' → '"强盗"集团'）
-            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9]+", "", name)
-            name = re.sub(r"\"\s+", "\"", name)
-            name = re.sub(r"\s+\"", "\"", name)
-            name = name.strip()
-            if not name:
-                continue
+            name, main_line = picked
             cx = win_l + main_line["x"] + main_line["w"] // 2
             cy = win_t + main_line["y"] + main_line["h"] // 2
             self._session_coords[name] = (cx, cy)
         return self._session_coords
 
+    @staticmethod
+    def _pick_main_name(lines: list[dict]) -> tuple[str, dict] | None:
+        """从一组 OCR 行里挑会话主名，返回 (名字, 行对象)。
+
+        跳过纯标签行/预览行/时间戳行，清理 OCR 残留（首尾非内容字符、
+        引号内空格）。条带与整表两条提名路径共用同一套规则，保证名字
+        口径一致；行对象供整表路径计算屏幕坐标。"""
+        for it in sorted(lines, key=lambda i: i["y"]):
+            t = (it.get("text") or "").strip()
+            if not t or len(t) < 2:
+                continue
+            if re.match(r"^[\d:：\s昨天前天上午下午晚上]+$", t):
+                continue
+            if "搜索" in t and len(t) <= 4:
+                continue
+            if re.match(r"^[\s\[\]【】「」]*$", t):
+                continue
+            if "：" in t or ":" in t:
+                continue
+            if re.match(r"^[\s\[\]]{0,2}[\u4e00-\u9fff]{1,4}[\s\[\]]{0,2}$", t) \
+                    and len(t) <= 6 and ("[" in t or "]" in t):
+                continue
+            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9]+", "", t)
+            name = re.sub(r"\"\s+", "\"", name)
+            name = re.sub(r"\s+\"", "\"", name)
+            name = name.strip()
+            if name:
+                return name, it
+        return None
+
+    def _name_at_badge(self, bcx: int, bcy: int, shot: Image.Image) -> str | None:
+        """事件热路径 OCR ①：红圈所在行的会话名（只裁该行条带）。
+
+        整表 OCR ~1.2s → 单行条带 ~0.3s。条带 = 会话列表区横向全宽 ×
+        红圈 y ±58px（行高 ~110px，±58 覆盖主名+预览两行）。名字取条带内
+        最上方的非标签/非预览行（与整表聚类同规则）。"""
+        w, h = shot.size
+        rect = wt.RECT()
+        u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        py = bcy - rect.top
+        l = int(w * self._session_region[0])
+        r = int(w * self._session_region[2])
+        t0, t1 = max(0, py - 58), min(h, py + 58)
+        if r <= l or t1 <= t0:
+            return None
+        strip = shot.crop((l, t0, r, t1))
+        items = ocr_image(strip)
+        if not items:
+            return None
+        picked = self._pick_main_name(items)
+        return picked[0] if picked else None
+
     def iter_unread_sessions(self) -> Iterator[str]:
         """仅迭代有未读红圈角标的会话（可选能力，wxauto 等后端可不提供）。
 
-        效率路径：
-        1. 截图 force（红圈像素检测毫秒级，无 diff 保护）
+        效率路径（事件热路径 OCR ①）：
+        1. 最小化哨兵 + 截图 force（红圈像素检测毫秒级，无 diff 保护）
         2. 无红簇 → 直接结束（零 OCR 零点击）
-        3. 有红簇 → OCR 提取会话名
-        4. 红簇与会话名坐标匹配（红圈在联系人名左上角，|dy|<60 且红圈 x<名字 x）
-        5. 匹配失败 → 红圈锚定 fallback（点击红圈右下条目，读顶部标题）
+        3. 有红簇 → 每个红圈只裁所在行条带 OCR 读会话名（~0.3s/个）
+        4. 条带漏读的红圈 → 整表 OCR + 几何匹配旧路径兜底；仍失败 →
+           红圈锚定 fallback（点击红圈右下条目，读顶部标题）
         """
+        if self._ensure_not_iconic():
+            return  # 最小化态截图是占位垃圾（真机 276x45），恢复后下一轮再扫
         shot = self._refresh(force=True, foreground=False)  # 红圈轮询：后台静默截图，不置前打断用户
         if shot is None:
             return
         badges = _detect_red_clusters(shot, region=self._session_region)
         if not badges:
             return
-        self._extract_session_names(shot)
-        if not self._session_coords:
-            return
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
         seen: set[str] = set()
         self._badge_coords.clear()  # 每轮重建（红圈坐标通道：供 _switch_chat 点击直用）
+        strip_failed = []
         for (bl, bt, br, bb) in badges:
             bcx = win_l + (bl + br) // 2
             bcy = win_t + (bt + bb) // 2
+            name = self._name_at_badge(bcx, bcy, shot)
+            if name:
+                if name in seen:
+                    logger.debug(f"[未读] {name!r} 已有红圈（重复角标，跳过）")
+                    continue
+                seen.add(name)
+                self._badge_coords[name] = (bcx, bcy)
+                # 条带锚定的点击坐标：红圈右下条目主体（与 _anchor_badge 同偏移）
+                self._session_coords[name] = (bcx + _BADGE_CLICK_OFFSET_X, bcy)
+                logger.debug(f"[未读] {name!r} 红圈屏幕 ({bcx},{bcy})")
+                yield name
+            else:
+                strip_failed.append((bcx, bcy))
+        if not strip_failed:
+            return
+        # 整表 OCR 兜底（旧路径：几何匹配红圈 ↔ 会话名）
+        coords = self._extract_session_names(shot)
+        for (bcx, bcy) in strip_failed:
             best = None
             best_d = 1e9
-            for name, (sx, sy) in self._session_coords.items():
+            for name, (sx, sy) in coords.items():
                 if abs(bcy - sy) >= 60:
                     continue
                 if bcx >= sx:  # 红簇必须在名字左侧（左上角角标）
@@ -1012,12 +1112,10 @@ class VisualBackend:
                     best = name
             if best is not None and best not in seen:
                 seen.add(best)
-                self._badge_coords[best] = (bcx, bcy)  # 红圈坐标供点击直用
-                logger.debug(f"[未读] {best!r} 红圈屏幕 ({bcx},{bcy})")
+                self._badge_coords[best] = (bcx, bcy)
+                logger.debug(f"[未读] {best!r} 红圈屏幕 ({bcx},{bcy})（整表兜底）")
                 yield best
-            elif best is not None:
-                logger.debug(f"[未读] {best!r} 已有红圈（重复角标，跳过）")
-            else:
+            elif best is None:
                 # 红圈锚定 fallback：会话名 OCR 漏读时，点击红圈右下条目，
                 # 读顶部标题拿会话名（根治"王文生漏消息"——红圈可靠，别被 OCR 拖垮）
                 anchored = self._anchor_badge(bcx, bcy)
@@ -1186,32 +1284,41 @@ class VisualBackend:
         self._selected_row_color = rgb
         logger.info(f"[高亮] 采样选中行背景色 {rgb}（y={screen_y}）")
 
-    def get_messages(self, chat: str, limit: int | None = None) -> list[WeChatMessage]:
+    def get_messages(self, chat: str, limit: int | None = None,
+                     assume_switched: bool = False) -> list[WeChatMessage]:
         """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
 
         消息块判定：时间戳行（如 '昨天 18:45'、'20:14'）作为块分隔符；块内
         多行合并为一条消息。sender 按 x 坐标与消息区中线比较——右侧=自己
         （sender="self"，上层跳过），左侧=对方（私聊时 sender=会话名，
         即发送人；群聊发送者名读取待真机样本增强）。
+
+        assume_switched：同一处理事件里 analyze_window 刚完成「切换 + 读
+        标题」时置 True——跳过重切与标题重读（省一次点击、两次 OCR，是
+        事件热路径提速的核心）。标题/群聊标记直接用缓存；消息区读空时
+        仍会走 force 重切兜底（toggle 取消选中防线保留）。
         """
-        # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
-        self._switch_chat(chat)
-        # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）。
-        # 处理新消息的动作路径，置前截图保证微信不被遮挡时也能读到标题。
-        title = self.read_title(foreground=True)
-        if not title:
-            # 标题区空（toggle 取消选中或截图失败）→ force 重切恢复后再读
-            # 一次。名字比较退出切换判定——群名全半角/符号/emoji 的 OCR
-            # 差异会让 startswith 误失败，白点 force 点击已选中会话导致
-            # toggle 取消选中（真机日志：群聊名字后多带（数字）反复点击）。
-            logger.warning(f"[读取] {chat!r} 标题={title!r}（空），force 重切")
-            self._switch_chat(chat, force=True)
+        if assume_switched and self._current_chat == chat:
+            logger.info(f"[读取] {chat!r} 标题={self._current_title!r}（复用切换结果）")
+        else:
+            # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
+            self._switch_chat(chat)
+            # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）。
+            # 处理新消息的动作路径，置前截图保证微信不被遮挡时也能读到标题。
             title = self.read_title(foreground=True)
-        logger.info(f"[读取] {chat!r} 标题={title!r}")
-        if title:
-            name, is_group, _ = parse_title(title)
-            self._current_title = name or chat
-            self._current_is_group = is_group
+            if not title:
+                # 标题区空（toggle 取消选中或截图失败）→ force 重切恢复后再读
+                # 一次。名字比较退出切换判定——群名全半角/符号/emoji 的 OCR
+                # 差异会让 startswith 误失败，白点 force 点击已选中会话导致
+                # toggle 取消选中（真机日志：群聊名字后多带（数字）反复点击）。
+                logger.warning(f"[读取] {chat!r} 标题={title!r}（空），force 重切")
+                self._switch_chat(chat, force=True)
+                title = self.read_title(foreground=True)
+            logger.info(f"[读取] {chat!r} 标题={title!r}")
+            if title:
+                name, is_group, _ = parse_title(title)
+                self._current_title = name or chat
+                self._current_is_group = is_group
         region = None
         items = []
         bubble_boxes: list[tuple] = []  # 2x 坐标气泡框 [(t,b,l,r,is_self)]

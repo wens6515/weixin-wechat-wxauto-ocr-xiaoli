@@ -43,9 +43,14 @@ class EngineBus:
 
 
 class EngineThread(threading.Thread):
-    """AgentBot 引擎线程。bot 由工厂在 initialize() 时创建（连微信阻塞 → 子线程内）。"""
+    """AgentBot 引擎线程。bot 由工厂在 initialize() 时创建（连微信阻塞 → 子线程内）。
 
-    def __init__(self, bot_factory, bus=None, poll_interval=2.0, name="xiaoli-engine"):
+    poll_interval 默认 0.5s 恒定快档（定案：不间断监听优先）。每轮 =
+    后台静默截图 + 红圈像素检测，真机实测约占总 CPU 1%（tools/poll_benchmark.py
+    可复测）；无红圈时零 OCR 零点击零前台抢占。
+    """
+
+    def __init__(self, bot_factory, bus=None, poll_interval=0.5, name="xiaoli-engine"):
         super().__init__(name=name, daemon=True)
         self._bot_factory = bot_factory
         self.bus = bus or EngineBus()
