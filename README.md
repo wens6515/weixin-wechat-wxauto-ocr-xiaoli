@@ -113,8 +113,11 @@ xiaoli_desktop/
 │   ├── models.py            # WeChatMessage / MessageType
 │   └── visual_backend.py    # 视觉后端：截图/OCR/红圈检测/气泡定位/发送
 ├── xiaoli_app/
-│   └── config_store.py      # 配置加载/迁移 + 模型清单 + 人设默认（后端共用）
-├── tests/                   # unittest 测试套件（后端 10 个测试文件）
+│   ├── config_store.py      # 配置加载/迁移 + 模型清单 + 人设默认（后端共用）
+│   ├── card_store.py        # 角色卡存储（cards/*.json CRUD/校验/导入导出）
+│   ├── engine.py            # 引擎线程状态机（桌面端宿主用；无 Qt 依赖）
+│   └── setup.py             # 天枢安装/进程检测（GUI 引导部分函数内懒加载 Qt）
+├── tests/                   # unittest 测试套件（后端 12 个测试文件）
 ├── wx_ocr_region.json       # OCR 三区域标定（pick_ocr_region 生成）
 ├── wx_window.json           # 微信窗口固定配置（fix_window 生成）
 └── requirements.txt         # Python 3.12 依赖

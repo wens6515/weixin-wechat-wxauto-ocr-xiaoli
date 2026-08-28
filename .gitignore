@@ -44,3 +44,7 @@ tools/小漓.iss
 
 # OCR 探针产物（可再生产物，含真机截图识别文本）
 tools/ocr_benchmark_result.json
+
+# 桌面端前端界面（PySide6 界面层，仅本地参与打包，不入开源仓库）
+xiaoli_desktop/xiaoli_gui.py
+xiaoli_desktop/xiaoli_app/ui/
