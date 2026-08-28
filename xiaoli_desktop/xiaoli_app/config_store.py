@@ -466,7 +466,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "image_click_offset": [-200, -130],  # 图片点击偏移（用户实测校准 2026-08-04：真人点击测 [-199,-131] 取整；位置偏了再到设置页调）
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
-        "theme": "abyss",  # 界面主题（用户指定 2026-08-29：默认「深海小漓」套，壁纸配套见 wallpaper_path）
+        "theme": "abyss",  # 界面主题（默认「深海小漓」套，壁纸配套见 wallpaper_path）
         "card_opacity": 0.5,  # 卡片不透明度 0~1.0（设置页滑块调节毛玻璃强度，默认 50%）
         "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
         "font_scale": "small",  # 全局字号档位：small/medium/large（用户指定：启动默认小字号）
@@ -474,7 +474,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
     }.items():
         if k not in cfg:
             cfg[k] = v
-    # UI 新默认迁移（用户指定 2026-08-29）：旧出厂默认主题 blue/tokyonight →
+    # UI 新默认迁移：旧出厂默认主题 blue/tokyonight →
     # abyss、壁纸空 → 小漓主题.jpg（配套「深海小漓」套）。仅当值仍是「出厂
     # 默认」时迁移——用户已手动换过其他主题/壁纸的不覆盖，尊重用户选择。
     if cfg.get("theme") in ("blue", "tokyonight", None):
