@@ -12,7 +12,7 @@
 """
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QVariantAnimation
 from PySide6.QtGui import (QColor, QPainter, QPixmap, QRadialGradient,
-                           QLinearGradient, QBrush, QPainterPath)
+                           QLinearGradient, QBrush, QPainterPath, QPen)
 from PySide6.QtWidgets import QWidget
 
 from . import THEMES
@@ -40,6 +40,8 @@ class ParticleBackdrop(QWidget):
         self._theme = None   # 当前主题 dict（缓存避免每次查）
         self._wallpaper = QPixmap()  # 壁纸（空 = 纯渐变背景）
         self._corner_radius = 16  # 圆角裁剪（配合无边框圆角窗口）
+        self._style = "bokeh"   # 粒子风格（主题 particle_style 键）
+        self._phase = 0.0       # 全局动画相位（星点闪烁/气泡摆动/光束摇摆）
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -71,6 +73,12 @@ class ParticleBackdrop(QWidget):
         old_theme = self._theme
         self._theme_key = key
         self._theme = THEMES.get(key, THEMES["blue"])
+        self._style = self._theme.get("particle_style", "bokeh")
+        if self._style == "none":
+            # 无粒子主题（墨染/简素）：清空粒子，纯背景
+            self._particles = []
+            self.update()
+            return
         if old_theme is not None and self._particles:
             glow = _hex_rgb(self._theme.get("glow", self._theme["p1"]))
             p1 = _hex_rgb(self._theme["p1"])
@@ -115,6 +123,10 @@ class ParticleBackdrop(QWidget):
         import random
         if not self._theme:
             return
+        style = getattr(self, "_style", "bokeh")
+        if style == "none":
+            self._particles = []
+            return
         w, h = max(self.width(), 1), max(self.height(), 1)
         glow = _hex_rgb(self._theme.get("glow", self._theme["p1"]))
         p1 = _hex_rgb(self._theme["p1"])
@@ -122,11 +134,50 @@ class ParticleBackdrop(QWidget):
         colors = [glow, p1, p2]
         lo, hi = self._theme_alpha_range()
         self._particles = []
+        if style == "star":
+            # 星夜紫金：稀疏星点，静止 + 呼吸闪烁（绘制期相位驱动）
+            for _ in range(_PARTICLE_COUNT):
+                self._particles.append({
+                    "x": random.uniform(0, w), "y": random.uniform(0, h),
+                    "r": random.uniform(0.8, 2.2), "vx": 0.0, "vy": 0.0,
+                    "alpha": random.uniform(lo, hi) * 1.6,
+                    "color": random.choice(colors),
+                    "tw": random.uniform(0.6, 1.8),   # 闪烁频率
+                    "ph": random.uniform(0, 6.283),   # 初相位
+                })
+            return
+        if style == "scanline":
+            # 霓虹夜行：上升数据微光（竖直短线上浮，出顶重生）
+            for _ in range(_PARTICLE_COUNT):
+                self._particles.append({
+                    "x": random.uniform(0, w), "y": random.uniform(0, h),
+                    "r": random.uniform(0.8, 1.4),
+                    "len": random.uniform(8, 26),
+                    "vx": 0.0,
+                    "vy": -_PARTICLE_SPEED * random.uniform(1.2, 2.6),
+                    "alpha": random.uniform(lo, hi) * 1.4,
+                    "color": random.choice(colors),
+                })
+            return
+        if style == "bubble":
+            # 薄荷/深海：上浮气泡（缓慢上升 + 水平轻摆）
+            for _ in range(_PARTICLE_COUNT):
+                self._particles.append({
+                    "x": random.uniform(0, w), "y": random.uniform(0, h),
+                    "r": random.uniform(1.6, 4.2),
+                    "vx": 0.0,
+                    "vy": -_PARTICLE_SPEED * random.uniform(0.4, 1.1),
+                    "alpha": random.uniform(lo, hi),
+                    "color": random.choice(colors),
+                    "ph": random.uniform(0, 6.283),
+                    "tw": random.uniform(0.4, 1.0),
+                })
+            return
+        # 默认 bokeh：全向缓慢漂移（历史行为，旧主题保持不变）
         for _ in range(_PARTICLE_COUNT):
             x = random.uniform(0, w)
             y = random.uniform(0, h)
             r = random.uniform(_PARTICLE_R_MIN, _PARTICLE_R_MAX)
-            ang = random.uniform(0, 6.283)
             v = _PARTICLE_SPEED * random.uniform(0.5, 1.5)
             self._particles.append({
                 "x": x, "y": y, "r": r,
@@ -137,10 +188,33 @@ class ParticleBackdrop(QWidget):
             })
 
     def _tick(self):
-        if not self.isVisible() or not self._particles:
+        if not self.isVisible():
+            return
+        self._phase += 0.05  # 全局相位推进（星点闪烁/气泡摆动/光束摇摆共用）
+        style = getattr(self, "_style", "bokeh")
+        if not self._particles:
+            if self._theme and self._theme.get("light_beam"):
+                self.update()  # 无粒子但有光束：仍需重绘摇摆
             return
         w, h = self.width(), self.height()
+        import math, random
         for p in self._particles:
+            if style == "star":
+                continue  # 星点静止，仅绘制期闪烁
+            if style == "bubble":
+                p["y"] += p["vy"]
+                p["x"] += math.sin(self._phase * p.get("tw", 0.6) + p.get("ph", 0.0)) * 0.25
+                if p["y"] < -12:
+                    p["y"] = h + 12
+                    p["x"] = random.uniform(0, w)
+                continue
+            if style == "scanline":
+                p["y"] += p["vy"]
+                if p["y"] < -30:
+                    p["y"] = h + 10
+                    p["x"] = random.uniform(0, w)
+                continue
+            # 默认漂移
             p["x"] += p["vx"]
             p["y"] += p["vy"]
             # 边缘回绕（柔和进出）
@@ -155,6 +229,30 @@ class ParticleBackdrop(QWidget):
         self.update()
 
     # ---------- 绘制 ----------
+
+    def _draw_light_beams(self, p, w, h):
+        """深海主题丁达尔光束：两条自顶部斜下的渐变光带，随相位轻摆。"""
+        import math
+        sway = math.sin(self._phase * 0.35) * 0.06
+        for i, (cx, bw, alpha) in enumerate(((w * 0.28, w * 0.16, 0.10),
+                                            (w * 0.62, w * 0.10, 0.07))):
+            off = sway * w * (1 if i == 0 else -1)
+            path = QPainterPath()
+            path.moveTo(cx - bw * 0.5 + off, -4)
+            path.lineTo(cx + bw * 0.5 + off, -4)
+            path.lineTo(cx + bw * 1.8 + off * 1.6, h + 4)
+            path.lineTo(cx - bw * 1.8 + off * 1.6, h + 4)
+            path.closeSubpath()
+            grad = QLinearGradient(QPointF(cx, 0), QPointF(cx, h))
+            c = _hex_rgb(self._theme.get("glow", self._theme["p2"]))
+            c.setAlphaF(alpha)
+            grad.setColorAt(0.0, c)
+            c2 = QColor(c)
+            c2.setAlphaF(0.0)
+            grad.setColorAt(0.85, c2)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(grad))
+            p.drawPath(path)
 
     def paintEvent(self, event):
         if not self._theme:
@@ -214,12 +312,42 @@ class ParticleBackdrop(QWidget):
             grad.setColorAt(1.0, _hex_rgb(t["bg"]))
             p.fillRect(QRectF(0, 0, w, h), QBrush(grad))
 
+        # 深海小漓：顶部斜射丁达尔光束（随相位缓慢摇摆）
+        if self._theme.get("light_beam"):
+            self._draw_light_beams(p, w, h)
+
         # 粒子（壁纸模式下提亮，保证可见）
+        style = getattr(self, "_style", "bokeh")
         alpha_boost = 1.6 if not self._wallpaper.isNull() else 1.0
+        import math
         for pt in self._particles:
             c = QColor(pt["color"])
-            c.setAlphaF(min(0.5, pt["alpha"] * alpha_boost))
-            p.setPen(Qt.PenStyle.NoPen)
+            a = pt["alpha"] * alpha_boost
+            if style == "star":
+                a *= 0.55 + 0.45 * math.sin(self._phase * pt.get("tw", 1.0) + pt.get("ph", 0.0))
+            c.setAlphaF(min(0.5, max(0.0, a)))
             p.setBrush(QBrush(c))
-            p.drawEllipse(QPointF(pt["x"], pt["y"]), pt["r"], pt["r"])
+            if style == "scanline":
+                pen = QPen(c)
+                pen.setWidthF(max(0.8, pt["r"]))
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                p.setPen(pen)
+                p.drawLine(QPointF(pt["x"], pt["y"]),
+                           QPointF(pt["x"], pt["y"] + pt.get("len", 14)))
+                p.setPen(Qt.PenStyle.NoPen)
+            elif style == "bubble":
+                # 气泡：半透明填充 + 浅色描边环
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(QPointF(pt["x"], pt["y"]), pt["r"], pt["r"])
+                ring = QColor(c)
+                ring.setAlphaF(min(0.65, c.alphaF() + 0.18))
+                pen = QPen(ring)
+                pen.setWidthF(0.8)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(QPointF(pt["x"], pt["y"]), pt["r"], pt["r"])
+                p.setPen(Qt.PenStyle.NoPen)
+            else:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawEllipse(QPointF(pt["x"], pt["y"]), pt["r"], pt["r"])
         p.end()

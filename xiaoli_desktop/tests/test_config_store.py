@@ -536,7 +536,12 @@ class TestGrantTasksDirToTianshu(unittest.TestCase):
         os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump({"provider": {"providers": {"deepseek": {"name": "deepseek"}}}}, f)
-        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": local})
+        # RIVET_HOME 优先于 LOCALAPPDATA（tianshu_global_config_path 的顺序），
+        # 本机若设了 RIVET_HOME 会读写真实 CLI 配置——一并钉到同一临时目录
+        patcher = mock.patch.dict(os.environ, {
+            "LOCALAPPDATA": local,
+            "RIVET_HOME": os.path.join(local, ".rivet"),
+        })
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
@@ -596,7 +601,11 @@ class TestGrantTasksDirToTianshu(unittest.TestCase):
     def test_grant_skips_without_cli_config(self):
         # 无天枢 CLI 配置（.rivet/config.json 不存在）→ 不创建、不失败
         tmp = tempfile.mkdtemp(prefix="nogrant_")
-        patcher = mock.patch.dict(os.environ, {"LOCALAPPDATA": os.path.join(tmp, "Local")})
+        # RIVET_HOME 一并置空（优先级高于 LOCALAPPDATA，本机可能设了真实路径）
+        patcher = mock.patch.dict(os.environ, {
+            "LOCALAPPDATA": os.path.join(tmp, "Local"),
+            "RIVET_HOME": "",
+        })
         patcher.start()
         self.addCleanup(patcher.stop)
         self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))

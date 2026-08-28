@@ -29,6 +29,17 @@ _DEFAULTS = {
     "accent": "#5B8CFF", "focus": "#5B8CFF", "glow": "#8B5CF6",
     "scrollbar": "#CBD5E1", "card_alt": "#F8FAFC",
     "card_border": None,  # 卡片专用边框（None → 深色主题自动提亮 $border）
+    # ---- 主题规格键（ThemeSpec）：默认=历史生效值，旧主题未覆盖→逐字不变 ----
+    "font_family": "\"Noto Sans SC\", \"Microsoft YaHei UI\", \"Microsoft YaHei\", sans-serif",
+    "r_card": "16px",
+    "r_group": "12px",
+    "r_list": "12px",
+    "r_btn": "10px",
+    "r_btn_main": "14px",
+    "r_input": "10px",
+    "nav_indicator": "bar",      # bar(左竖条) / underline(下划线) / pill(圆角块)
+    "particle_style": "bokeh",   # bokeh(散景) / bubble(气泡) / star(星点) / scanline(扫描线) / float(浮游) / none
+    "wallpaper": "",             # 主题推荐壁纸（设置页可一键应用）
 }
 
 # 12 套主题。字段语义：
@@ -39,7 +50,109 @@ _DEFAULTS = {
 #   accent 次强调色；focus 输入框聚焦环色；glow 发光/光晕色（霓虹、弥散渐变）；
 #   scrollbar 滚动条滑块色；card_alt 次级卡片底色。
 THEMES = {
-    # Tokyo Night 置顶（用户指定：默认主题，排序第一个展示）
+    # ===================== 壁纸配套主题（用户指定 2026-08-29 排序置顶，带同款内置壁纸） =====================
+    "moxin": {
+        "label": "墨染 · 东方水墨", "group": "浅色",
+        "bg": "#F6F1E7", "p1": "#B03A2E", "p2": "#7A5C3E",
+        "card": "rgba(255,252,244,0.90)", "text": "#2B2B27", "muted": "#8A8172",
+        "border": "#DCD3C0", "hover": "#EFE7D6", "input_bg": "#FFFFFF",
+        "frame": "#FBF7EE", "header": "#F6F1E7",
+        "success": "#5B7B5A", "danger": "#A63D2F", "warning": "#B8860B",
+        "accent": "#B03A2E", "focus": "#B03A2E", "glow": "#7A5C3E",
+        "scrollbar": "#D0C6B0", "card_alt": "#F0E9DA",
+        "font_family": "\"Noto Serif SC\", \"Source Han Serif SC\", \"SimSun\", serif",
+        "r_card": "4px", "r_group": "4px", "r_list": "4px", "r_btn": "4px",
+        "r_btn_main": "4px", "r_input": "4px",
+        "nav_indicator": "bar", "particle_style": "none",
+        "wallpaper": "东方水墨-仙侠-古风.jpg",
+    },
+    "neon": {
+        "label": "霓虹夜行 · 赛博朋克", "group": "深色",
+        "bg": "#0A0E1A", "p1": "#00F0FF", "p2": "#FF2EC4",
+        "card": "rgba(17,22,42,0.82)", "text": "#E8F4FF", "muted": "#6B7A99",
+        "border": "#1E2A4A", "hover": "#16203C", "input_bg": "#0D1326",
+        "frame": "#0A0E1A", "header": "#0A0E1A",
+        "success": "#00E389", "danger": "#FF3B6B", "warning": "#FFB020",
+        "accent": "#00F0FF", "focus": "#00F0FF", "glow": "#FF2EC4",
+        "scrollbar": "#2A3A5C", "card_alt": "#0D1224",
+        "r_card": "0px", "r_group": "0px", "r_list": "0px", "r_btn": "0px",
+        "r_btn_main": "0px", "r_input": "0px",
+        "nav_indicator": "underline", "particle_style": "scanline",
+        "wallpaper": "赛博朋克-壁纸.jpg",
+    },
+    "cream": {
+        "label": "奶油晨光 · 软萌治愈", "group": "浅色",
+        "bg": "#FFF8F0", "p1": "#FF9F6E", "p2": "#FFB4A2",
+        "card": "rgba(255,255,255,0.90)", "text": "#4A3B32", "muted": "#B0988A",
+        "border": "#F3E3D5", "hover": "#FFEFE2", "input_bg": "#FFFFFF",
+        "frame": "#FFFBF5", "header": "#FFF8F0",
+        "success": "#58B98A", "danger": "#F2736B", "warning": "#FFB340",
+        "accent": "#FF9F6E", "focus": "#FF9F6E", "glow": "#FFB4A2",
+        "scrollbar": "#EFD9C8", "card_alt": "#FFF1E6",
+        "r_card": "16px", "r_group": "16px", "r_list": "14px", "r_btn": "14px",
+        "r_btn_main": "18px", "r_input": "12px",
+        "nav_indicator": "pill", "particle_style": "bokeh",
+        "wallpaper": "软萌治愈-动物-可爱.jpg",
+    },
+    "stellar": {
+        "label": "星夜紫金 · 典雅暗夜", "group": "深色",
+        "bg": "#1A1230", "p1": "#C9A227", "p2": "#8B7BD8",
+        "card": "rgba(36,26,66,0.82)", "text": "#F0EBFF", "muted": "#8A7FB0",
+        "border": "#352856", "hover": "#2C2148", "input_bg": "#1E1638",
+        "frame": "#1A1230", "header": "#1A1230",
+        "success": "#4FC48F", "danger": "#E5636F", "warning": "#D9A93B",
+        "accent": "#C9A227", "focus": "#C9A227", "glow": "#8B7BD8",
+        "scrollbar": "#4A3A72", "card_alt": "#1E1638",
+        "r_card": "12px", "r_group": "12px", "r_list": "12px", "r_btn": "10px",
+        "r_btn_main": "12px", "r_input": "10px",
+        "nav_indicator": "bar", "particle_style": "star",
+        "wallpaper": "典雅暗黑-暗夜.jpg",
+    },
+    "mint": {
+        "label": "薄荷气泡 · 清透夏日", "group": "浅色",
+        "bg": "#F4FBF8", "p1": "#2EC4A0", "p2": "#7FE3D0",
+        "card": "rgba(255,255,255,0.90)", "text": "#1E3A33", "muted": "#6E9A90",
+        "border": "#CDEBE2", "hover": "#E2F6EF", "input_bg": "#FFFFFF",
+        "frame": "#F8FDFB", "header": "#F4FBF8",
+        "success": "#22B07E", "danger": "#EF6461", "warning": "#F0A63A",
+        "accent": "#2EC4A0", "focus": "#2EC4A0", "glow": "#7FE3D0",
+        "scrollbar": "#BFE3D8", "card_alt": "#E8F7F1",
+        "r_card": "14px", "r_group": "14px", "r_list": "12px", "r_btn": "12px",
+        "r_btn_main": "16px", "r_input": "12px",
+        "nav_indicator": "bar", "particle_style": "bubble",
+        "wallpaper": "户外-活力少女-清新.jpg",
+    },
+    "paper": {
+        "label": "简素 · 极简工具", "group": "浅色",
+        "bg": "#FAFAFA", "p1": "#2E6BFF", "p2": "#2E6BFF",
+        "card": "rgba(255,255,255,0.92)", "text": "#1A1A1A", "muted": "#8A8A8A",
+        "border": "#E4E4E4", "hover": "#F0F0F0", "input_bg": "#FFFFFF",
+        "frame": "#FCFCFC", "header": "#FAFAFA",
+        "success": "#2FA96C", "danger": "#E5484D", "warning": "#F2A018",
+        "accent": "#2E6BFF", "focus": "#2E6BFF", "glow": "#2E6BFF",
+        "scrollbar": "#D5D5D5", "card_alt": "#F2F2F2",
+        "r_card": "6px", "r_group": "8px", "r_list": "6px", "r_btn": "4px",
+        "r_btn_main": "6px", "r_input": "4px",
+        "nav_indicator": "bar", "particle_style": "none",
+        "wallpaper": "中式-剑-卷轴.jpg",
+    },
+    "abyss": {
+        "label": "深海小漓 · 人设主题", "group": "深色",
+        "bg": "#0B2540", "p1": "#4FB3FF", "p2": "#7FD4FF",
+        "card": "rgba(18,52,88,0.80)", "text": "#E6F4FF", "muted": "#6E96B8",
+        "border": "#1E4668", "hover": "#1A4268", "input_bg": "#0E2A4A",
+        "frame": "#0B2540", "header": "#0B2540",
+        "success": "#35C48D", "danger": "#FF6B7A", "warning": "#FFC24B",
+        "accent": "#4FB3FF", "focus": "#4FB3FF", "glow": "#7FD4FF",
+        "scrollbar": "#2A5A82", "card_alt": "#0E2A4A",
+        "r_card": "18px", "r_group": "16px", "r_list": "14px", "r_btn": "14px",
+        "r_btn_main": "20px", "r_input": "14px",
+        "nav_indicator": "pill", "particle_style": "bubble",
+        "light_beam": True,   # 深海专属：顶部丁达尔光束（backdrop 绘制）
+        "wallpaper": "小漓主题.jpg",
+    },
+
+    # Tokyo Night（用户指定默认主题）
     "tokyonight": {"label": "Tokyo Night", "group": "深色",
                    "bg": "#1A1B26", "p1": "#7AA2F7", "p2": "#BB9AF7",
                    "card": "rgba(26,27,38,0.85)", "text": "#C0CAF5", "muted": "#6B7390",
@@ -144,7 +257,7 @@ THEMES = {
 # QSS 不再承担背景生成。
 
 _QSS_TEMPLATE = Template("""
-* { font-family: "Noto Sans SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+* { font-family: $font_family;
     font-size: $fs_base; }
 QLabel, QListWidget, QTableWidget, QLineEdit, QPlainTextEdit, QTextEdit,
 QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QCheckBox { color: $text; }
@@ -179,8 +292,8 @@ QLabel#envBad { font-weight: 600; color: $danger; }
 QLabel#envPending { font-weight: 600; color: $muted; }
 /* 页内提示文字（ModelsPage tip_model 等）：text 80% 透明度，浅于正文深于 muted */
 QLabel#tip { color: $tip; font-size: 13px; }
-QFrame#card { background: $card; border: 1px solid $card_border; border-radius: 16px; }
-QPushButton#btnMain { color: white; border: none; border-radius: 14px;
+QFrame#card { background: $card; border: 1px solid $card_border; border-radius: $r_card; }
+QPushButton#btnMain { color: white; border: none; border-radius: $r_btn_main;
                       font-size: 16px; font-weight: 600; padding: 12px 36px;
                       background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); }
@@ -196,7 +309,7 @@ QPushButton#btnMain[tone="warn"]:pressed { background: #D97706; }
 QProgressBar { border: none; border-radius: 8px; background: $border; height: 12px; }
 QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                       stop:0 $p1, stop:1 $p2); border-radius: 8px; }
-QPushButton { background: $input_bg; border: 1px solid $border; border-radius: 10px;
+QPushButton { background: $input_bg; border: 1px solid $border; border-radius: $r_btn;
               padding: 8px 20px; min-height: 32px; color: $text; font-size: $fs_base; font-weight: 500;
               letter-spacing: 1px; }
 QPushButton:hover { background: $hover; border-color: $p1; color: $text; }
@@ -205,7 +318,7 @@ QPushButton:disabled { color: $muted; background: $frame; border-color: $border;
 /* 紧凑按钮：窄栏横排（如角色卡页 5 按钮行）——小 padding 防文字挤压裁剪 */
 QPushButton[compact="true"] { padding: 6px 8px; min-height: 30px; }
 QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {
-    background: $input_bg; border: 1px solid $border; border-radius: 10px;
+    background: $input_bg; border: 1px solid $border; border-radius: $r_input;
     padding: 5px 10px; min-height: 30px; }
 /* 下拉弹层（QComboBox 弹出的列表）：深色系统主题下 palette 文字是白色，
    必须显式设深灰文字 + 白底，否则浅色界面上下拉项白字看不清。
@@ -220,7 +333,7 @@ QComboBox QAbstractItemView::item:selected { background: $hover; color: $text; }
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QComboBox:focus,
 QSpinBox:focus, QDoubleSpinBox:focus { border: 1px solid $focus; background: $input_bg; }
 QListWidget, QTableWidget { background: $input_bg; border: 1px solid $border;
-                            border-radius: 12px; }
+                            border-radius: $r_list; }
 QTableWidget { alternate-background-color: $card_alt; gridline-color: transparent; }
 QListWidget::item { padding: 7px 10px; border-radius: 8px; margin: 2px 4px; }
 QListWidget::item:hover { background: $hover; }
@@ -266,7 +379,7 @@ QHeaderView::section { background: $header; border: none;
                        border-bottom: 2px solid $border; padding: 10px 8px;
                        font-weight: 600; color: $text; }
 QHeaderView { background: $header; }
-QGroupBox { border: 1px solid $card_border; border-radius: 12px; margin-top: 12px;
+QGroupBox { border: 1px solid $card_border; border-radius: $r_group; margin-top: 12px;
             padding-top: 10px; background: $card; font-weight: 600; color: $text; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px;
                    color: $p1; }
@@ -485,6 +598,19 @@ def default_wallpaper_path() -> str:
     return items[0][0] if items else ""
 
 
+def resolve_wallpaper_path(wp: str) -> str:
+    """壁纸路径解析：绝对路径直接用；裸文件名（默认值「小漓主题.jpg」这类）
+    在内置壁纸目录里找同名文件。默认值不能写死绝对路径——源码/打包两种
+    运行形态壁纸目录不同。找不到原样返回（set_wallpaper 会兜底）。"""
+    wp = (wp or "").strip()
+    if not wp or os.path.isabs(wp):
+        return wp
+    for p, f in list_wallpapers():
+        if f == wp or f == os.path.basename(wp):
+            return p
+    return wp
+
+
 def wallpaper_short_name(fname: str) -> str:
     """壁纸显示名：去「【哲风壁纸】」前缀 + 去扩展名。"""
     for pre in ("【哲风壁纸】", "哲风壁纸-"):
@@ -590,19 +716,24 @@ class ThumbDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _draw_check(self, painter, icon_rect, accent):
-        """右上角：主题色小圆底 + 白色对勾（✓）。"""
+        """右上角：主题色小圆底 + 白色对勾（✓）。
+
+        圆心与对勾同心、圆完整落在缩略图内（历史缺陷：drawEllipse 的
+        QPointF 重载第一参数是圆心，此前误传外接框左上角，圆整体偏左
+        上与勾错位；且原圆心 (right-4, top+4) 会让圆冒出缩略图上缘
+        5px 被 item 裁剪——挪到 (right-11, top+11) 全部落inside）。"""
         d = 18.0
-        cx = icon_rect.right() - 4
-        cy = icon_rect.top() + 4
+        cx = icon_rect.right() - 11.0
+        cy = icon_rect.top() + 11.0
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(accent)
-        painter.drawEllipse(QPointF(cx - d / 2, cy - d / 2), d / 2, d / 2)
+        painter.drawEllipse(QPointF(cx, cy), d / 2, d / 2)
         painter.setPen(QPen(QColor("#FFFFFF"), 2.2, Qt.PenStyle.SolidLine,
                             Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        path = QPainterPath(QPointF(cx - d / 2 + 4.0, cy + 0.5))
-        path.lineTo(QPointF(cx - d / 2 + 7.6, cy + 3.8))
-        path.lineTo(QPointF(cx + d / 2 - 3.0, cy - 3.4))
+        path = QPainterPath(QPointF(cx - 5.0, cy + 0.5))
+        path.lineTo(QPointF(cx - 1.4, cy + 3.8))
+        path.lineTo(QPointF(cx + 6.0, cy - 3.4))
         painter.drawPath(path)
 
 
@@ -750,4 +881,4 @@ class AppContext:
         return (self.cfg or {}).get("theme", "blue")
 
     def wallpaper(self):
-        return (self.cfg or {}).get("wallpaper_path", "")
+        return resolve_wallpaper_path((self.cfg or {}).get("wallpaper_path", ""))

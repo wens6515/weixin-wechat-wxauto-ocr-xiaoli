@@ -731,6 +731,10 @@ class AgentBot(WeChatBot):
                 decorated = f"群聊：{chat_name}：{text}"
         else:
             decorated = f"私聊 - {sender}：{text}" if sender else f"私聊：{text}"
+        # 沉浸要求与 call_chat_ai 同源注入（首条消息后空行拼接，按历史
+        # 标记去重）；注入后的 decorated 作为 user_text 进
+        # _apply_vision_result，text 分支存历史后整个会话生效。
+        decorated = self._with_immersion(chat_name, decorated)
         prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{decorated}"
         content = [{"type": "text", "text": prompt}]
         if img_path:

@@ -464,6 +464,8 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         from types import SimpleNamespace
         from unittest import mock
 
+        import wechat_bot as wb
+
         sent = {}
 
         def fake_post(url, headers=None, json=None, timeout=None):
@@ -477,7 +479,12 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
             reply = bot.call_chat_ai("强盗”集团", user_msg, **kwargs)
         self.assertEqual(reply, "ok")
-        return sent["json"]["messages"][-1]["content"]
+        content = sent["json"]["messages"][-1]["content"]
+        # 首条消息（桩历史恒为空）必须注入【角色沉浸要求】——decorated 格式
+        # 断言只关心消息本体，断言注入存在后剥掉尾缀再返回
+        suffix = "\n\n" + wb.ROLE_IMMERSION_PROMPT
+        self.assertTrue(content.endswith(suffix), "首条消息必须注入角色沉浸要求")
+        return content[:-len(suffix)]
 
     def test_group_with_sender(self):
         bot = self._make()
@@ -537,6 +544,53 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         content = self._user_msg_content(bot, sender_name=None, is_group=False)
         self.assertEqual(content, "私聊：豆包有学生优惠了",
                          "私聊无发送者名时保持现状退化分支不变")
+
+    def test_first_message_injects_immersion_then_dedup(self):
+        """沉浸要求注入：会话首条消息后空行拼接注入一次；随消息写入历史后
+        按【角色沉浸要求】标记去重，后续请求不再重复注入。"""
+        import threading
+
+        import wechat_bot as wb
+
+        bot = wb.WeChatBot.__new__(wb.WeChatBot)
+        bot.api_url = "https://api.test/v1/chat/completions"
+        bot.api_key = "test-key"
+        bot.chat_model = "test-model"
+        bot.chat_temperature = 0.7
+        bot.chat_top_p = 0.9
+        bot.api_retry = 0
+        bot.api_timeout = 5
+        bot.system_prompt = "你是小漓"
+        bot._model_lock = threading.RLock()
+        bot.memory_db = {}  # _with_immersion 用 hasattr(memory_db) 判定历史设施存在
+        store = {}
+        bot._get_history = lambda chat_id: store.setdefault(chat_id, [])
+        bot._add_history = lambda chat_id, role, content: store.setdefault(
+            chat_id, []).append({"role": role, "content": content})
+
+        from types import SimpleNamespace
+        from unittest import mock
+
+        def post_once(user_msg):
+            sent = {}
+
+            def fake_post(url, headers=None, json=None, timeout=None):
+                sent["json"] = json
+                return SimpleNamespace(
+                    status_code=200, text="{}",
+                    json=lambda: {"choices": [{"message": {"content": "ok"}}]},
+                )
+
+            with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
+                bot.call_chat_ai("联系人甲", user_msg)
+            return sent["json"]["messages"][-1]["content"]
+
+        first = post_once("你好")
+        self.assertTrue(first.endswith("\n\n" + wb.ROLE_IMMERSION_PROMPT),
+                        "首条消息后必须空行拼接注入角色沉浸要求")
+        second = post_once("在吗")
+        self.assertEqual(second, "私聊：在吗",
+                         "历史已有沉浸标记，后续消息不得重复注入")
 
     def test_reply_strips_private_chat_prefix(self):
         """模型复读 [私聊 - 名字] 前缀 → call_chat_ai 返回前剥除（不污染历史）。"""
@@ -1383,6 +1437,58 @@ class TestVisionModelDefault(unittest.TestCase):
             cfg = wechat_bot.load_config(path)
             self.assertEqual(cfg["chat_model"], "zhipu:glm-4v-flash",
                              "用户已有配置不应被默认值覆盖")
+
+
+class TestVisionRouteImmersion(unittest.TestCase):
+    """沉浸要求注入覆盖 vision 主路——README 流程图节点 I：所有消息主路
+    走 _vision_route 单调用，call_chat_ai 只是降级通道，只挂降级路等于
+    没挂（实测教训：首条消息注入必须在两路都生效）。
+    契约：首条消息后空行拼接注入；注入后的 user_text 随 text 分支存入
+    历史；后续请求按【角色沉浸要求】标记去重。"""
+
+    def _agent(self):
+        from xiaoli_bot import AgentBot
+
+        bot = AgentBot.__new__(AgentBot)
+        bot.system_prompt = "你叫小漓"
+        bot.nickname = "小漓"
+        bot.vision_api_url = "https://api.test/v1/chat/completions"
+        bot.vision_api_key = "test-key"
+        bot.chat_model = "test-model"
+        bot.vision_temp = 0.7
+        bot.vision_max_tokens = 10000
+        bot._model_lock = threading.RLock()
+        bot.memory_db = {}  # _with_immersion 用 hasattr(memory_db) 判定历史设施存在
+        store = {}
+        bot._get_history = lambda chat_id: store.setdefault(chat_id, [])
+        bot._add_history = lambda chat_id, role, content: store.setdefault(
+            chat_id, []).append({"role": role, "content": content})
+        bot._send_text = lambda *a, **k: None
+        return bot
+
+    def test_first_message_injects_then_dedup(self):
+        import wechat_bot as wb
+
+        bot = self._agent()
+        sent = {}
+
+        def fake_vision(content, chat_id=None):
+            sent["text"] = content[0]["text"]
+            return {"kind": "text", "content": "嗨"}
+
+        bot.call_vision_api = fake_vision
+
+        bot._vision_route("王文生", "王文生", "你好呀")
+        self.assertTrue(sent["text"].endswith("\n\n" + wb.ROLE_IMMERSION_PROMPT),
+                        "vision 主路首条消息必须空行拼接注入沉浸要求")
+        hist = bot._get_history("王文生")
+        self.assertEqual(hist[0]["role"], "user")
+        self.assertTrue(hist[0]["content"].endswith(wb.ROLE_IMMERSION_PROMPT),
+                        "注入后的 user_text 必须随 text 分支存入历史（去重依据）")
+
+        bot._vision_route("王文生", "王文生", "在吗")
+        self.assertFalse(sent["text"].endswith(wb.ROLE_IMMERSION_PROMPT),
+                         "历史已有标记，第二条消息不得重复注入")
 
 
 class TestVisionRoutePersona(unittest.TestCase):
