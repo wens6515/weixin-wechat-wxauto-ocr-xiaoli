@@ -210,6 +210,44 @@ def default_right_half_rect() -> tuple[int, int, int, int]:
     return (x, t, r - x, max(400, b - t))
 
 
+dwm = ctypes.windll.dwmapi
+
+
+def visible_frame_margins(hwnd):
+    """窗口不可见外沿（DWM 阴影/resize 边框，物理像素）：(左, 上, 右, 下)。
+
+    GetWindowRect/SetWindowPos 的矩形含这些不可见外沿——把窗口矩形直接
+    摆到屏幕右半边 (1280,0,1280,1600)，可见内容会两侧各缩进 ~10px（用户
+    实测「右侧有缝隙」；手动拖到打满时系统保证的是可见内容贴边，窗口
+    矩形反而伸出屏幕 (1270,0,1300,1610)）。DWMWA_EXTENDED_FRAME_BOUNDS(=9)
+    是可见内容矩形，与 GetWindowRect 的差值即外沿。读取失败返回 None。"""
+    if not hwnd:
+        return None
+    try:
+        bounds = wt.RECT()
+        if dwm.DwmGetWindowAttribute(
+                hwnd, 9, ctypes.byref(bounds), ctypes.sizeof(bounds)) != 0:
+            return None
+        gr = wt.RECT()
+        if not u32.GetWindowRect(hwnd, ctypes.byref(gr)):
+            return None
+        return (bounds.left - gr.left, bounds.top - gr.top,
+                gr.right - bounds.right, gr.bottom - bounds.bottom)
+    except Exception:
+        return None
+
+
+def position_window_visible(hwnd, x: int, y: int, w: int, h: int) -> bool:
+    """按「可见内容」目标矩形定位：自动外扩不可见边框外沿，使可见内容
+    精确落在 (x, y, w, h)——与用户手动拖窗口到打满的系统语义一致。
+    外沿读取失败按零外沿处理（退化为 position_window 原行为）。"""
+    m = visible_frame_margins(hwnd)
+    if m is None:
+        m = (0, 0, 0, 0)
+    ml, mt, mr, mb = m
+    return position_window(hwnd, x - ml, y - mt, w + ml + mr, h + mt + mb)
+
+
 def position_window(hwnd, x: int, y: int, w: int, h: int) -> bool:
     """把窗口移动/缩放到指定矩形（物理像素）。不置顶不抢焦点（SWP_NOZORDER
     | SWP_NOACTIVATE）。失败返回 False，调用方降级为保持当前位置。"""

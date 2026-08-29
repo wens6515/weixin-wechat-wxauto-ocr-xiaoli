@@ -18,7 +18,7 @@ from wx_backend.visual_backend import (
     find_window_by_title,
     window_rect,
     default_right_half_rect,
-    position_window,
+    position_window_visible,
 )
 from xiaoli_app.config_store import AI_DEFAULTS
 from xiaoli_app.usage_store import UsageStore
@@ -513,8 +513,11 @@ class WeChatBot:
         else:
             x, y, w, h = default_right_half_rect()
             source = "默认右半屏"
-        if position_window(hwnd, x, y, w, h):
-            logger.info(f"[定位] 微信窗口已定位（{source}）：({x},{y}) {w}x{h}"
+        if position_window_visible(hwnd, x, y, w, h):
+            # 可见内容语义：自动外扩 DWM 不可见边框，可见部分精确贴合目标
+            # （与手动拖窗口到打满的系统行为一致；直接摆窗口矩形会两侧
+            # 各缩进 ~10px——用户实测「右侧有缝隙」）
+            logger.info(f"[定位] 微信窗口已定位（{source}）：可见区 ({x},{y}) {w}x{h}"
                         "——请勿最小化或调整窗口大小，否则影响消息识别")
         else:
             logger.warning("[定位] 微信窗口定位失败，保持当前位置")

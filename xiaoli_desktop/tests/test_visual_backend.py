@@ -1803,3 +1803,33 @@ class TestDefaultRightHalfRect(unittest.TestCase):
              mock.patch.object(vb.u32, "GetSystemMetrics",
                                side_effect=[1920, 1080]):
             self.assertEqual(vb.default_right_half_rect(), (960, 0, 960, 1040))
+
+    def test_position_window_visible_expands_frame_margins(self):
+        """可见内容语义定位：自动外扩 DWM 不可见边框——目标可见区
+        (1280,0,1280,1600) + 外沿 (10,0,10,10) → 窗口矩形 (1270,0,1300,1610)
+        （与用户手动拖到打满的系统行为一致）"""
+        from wx_backend import visual_backend as vb
+        import ctypes as _ct
+
+        def fake_dwm(hwnd, attr, ptr, size):
+            rect = _ct.cast(ptr, _ct.POINTER(vb.wt.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 1272, 0, 2560, 1600
+            return 0
+
+        def fake_get_rect(hwnd, ptr):
+            rect = _ct.cast(ptr, _ct.POINTER(vb.wt.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 1262, 0, 2570, 1610
+            return True
+
+        captured = {}
+
+        def fake_setpos(hwnd, after, x, y, w, h, flags):
+            captured["rect"] = (x, y, w, h)
+            return True
+
+        with mock.patch.object(vb.dwm, "DwmGetWindowAttribute", side_effect=fake_dwm), \
+             mock.patch.object(vb.u32, "GetWindowRect", side_effect=fake_get_rect), \
+             mock.patch.object(vb.u32, "SetWindowPos", side_effect=fake_setpos):
+            ok = vb.position_window_visible(0x1234, 1280, 0, 1280, 1600)
+        self.assertTrue(ok)
+        self.assertEqual(captured["rect"], (1270, 0, 1300, 1610))
