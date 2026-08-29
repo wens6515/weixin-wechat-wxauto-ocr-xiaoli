@@ -197,6 +197,15 @@ def default_right_half_rect() -> tuple[int, int, int, int]:
     if not ok or r <= l or b <= t:
         l, t = 0, 0
         r, b = u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
+    else:
+        # 自动隐藏任务栏仍保留 ~2px「呼出条」（DPI 缩放下放大到数 px），
+        # 工作区与整屏差值在这个量级时视为实际全屏直接打满（用户实测
+        # 仍留一条细缝）；固定任务栏差值远超容差，正常扣减不受影响
+        full_r, full_b = u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
+        if 0 < full_r - r <= 12:
+            r = full_r
+        if 0 < full_b - b <= 12:
+            b = full_b
     x = l + (r - l) // 2
     return (x, t, r - x, max(400, b - t))
 

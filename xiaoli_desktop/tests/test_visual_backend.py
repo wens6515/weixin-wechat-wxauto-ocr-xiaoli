@@ -1771,3 +1771,35 @@ class TestDefaultRightHalfRect(unittest.TestCase):
              mock.patch.object(vb.u32, "GetSystemMetrics",
                                side_effect=[1920, 1080]):
             self.assertEqual(vb.default_right_half_rect(), (960, 0, 960, 1080))
+
+    def test_autohide_taskbar_treated_as_fullscreen(self):
+        """自动隐藏任务栏仅留 ~2px 呼出条 → 视为全屏打满（不留细缝）"""
+        from wx_backend import visual_backend as vb
+
+        def fake_spi(action, param, rect_ptr, flags):
+            import ctypes as _ct
+            rect = _ct.cast(rect_ptr, _ct.POINTER(vb.wt.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 0, 0, 1920, 1078
+            return True
+
+        with mock.patch.object(vb.u32, "SystemParametersInfoW",
+                               side_effect=fake_spi), \
+             mock.patch.object(vb.u32, "GetSystemMetrics",
+                               side_effect=[1920, 1080]):
+            self.assertEqual(vb.default_right_half_rect(), (960, 0, 960, 1080))
+
+    def test_fixed_taskbar_keeps_deduction(self):
+        """固定任务栏差值超容差 → 正常扣减"""
+        from wx_backend import visual_backend as vb
+
+        def fake_spi(action, param, rect_ptr, flags):
+            import ctypes as _ct
+            rect = _ct.cast(rect_ptr, _ct.POINTER(vb.wt.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 0, 0, 1920, 1040
+            return True
+
+        with mock.patch.object(vb.u32, "SystemParametersInfoW",
+                               side_effect=fake_spi), \
+             mock.patch.object(vb.u32, "GetSystemMetrics",
+                               side_effect=[1920, 1080]):
+            self.assertEqual(vb.default_right_half_rect(), (960, 0, 960, 1040))

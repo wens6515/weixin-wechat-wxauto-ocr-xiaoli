@@ -1652,9 +1652,10 @@ class WeChatBot:
                 self._pending_placeholders[chat] = self._pending_placeholders.get(chat, 0) + 1
                 return
 
-            # 按"至少一个空行"拆分（兼容 \n\n、空行带空格、连续多换行）；
-            # 空段丢弃。拆不出多段时走原单条发送（现有回复行为零变化）
-            parts = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+            # 按换行拆分（用户定案：单换行也分次发送——人设要求碎句多段，
+            # 模型用单 \n 分句时旧逻辑会整段一起发）。任意连续换行都拆，
+            # 空段丢弃；拆不出多段时走原单条发送
+            parts = [p.strip() for p in re.split(r'\n+', text) if p.strip()]
             if len(parts) <= 1:
                 cleaned_text = text.strip()
                 self.wx.send_text(chat, cleaned_text)

@@ -84,3 +84,16 @@ class TestSendTextSplit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_single_newline_split(self):
+        """单换行也分次发送（用户定案：模型用单 \n 分句时旧逻辑整段一起发）"""
+        bot = _make_bot()
+        bot._send_text("第一句\n第二句", "小明")
+        self.assertEqual(bot.wx.sent,
+                         [("小明", "第一句"), ("小明", "第二句")])
+
+    def test_single_newline_with_trailing_spaces(self):
+        bot = _make_bot()
+        bot._send_text("句子甲  \n句子乙", "小明")
+        self.assertEqual(bot.wx.sent,
+                         [("小明", "句子甲"), ("小明", "句子乙")])
