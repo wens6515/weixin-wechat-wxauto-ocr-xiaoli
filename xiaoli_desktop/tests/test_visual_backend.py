@@ -1746,3 +1746,28 @@ class TestRealFixtureRegion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestDefaultRightHalfRect(unittest.TestCase):
+    def test_uses_workarea(self):
+        """默认定位取主屏工作区（SPI_GETWORKAREA）：自动扣任务栏，
+        自动隐藏任务栏时工作区=全屏 → 窗口打满不留缝。"""
+        from wx_backend import visual_backend as vb
+
+        def fake_spi(action, param, rect_ptr, flags):
+            import ctypes as _ct
+            rect = _ct.cast(rect_ptr, _ct.POINTER(vb.wt.RECT)).contents
+            rect.left, rect.top, rect.right, rect.bottom = 0, 0, 1920, 1040
+            return True
+
+        with mock.patch.object(vb.u32, "SystemParametersInfoW",
+                               side_effect=fake_spi):
+            self.assertEqual(vb.default_right_half_rect(), (960, 0, 960, 1040))
+
+    def test_workarea_failure_falls_back_to_screen(self):
+        from wx_backend import visual_backend as vb
+        with mock.patch.object(vb.u32, "SystemParametersInfoW",
+                               return_value=False), \
+             mock.patch.object(vb.u32, "GetSystemMetrics",
+                               side_effect=[1920, 1080]):
+            self.assertEqual(vb.default_right_half_rect(), (960, 0, 960, 1080))
