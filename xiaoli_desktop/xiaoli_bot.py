@@ -1308,12 +1308,10 @@ class AgentBot(WeChatBot):
             if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                 return False
             window_msgs = _window_msgs(win)
-        # 群聊判定（本次会话权威值）：优先 analyze_window 显式返回的 is_group
-        # （read_title 解析标题括号人数）；缺失时用 _window_msgs 已刷新的缓存，
-        # 再兜底名称启发式。绝不取 analyze_window 之前/未刷新的旧缓存。
-        is_group = win.get("is_group")
-        if is_group is None:
-            is_group = getattr(self.wx, "_current_is_group", None)
+        # 群聊判定（本次会话权威值）：联合 OCR 的标题解析已在 _window_msgs
+        # 内刷新 _current_is_group（标题不再在 analyze 阶段单独读——事件内
+        # OCR 两次封顶）；缺失时回退名称启发式。
+        is_group = getattr(self.wx, "_current_is_group", None)
         if is_group is None:
             is_group = is_group_chat(chat_name)
         # 群聊 @ 过滤：只有 @小漓 的消息才处理
