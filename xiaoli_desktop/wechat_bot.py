@@ -237,6 +237,25 @@ FRIENDLY_API_ERROR_REPLIES = (
 )
 
 
+# memory 键归一化（用户定案方案 A）：OCR 对引号半/全角极不稳（'强盗”集团'
+# / '强盗"集团' / '" 强盗 " 集团' 是同一会话），原样做键会让同一会话的
+# 记忆分裂到多个条目。规则：所有引号变体（单双/半全角/弯直）与空格类
+# 字符一律剥掉再存取。只影响 memory 键——显示名（回复目标/日志/群聊
+# 判定）不受影响。剥引号同时覆盖「OCR 整个丢掉前引号」的漏字场景。
+_QUOTE_CHARS = (
+    "\u201c\u201d\u2018\u2019\u201e\u201f"  # “ ” ‘ ’ „ ‟
+    "\u00ab\u00bb\u2039\u203a"              # « » ‹ ›
+    "\u300c\u300d\u300e\u300f"              # 「 」 『 』
+    "\uff02\u02bc\u0060\u00b4\"'"           # ＂ ʼ ` ´ " '
+)
+
+
+def _memory_key(chat_id):
+    """memory 键归一化：剥掉所有引号变体与空格类字符。"""
+    s = str(chat_id or "").translate(str.maketrans("", "", _QUOTE_CHARS))
+    return re.sub(r"\s+", "", s)
+
+
 def load_config(path="config.json"):
     default_cfg = {
         "bot_nickname": "小漓",
@@ -501,6 +520,7 @@ class WeChatBot:
             logger.warning("[定位] 微信窗口定位失败，保持当前位置")
 
     def _get_history(self, chat_id):
+        chat_id = _memory_key(chat_id)
         if chat_id not in self.memory_db:
             self.memory_db[chat_id] = []
         return self.memory_db[chat_id]
@@ -533,7 +553,7 @@ class WeChatBot:
 
     def clear_history(self, chat_id=None):
         if chat_id:
-            self.memory_db.pop(chat_id, None)
+            self.memory_db.pop(_memory_key(chat_id), None)
             logger.info(f"已清空聊天 {chat_id} 的历史")
         else:
             self.memory_db.clear()
@@ -541,6 +561,7 @@ class WeChatBot:
         self._save_memory()
 
     def delete_messages(self, chat_id, indices):
+        chat_id = _memory_key(chat_id)
         if chat_id not in self.memory_db:
             logger.warning(f"❌ 聊天 {chat_id} 不存在于记忆中")
             return False
