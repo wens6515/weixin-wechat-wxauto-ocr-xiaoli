@@ -2,6 +2,7 @@
 import time
 import json
 import os
+import ctypes
 import logging
 import random
 import re
@@ -503,6 +504,14 @@ class WeChatBot:
             logger.warning("[定位] 未找到微信窗口，跳过定位")
             return
         ensure_window_visible(hwnd)  # 最小化先拉起，定位才有意义
+        try:
+            if ctypes.windll.user32.IsZoomed(hwnd):
+                # 最大化先还原再定位：SetWindowPos 对最大化窗口行为不可靠
+                # （可能只改尺寸不改状态，视觉错乱）
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                time.sleep(0.3)
+        except Exception:
+            pass
         if isinstance(rect, (list, tuple)) and len(rect) == 4:
             try:
                 x, y, w, h = (int(v) for v in rect)
