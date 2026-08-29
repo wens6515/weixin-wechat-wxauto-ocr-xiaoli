@@ -179,12 +179,26 @@ def ensure_window_visible(hwnd) -> bool:
 
 
 def default_right_half_rect() -> tuple[int, int, int, int]:
-    """默认窗口矩形：主屏右半边（README 系统要求：微信主界面放屏幕右半边），
-    高度留出任务栏。物理像素（进程 DPI 感知由 pyautogui 初始化保证）。"""
-    sw = u32.GetSystemMetrics(0)   # SM_CXSCREEN
-    sh = u32.GetSystemMetrics(1)   # SM_CYSCREEN
-    x = sw // 2
-    return (x, 0, sw - x, max(400, sh - 48))
+    """默认窗口矩形：主屏「工作区」（SPI_GETWORKAREA，系统扣除任务栏后的
+    可用区域）右半边——自动隐藏任务栏 → 工作区=全屏（窗口打满不留缝）；
+    固定任务栏（底/左/右）→ 自动扣减；多显示器取主屏。物理像素（进程
+    DPI 感知由 pyautogui 初始化保证）。工作区读取失败回退 SM_CXSCREEN/
+    CYSCREEN 硬算。"""
+    l, t, r, b = 0, 0, 0, 0
+    ok = False
+    try:
+        wa = wt.RECT()
+        # 0x0030 = SPI_GETWORKAREA（仅主屏；定位只摆主屏右半边，够用）
+        ok = bool(u32.SystemParametersInfoW(0x0030, 0, ctypes.byref(wa), 0))
+        if ok:
+            l, t, r, b = wa.left, wa.top, wa.right, wa.bottom
+    except Exception:
+        ok = False
+    if not ok or r <= l or b <= t:
+        l, t = 0, 0
+        r, b = u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
+    x = l + (r - l) // 2
+    return (x, t, r - x, max(400, b - t))
 
 
 def position_window(hwnd, x: int, y: int, w: int, h: int) -> bool:
