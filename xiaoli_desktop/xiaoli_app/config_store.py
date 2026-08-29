@@ -493,10 +493,18 @@ def load_config_store(path="config.json", cards_dir="cards"):
     sync_workdir_to_tasks(cfg)
     card = _read_card(cards_dir, cfg.get("active_card_id", DEFAULT_CARD_ID))
     if card is None:
-        # 活跃卡缺失（cards/ 被删 / active_card_id 指向不存在卡）→ 回退默认卡
-        # 模板投影，避免空卡投影清空 system_prompt（聊天无人设）与 chat_model。
-        logger.warning(f"[配置] 活跃角色卡不存在: {cfg.get('active_card_id')}，回退默认卡模板投影")
+        # 活跃卡缺失（cards/ 被删 / active_card_id 指向不存在卡）→ 用默认
+        # 模板就地补建该卡并持久化。只告警回退会导致每次启动都重复告警
+        # （真机：重置测试区后 active_card_id=xiaoli 而卡文件缺失）。
+        missing_id = str(cfg.get("active_card_id") or DEFAULT_CARD_ID)
+        logger.warning(f"[配置] 活跃角色卡不存在: {missing_id}，已按默认模板补建")
         card = dict(CARD_TEMPLATE)
+        card["id"] = missing_id
+        try:
+            from xiaoli_app.card_store import save_card
+            save_card(cards_dir, card)
+        except Exception as e:
+            logger.error(f"[配置] 默认卡补建失败（回退模板投影）: {e}")
     cfg = project_config(cfg, card)
 
     try:
