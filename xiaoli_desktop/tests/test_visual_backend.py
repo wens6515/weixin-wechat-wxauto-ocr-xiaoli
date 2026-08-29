@@ -290,78 +290,66 @@ class TestVisualBackend(unittest.TestCase):
         self.assertEqual(msgs[0].chat, "王文生")
         b.close()
 
-    def test_analyze_window_force_reswitch_on_empty_title(self):
-        """RED 复现：点击后标题区空（toggle 取消选中/黑图）→ analyze_window
-        必须 force 重切。否则读的是空消息区（has_other=False 判空跳过），
-        红圈不消导致 5 轮循环漏消息——真机日志：王文生新消息 5 轮未处理。
-        名字比较退出切换判定：标题非空即信任已选中（群名全半角/符号/emoji
-        的 OCR 差异不再触发 force 白点重切）。"""
+    def test_get_messages_union_force_reswitch_on_empty_title(self):
+        """RED 复现：点击后标题区空（toggle 取消选中/黑图）→ 联合 OCR
+        必须 force 重切（原 analyze_window 防线迁入 get_messages 联合路径）。
+        否则读的是空消息区（has_other=False 判空跳过），红圈不消导致
+        5 轮循环漏消息——真机日志：王文生新消息 5 轮未处理。"""
         b = VisualBackend()
-        b._message_region = (0.0, 0.0, 1.0, 1.0)
-        b._title_region = (0.0, 0.0, 1.0, 0.5)
-
-        def fake_avatar_tops(img, bg, side):
-            return [0, 50] if side == "right" else [100]
-
-        # read_title 第一次 None（标题区空），force 重切后返回目标会话
-        title_seq = iter([None, "王文生"])
+        b._current_chat = "王文生"  # assume 路径前提：analyze 刚完成切换
+        # 只有消息带条目（标题带空）→ 触发 force 重切
+        items = [{"text": "在吗", "x": 40, "y": 120, "w": 60, "h": 20}]
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
-             mock.patch.object(b, "read_title", side_effect=lambda foreground=False: next(title_seq)), \
-             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.find_wechat_window",
+                        return_value=0x1234), \
+             mock.patch("wx_backend.visual_backend.capture_window",
+                        return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.ocr_image", return_value=items), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
-                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
-                                      "self": (53, 210, 141)}), \
+                        return_value={}), \
              mock.patch("wx_backend.visual_backend.detect_avatar_tops",
-                        side_effect=fake_avatar_tops), \
-             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
-                        return_value=[
-                            (100, 130, 10, 160, False),  # 对方长文字
-                        ]), \
+                        return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[]):
-            b.connect()
-            win = b.analyze_window("王文生")
-        # force 重切应被触发：第一次 read_title 为 None（标题区空）
+            b._hwnd = 0x1234
+            b._last_shot = None
+            msgs = b.get_messages("王文生", assume_switched=True)
         force_calls = [c for c in m_switch.call_args_list if c.kwargs.get("force")]
-        self.assertTrue(force_calls, "标题为空时应触发 force 重切")
-        # 重切后读到正确标题，继续分析应返回对方消息
-        self.assertTrue(win.get("has_other"), "force 重切后应读到王文生的对方新消息")
+        self.assertTrue(force_calls, "标题区空（联合 OCR）应触发 force 重切")
+        self.assertTrue(any(m.content == "在吗" for m in msgs),
+                        "重切后消息应正常产出")
         b.close()
 
-    def test_analyze_window_name_mismatch_no_reswitch(self):
-        """RED 复现：标题非空但名字与目标会话不匹配（群名全半角/emoji 的
-        OCR 差异，如 chat='🎉庆祝群'、标题读成 '庆祝群(5)'）→ 不得 force 重切。
-        旧逻辑 startswith 失败 → 白点 force 点击已选中会话 → toggle 取消选中
-        → 消息区读空 → 再 force……死循环重复点击（真机日志群聊名字后多带
-        （数字））。新逻辑：名字比较退出切换判定，标题非空即信任已选中。"""
+    def test_get_messages_union_name_mismatch_no_reswitch(self):
+        """RED 复现：标题非空但与目标会话名不匹配（群名 emoji/全半角 OCR
+        差异，如 chat='🎉庆祝群'、标题读成 '庆祝群(5)'）→ 不得 force 重切。
+        旧逻辑 startswith 失败 → 白点 force 点击已选中会话 → toggle 取消
+        选中 → 消息区读空死循环（真机日志群聊名字后多带（数字））。
+        联合 OCR 契约：标题非空即信任已选中，名字差异只进缓存不触发重切。"""
         b = VisualBackend()
-        b._message_region = (0.0, 0.0, 1.0, 1.0)
-
-        def fake_avatar_tops(img, bg, side):
-            return [0, 50] if side == "right" else [100]
-
+        b._current_chat = "🎉庆祝群"
+        items = [
+            {"text": "庆祝群(5)", "x": 40, "y": 10, "w": 90, "h": 20},
+            {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
+        ]
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
-             mock.patch.object(b, "read_title", return_value="庆祝群(5)"), \
-             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.find_wechat_window",
+                        return_value=0x1234), \
+             mock.patch("wx_backend.visual_backend.capture_window",
+                        return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.ocr_image", return_value=items), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
-                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
-                                      "self": (53, 210, 141)}), \
+                        return_value={}), \
              mock.patch("wx_backend.visual_backend.detect_avatar_tops",
-                        side_effect=fake_avatar_tops), \
-             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
-                        return_value=[
-                            (100, 130, 10, 160, False),  # 对方长文字
-                        ]), \
+                        return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[]):
-            b.connect()
-            win = b.analyze_window("🎉庆祝群")
-        # 标题非空 → 不触发 force 重切（名字比较退出切换判定）
+            b._hwnd = 0x1234
+            b._last_shot = None
+            msgs = b.get_messages("🎉庆祝群", assume_switched=True)
         force_calls = [c for c in m_switch.call_args_list if c.kwargs.get("force")]
         self.assertFalse(force_calls, "标题非空时名字不匹配不得 force 重切")
-        # has_other 几何防线保留：对方头像在 bot 之后 → 仍有新消息
-        self.assertTrue(win.get("has_other"),
-                        "has_other 几何判据不得因名字不匹配而失效")
+        self.assertTrue(any(m.content == "你们好呀" for m in msgs))
         b.close()
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
@@ -1020,57 +1008,71 @@ class TestVisualBackend(unittest.TestCase):
         self.assertTrue(win["has_other"],
                         "无 bot 时对方消息全部算新消息")
 
-    def test_analyze_window_is_group_true_from_title(self):
-        """analyze_window 先读会话名区（read_title）判定群聊，随返回带出权威 is_group。
+    def test_get_messages_union_parses_group_title(self):
+        """联合 OCR（assume_switched）：标题带括号人数 → _current_is_group=True，
+        标题拆段按 x 拼接，消息行从消息带产出（标题行不漏进消息）。
 
-        重构：判定发生在 OCR 之前（analyze_window 内 read_title 解析标题括号人数），
-        _handle_unread_session 不再依赖上一轮会话的旧缓存。
-        """
+        原 analyze_window 读标题判定群聊；合并后由 get_messages 联合 OCR
+        的标题解析刷新缓存（用户定案：事件内 OCR 两次封顶）。"""
         b = VisualBackend()
-        b._message_region = (0.0, 0.0, 1.0, 1.0)
-
-        def fake_avatar_tops(img, bg, side):
-            return [0] if side == "right" else []
-
+        b._current_chat = "强盗”集团"  # assume 路径前提
+        items = [
+            # 标题带（联合区 2x，center-y < 36）：拆段标题
+            {"text": '"强盗"', "x": 40, "y": 10, "w": 80, "h": 20},
+            {"text": "集团(5)", "x": 130, "y": 10, "w": 60, "h": 20},
+            # 消息带（center-y >= 36）
+            {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
+        ]
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-             mock.patch.object(b, "read_title", return_value='强盗"集团(5)'), \
-             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.find_wechat_window",
+                        return_value=0x1234), \
+             mock.patch("wx_backend.visual_backend.capture_window",
+                        return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.ocr_image", return_value=items), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
-                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
-                                      "self": (53, 210, 141)}), \
+                        return_value={}), \
              mock.patch("wx_backend.visual_backend.detect_avatar_tops",
-                        side_effect=fake_avatar_tops), \
-             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
-                        return_value=[(0, 40, 20, 160, True)]), \
+                        return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[]):
-            win = b.analyze_window("强盗”集团")
-        self.assertIs(win.get("is_group"), True,
-                      "群聊标题带括号人数 → analyze_window 返回 is_group=True")
+            b._hwnd = 0x1234
+            b._last_shot = None
+            msgs = b.get_messages("强盗”集团", assume_switched=True)
+        self.assertIs(b._current_is_group, True,
+                      "群聊标题带括号人数 → 联合 OCR 刷新 is_group=True")
+        self.assertTrue(any(m.content == "你们好呀" for m in msgs),
+                        "消息带条目应产出消息")
+        self.assertFalse(any("集团" in m.content for m in msgs),
+                         "标题行不得漏进消息")
+        b.close()
 
-    def test_analyze_window_is_group_false_from_title(self):
-        """私聊标题（无括号人数）→ analyze_window 返回 is_group=False。"""
+    def test_get_messages_union_parses_private_title(self):
+        """私聊标题（无括号人数）→ 联合 OCR 刷新 is_group=False。"""
         b = VisualBackend()
-        b._message_region = (0.0, 0.0, 1.0, 1.0)
-
-        def fake_avatar_tops(img, bg, side):
-            return [0] if side == "right" else []
-
+        b._current_chat = "王文生"
+        b._current_is_group = True  # 上一轮群聊残留 → 本事件必须刷新为 False
+        items = [
+            {"text": "王文生", "x": 40, "y": 10, "w": 70, "h": 20},
+            {"text": "在吗", "x": 40, "y": 120, "w": 50, "h": 20},
+        ]
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-             mock.patch.object(b, "read_title", return_value="王文生"), \
-             mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.find_wechat_window",
+                        return_value=0x1234), \
+             mock.patch("wx_backend.visual_backend.capture_window",
+                        return_value=_solid((200, 200), (30, 30, 31))), \
+             mock.patch("wx_backend.visual_backend.ocr_image", return_value=items), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
-                        return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
-                                      "self": (53, 210, 141)}), \
+                        return_value={}), \
              mock.patch("wx_backend.visual_backend.detect_avatar_tops",
-                        side_effect=fake_avatar_tops), \
-             mock.patch("wx_backend.visual_backend.find_bubble_boxes",
-                        return_value=[(0, 40, 20, 160, True)]), \
+                        return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[]):
-            win = b.analyze_window("王文生")
-        self.assertIs(win.get("is_group"), False,
-                      "私聊标题无括号人数 → analyze_window 返回 is_group=False")
+            b._hwnd = 0x1234
+            b._last_shot = None
+            b.get_messages("王文生", assume_switched=True)
+        self.assertIs(b._current_is_group, False,
+                      "私聊标题无括号人数 → 联合 OCR 刷新 is_group=False")
+        b.close()
 
     def test_detect_avatar_tops_geometry(self):
         """detect_avatar_tops 真实实现：窄带非背景块标出头像顶部 y，

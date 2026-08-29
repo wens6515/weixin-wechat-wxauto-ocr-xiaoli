@@ -1333,12 +1333,46 @@ class VisualBackend:
                 int(w * self._message_region[2]), int(h * self._message_region[3]),
             ))
             region = region_1x.resize((region_1x.width * 2, region_1x.height * 2), Image.LANCZOS)
-            # 单片 OCR（v2.1.3 废弃分片）：分片左右切边界会把整字切成两半
-            # 误识（真机：「排」被切左半成「非」，产碎片「非序错乱」；探针
-            # 稳定复现碎片「丙」「马」）。RapidOCR limit_side_len="min" 是
-            # 短边不足才放大，宽图不压缩——分片解决的「压缩截断」不存在，
-            # 单片读 40+ 字超长行一字不差。
-            items = ocr_image(region)
+            if assume_switched and self._current_chat == chat:
+                # ---- 联合裁剪 OCR（用户定案：事件内 OCR 两次封顶）----
+                # 标题带 + 消息区一次读：联合区 = 标题区 ∪ 消息区，下边框
+                # 钉在标定消息区下沿（输入框永不入镜）。标题行 = 联合区内
+                # 消息区上沿以上（2x 坐标）；消息行平移回消息区 2x 坐标系，
+                # 下游气泡/头像/合并逻辑与旧路径完全共用。
+                u_l = int(w * min(self._title_region[0], self._message_region[0]))
+                u_t = int(h * min(self._title_region[1], self._message_region[1]))
+                u_r = int(w * max(self._title_region[2], self._message_region[2]))
+                u_b = int(h * max(self._title_region[3], self._message_region[3]))
+                union = shot.crop((u_l, u_t, u_r, u_b))
+                union2x = union.resize((union.width * 2, union.height * 2), Image.LANCZOS)
+                all_items = ocr_image(union2x)
+                m_top_2x = (int(h * self._message_region[1]) - u_t) * 2
+                title_items = [it for it in all_items
+                               if (it["y"] + it["h"] // 2) < m_top_2x]
+                title = "".join(it["text"] for it in
+                                sorted(title_items, key=lambda i: i["x"])).strip()
+                # 空标题防线（自 analyze_window 迁入）：标题区读空多为
+                # toggle 取消选中/黑图——force 重切，attempt 循环兜底重试
+                if not title:
+                    logger.warning(f"[读取] {chat!r} 标题区空（联合 OCR），force 重切")
+                    self._switch_chat(chat, force=True)
+                else:
+                    logger.info(f"[读取] {chat!r} 标题={title!r}（联合 OCR）")
+                    name, is_group, _ = parse_title(title)
+                    self._current_title = name or chat
+                    self._current_is_group = is_group
+                # 消息行平移回消息区 2x 坐标系（几何检测沿用消息区子图）
+                dx2x = (int(w * self._message_region[0]) - u_l) * 2
+                dy2x = (int(h * self._message_region[1]) - u_t) * 2
+                items = [dict(it, x=it["x"] - dx2x, y=it["y"] - dy2x)
+                         for it in all_items if (it["y"] + it["h"] // 2) >= m_top_2x]
+            else:
+                # 单片 OCR（v2.1.3 废弃分片）：分片左右切边界会把整字切成两半
+                # 误识（真机：「排」被切左半成「非」，产碎片「非序错乱」；探针
+                # 稳定复现碎片「丙」「马」）。RapidOCR limit_side_len="min" 是
+                # 短边不足才放大，宽图不压缩——分片解决的「压缩截断」不存在，
+                # 单片读 40+ 字超长行一字不差。
+                items = ocr_image(region)
             if items:
                 # 连通域分气泡：自动探测主题气泡色/背景色，找气泡边界框，
                 # 换算到 2x 与 OCR 坐标对齐。探测失败（纯色/mock 截图）时
@@ -1760,30 +1794,12 @@ class VisualBackend:
         }
         """
         self._switch_chat(chat)
-        # 先读会话名区（标题）判定群聊/私聊——本次会话权威值，判定发生在
-        # OCR 之前（用户设计：读列表区 → 切会话 → 读会话名区判群聊私聊 →
-        # 走分支 → 才 OCR）。get_messages 内也有 read_title 刷新缓存，但
-        # analyze_window 被 _handle_unread_session 单独先调且不调 get_messages，
-        # 必须在这里拿到权威 is_group 随返回带出——否则调用方回落到上一轮
-        # 会话的旧缓存，私聊被误判群聊（实测日志「私聊王文生被判群聊跳过」）。
-        title = self.read_title(foreground=True)
-        # 标题为空（微信未选中/黑图）→ force 重切一次。重切后不重复校验：
-        # 校验失败也继续用当次窗口内容分析（不引入消息识别延迟，失败兜底
-        # 交给上层/下一轮红圈）。名字比较退出切换判定——群名全半角/符号/
-        # emoji 的 OCR 差异会让 startswith 误失败，白点 force 点击已选中
-        # 会话导致 toggle 取消选中（真机日志：群聊名字后多带（数字）反复
-        # 点击）。标题非空即信任已选中（has_other 几何防线兜底误切）。
-        if not title:
-            logger.warning(f"[读取] {chat!r} 标题={title!r}（空），force 重切")
-            self._switch_chat(chat, force=True)
-            title = self.read_title(foreground=True)
-        if title:
-            name, is_group, _ = parse_title(title)
-            self._current_title = name or chat
-            self._current_is_group = is_group
-        else:
-            is_group = bool(self._current_is_group)
-            logger.warning(f"[读取] {chat!r} 标题仍未读到，回落缓存 _current_is_group={is_group}")
+        # 纯像素分析（不再单独读标题——用户定案：事件内 OCR 两次封顶，
+        # 即列表条带锚定 + 标题/消息联合 OCR）。权威 is_group 由
+        # get_messages(assume_switched=True) 的联合 OCR 标题解析在读取
+        # 消息时刷新 _current_is_group；本返回值的 is_group 仅为缓存快照
+        # （可能来自上一轮事件），调用方必须在 _window_msgs 之后再取缓存。
+        is_group = bool(getattr(self, "_current_is_group", False))
         empty = {"bot_bottom": None, "other_text": [], "other_media": [],
                  "has_text": False, "has_media": False, "has_other": False,
                  "is_group": is_group, "width": 0, "height": 0}

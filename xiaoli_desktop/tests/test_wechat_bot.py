@@ -348,19 +348,21 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         handled = []
 
         class FakeWx:
-            _current_is_group = True  # 上一轮群聊残留（真实 analyze_window 已返回权威值，get_messages 不再刷新）
+            _current_is_group = True  # 上一轮群聊残留
 
             def iter_unread_sessions(self):
                 return iter(["王文生"])
 
             def analyze_window(self, chat, skip_bot=0):
-                # 重构后：analyze_window 内 read_title 解析私聊标题「王文生」
-                # → 返回本次会话权威 is_group=False（判定发生在 OCR 之前）
+                # 合并后 analyze_window 纯像素（不读标题）
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False,
                         "is_group": False, "width": 747, "height": 1135}
 
             def get_messages(self, chat, assume_switched=False):
+                # 联合 OCR 契约：读取消息时解析标题刷新 _current_is_group
+                # （私聊标题「王文生」无括号人数 → False）
+                self._current_is_group = False
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="王文生",
                                   content="在吗", type=MessageType.TEXT),
