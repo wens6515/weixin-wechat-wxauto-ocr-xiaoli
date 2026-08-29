@@ -1346,9 +1346,12 @@ class VisualBackend:
                 union = shot.crop((u_l, u_t, u_r, u_b))
                 union2x = union.resize((union.width * 2, union.height * 2), Image.LANCZOS)
                 all_items = ocr_image(union2x)
-                m_top_2x = (int(h * self._message_region[1]) - u_t) * 2
+                # 标题带钉在标定标题区内（center-y < 标题区下沿）——标题区
+                # 下沿与消息区上沿之间夹缝的内容（真机实测：群聊首行
+                # 「何镇鸿:[图片]」会混进标题串）不得污染标题，全部归消息带
+                t_bot_2x = (int(h * self._title_region[3]) - u_t) * 2
                 title_items = [it for it in all_items
-                               if (it["y"] + it["h"] // 2) < m_top_2x]
+                               if (it["y"] + it["h"] // 2) < t_bot_2x]
                 title = "".join(it["text"] for it in
                                 sorted(title_items, key=lambda i: i["x"])).strip()
                 # 空标题防线（自 analyze_window 迁入）：标题区读空多为
@@ -1361,11 +1364,12 @@ class VisualBackend:
                     name, is_group, _ = parse_title(title)
                     self._current_title = name or chat
                     self._current_is_group = is_group
-                # 消息行平移回消息区 2x 坐标系（几何检测沿用消息区子图）
+                # 消息行平移回消息区 2x 坐标系（几何检测沿用消息区子图）；
+                # 标题区下沿与消息区上沿夹缝的内容一并归消息带
                 dx2x = (int(w * self._message_region[0]) - u_l) * 2
                 dy2x = (int(h * self._message_region[1]) - u_t) * 2
                 items = [dict(it, x=it["x"] - dx2x, y=it["y"] - dy2x)
-                         for it in all_items if (it["y"] + it["h"] // 2) >= m_top_2x]
+                         for it in all_items if (it["y"] + it["h"] // 2) >= t_bot_2x]
             else:
                 # 单片 OCR（v2.1.3 废弃分片）：分片左右切边界会把整字切成两半
                 # 误识（真机：「排」被切左半成「非」，产碎片「非序错乱」；探针

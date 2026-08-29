@@ -329,7 +329,7 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._current_chat = "🎉庆祝群"
         items = [
-            {"text": "庆祝群(5)", "x": 40, "y": 10, "w": 90, "h": 20},
+            {"text": "庆祝群(5)", "x": 40, "y": 4, "w": 90, "h": 8},
             {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
         ]
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
@@ -1017,10 +1017,10 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._current_chat = "强盗”集团"  # assume 路径前提
         items = [
-            # 标题带（联合区 2x，center-y < 36）：拆段标题
-            {"text": '"强盗"', "x": 40, "y": 10, "w": 80, "h": 20},
-            {"text": "集团(5)", "x": 130, "y": 10, "w": 60, "h": 20},
-            # 消息带（center-y >= 36）
+            # 标题带（联合区 2x，center-y < 标题区下沿 18px）：拆段标题
+            {"text": '"强盗"', "x": 40, "y": 4, "w": 80, "h": 8},
+            {"text": "集团(5)", "x": 130, "y": 4, "w": 60, "h": 8},
+            # 消息带（center-y >= 标题区下沿）
             {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
         ]
         with mock.patch.object(b, "_switch_chat", return_value=True), \
@@ -1052,7 +1052,7 @@ class TestVisualBackend(unittest.TestCase):
         b._current_chat = "王文生"
         b._current_is_group = True  # 上一轮群聊残留 → 本事件必须刷新为 False
         items = [
-            {"text": "王文生", "x": 40, "y": 10, "w": 70, "h": 20},
+            {"text": "王文生", "x": 40, "y": 4, "w": 70, "h": 8},
             {"text": "在吗", "x": 40, "y": 120, "w": 50, "h": 20},
         ]
         with mock.patch.object(b, "_switch_chat", return_value=True), \

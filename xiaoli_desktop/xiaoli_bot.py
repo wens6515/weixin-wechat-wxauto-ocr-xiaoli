@@ -1308,6 +1308,13 @@ class AgentBot(WeChatBot):
             if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                 return False
             window_msgs = _window_msgs(win)
+        # 会话身份以标题区读取为主（用户定案）：列表条带名只是锚点，标题
+        # 解析出的权威名统一用于记忆/回复/日志——否则条带 OCR 漏字产生的
+        # 残缺名（真机 '强盗”集'）会落进 memory 键
+        canonical = (getattr(self.wx, "_current_title", "") or "").strip()
+        if canonical and canonical != chat_name:
+            logger.info(f"[身份] 会话名以标题为准: {chat_name!r} -> {canonical!r}")
+            chat_name = canonical
         # 群聊判定（本次会话权威值）：联合 OCR 的标题解析已在 _window_msgs
         # 内刷新 _current_is_group（标题不再在 analyze 阶段单独读——事件内
         # OCR 两次封顶）；缺失时回退名称启发式。
