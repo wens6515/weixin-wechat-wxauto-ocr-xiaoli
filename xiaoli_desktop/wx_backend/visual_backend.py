@@ -508,6 +508,12 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
     （图片内容本身），无气泡包裹。排除 bg/other/self 三种色后剩余的大块
     连通域即媒体内容——用于图片消息精确定位（点击中心打开预览），替代
     整屏截图降级。返回 [(top, bottom, left, right)]（1x 坐标）。
+
+    尺寸阈值 40px + 头像带整体剔除：头像固定在消息区最左/最右 ~15% 带内
+    （真机 ~62px 高），旧实现靠 min 80px 挡头像——代价是 ~40px 的小表情
+    全部漏检。改为把左右头像带从内容掩码整体剔除（头像结构上不可能落到
+    带外，气泡/媒体也不会伸进带内），阈值即可安全降到 40（小表情渲染
+    高度 40~55px）。
     """
     import numpy as np
     arr = np.asarray(img.convert("RGB"), dtype=np.int16)
@@ -521,9 +527,11 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
         c = colors.get(key)
         if c is not None:
             content &= ~_near_color(arr, c, tol)
-    # 媒体内容 ≥ 80px 宽高（真机实测对方头像 ~62px 被 60 阈值误检为媒体，
-    # 提到 80 排除头像；图片/视频/表情/文件卡片均 > 80px）
-    return _connected_boxes(content, min_h=80, min_w=80)
+    # 左右头像带剔除（detect_avatar_tops 的窄带几何：左 [0.02,0.14]、
+    # 右 [0.84,0.98]，各留余量）——头像误检从「靠尺寸猜」变「结构上不可能」
+    content[:, :int(w * 0.15)] = False
+    content[:, int(w * 0.85):] = False
+    return _connected_boxes(content, min_h=40, min_w=40)
 
 
 def _bucket_avatar(top: int, tops: list[int]) -> int | None:
@@ -1758,6 +1766,31 @@ class VisualBackend:
             logger.error(f"发送失败: {e}")
             return False
 
+    def mark_session_read(self) -> bool:
+        """点击一次输入框让当前会话标记已读（清红圈），不切换会话。
+
+        微信只在会话获得窗口交互时才把新消息标记已读——当前会话已选中时
+        _switch_chat 不点击（防 toggle 取消选中），「群聊无 @ 跳过回复」的
+        流程全程零点击，红圈原样留在列表里，8s 退避后无限循环重处理。
+        其余流程发送回复时点输入框顺带清圈，唯独该流程没有——点一次输入框
+        补上（聚焦交互即标记已读，且不会像点会话行那样 toggle 取消选中）。"""
+        try:
+            import pyautogui
+            rect = self._input_box_rect()
+            if rect is None:
+                logger.warning("[已读] 无法定位输入框，红圈可能滞留")
+                return False
+            cx = rect[0] + rect[2] // 2
+            cy = rect[1] + rect[3] // 2
+            self._foreground()  # 点击依赖前台，先置前微信窗口
+            pyautogui.click(cx, cy)
+            time.sleep(0.3)
+            logger.info("[已读] 已点击输入框标记当前会话已读")
+            return True
+        except Exception as e:
+            logger.warning(f"[已读] 点击输入框失败: {e}")
+            return False
+
     def _input_box_rect(self):
         """定位输入框（打字区域），返回屏幕坐标 (l,t,w,h)，中心点供点击聚焦。
 
@@ -1799,12 +1832,14 @@ class VisualBackend:
             pass
         return None
 
-    def media_screen_boxes(self) -> list[tuple[int, int]]:
-        """检测消息区媒体内容（图片/视频/表情）的屏幕中心点，供点击打开预览。
+    def media_screen_boxes(self) -> list[tuple[int, int, int, int]]:
+        """检测消息区媒体内容（图片/视频/表情）的屏幕矩形，供点击与裁剪。
 
         截图消息区 → 探测气泡色 → find_media_boxes 检测「非背景非气泡」的
         大块媒体矩形 → 换算屏幕物理坐标（DPI 已 per-monitor aware，窗口
-        rect 与截图同坐标系）。返回 [(cx, cy), ...] 屏幕坐标，检测不到返回空。
+        rect 与截图同坐标系）。返回 [(l, t, r, b), ...] 屏幕坐标（矩形四
+        边——点击取中心、表情路线裁剪取矩形，调用方各取所需），检测不到
+        返回空。
         """
         if self._hwnd is None:
             return []
@@ -1827,7 +1862,7 @@ class VisualBackend:
         win_l, win_t = rect.left, rect.top
         msg_l = win_l + int(w * self._message_region[0])
         msg_t = win_t + int(h * self._message_region[1])
-        return [(msg_l + (l + r) // 2, msg_t + (t + b) // 2)
+        return [(msg_l + l, msg_t + t, msg_l + r, msg_t + b)
                 for (t, b, l, r) in boxes]
 
     def analyze_window(self, chat: str, foreground: bool = True,
@@ -1924,15 +1959,6 @@ class VisualBackend:
             other_media = [(t, b, l, r) for (t, b, l, r) in media
                            if _bucket_avatar(t, all_avatar_tops) in other_new_set]
             has_other = bool(other_new_tops)
-            # [临时诊断日志] 抓"窗口空"现场，定位后删除
-            logger.info(
-                f"[analyze] chat={chat!r} attempt={attempt} region={rw}x{rh} "
-                f"colors={colors} bubbles={bubbles} media={media} "
-                f"bot_tops={bot_tops} other_tops={other_tops} "
-                f"bot_bottom={bot_bottom} other_text={other_text} "
-                f"other_media={other_media} has_text={bool(other_text)} "
-                f"has_media={bool(other_media)} has_other={has_other}"
-            )
             # 窗口完全空（无气泡/媒体/头像）→ toggle 取消选中，重切兜底
             if not bubbles and not media and not bot_tops and not other_tops:
                 continue

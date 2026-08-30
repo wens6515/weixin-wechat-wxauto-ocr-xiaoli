@@ -55,6 +55,18 @@ class UsageStore:
             pass
         return rec
 
+    def clear(self):
+        """清空全部用量记录：删除 usage.jsonl（下次 record 自动重建文件）。
+
+        返回是否删除了文件；文件不存在（本就为空）与删除失败（Windows 下
+        正被并发写入会 PermissionError）都返回 False，调用方据此提示。"""
+        with self._lock:
+            try:
+                os.remove(self.path)
+                return True
+            except OSError:
+                return False
+
     def _load(self):
         """全量读入（跳过坏行；文件不存在返回空表）。"""
         out = []
