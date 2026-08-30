@@ -781,10 +781,6 @@ class AgentBot(WeChatBot):
                 decorated = f"群聊：{chat_name}：{text}"
         else:
             decorated = f"私聊 - {sender}：{text}" if sender else f"私聊：{text}"
-        # 沉浸要求与 call_chat_ai 同源注入（首条消息后空行拼接，按历史
-        # 标记去重）；注入后的 decorated 作为 user_text 进
-        # _apply_vision_result，text 分支存历史后整个会话生效。
-        decorated = self._with_immersion(chat_name, decorated)
         prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{decorated}"
         content = [{"type": "text", "text": prompt}]
         if img_path:
@@ -862,7 +858,7 @@ class AgentBot(WeChatBot):
     def _route_vision_result(self, chat_name, sender, result, img_path=None):
         """纯图路径 hook 覆写：复用 _apply_vision_result 分流核心。
 
-        纯图路径（_process_image 系列截图 → vision → 本 hook）的 vision 单
+        纯图路径（_capture_latest_image 截图 → vision → 本 hook）的 vision 单
         调用结果分流：tool_call → 投递天枢（attachment_paths=[img_path]）；
         text → 直接回复（实质回复 → 占位归零）；None → 返回 None，调用方降级。
         无用户文字，JSON 解析失败降级用 arguments 原文。
@@ -1211,6 +1207,7 @@ class AgentBot(WeChatBot):
     # ---------- 消息处理（改造） ----------
 
     def process_new_messages(self):
+        self._flush_memory_if_due()
         if self.paused:
             return
         if self._sending_lock:
@@ -1326,6 +1323,15 @@ class AgentBot(WeChatBot):
             window_msgs = [m for m in window_msgs if at_tag in m.content]
             if not window_msgs:
                 logger.info(f"[跳过] {chat_name} 群聊消息未 {at_tag}")
+                # 无 @ 跳过回复 = 全程零点击，而微信只在会话获得交互时标记
+                # 已读——红圈原样滞留 → 8s 退避后无限循环重处理（其余流程
+                # 发回复时点输入框顺带清圈）。点一次输入框标记已读防循环
+                mark_read = getattr(self.wx, "mark_session_read", None)
+                if mark_read is not None:
+                    try:
+                        mark_read()
+                    except Exception as e:
+                        logger.warning(f"[已读] 标记已读失败: {e}")
                 return False
         sender = window_msgs[-1].sender if window_msgs else chat_name
         # 文件识别：OCR 文本含文件扩展名
@@ -1374,9 +1380,13 @@ class AgentBot(WeChatBot):
             return self._handle_image_with_text(
                 chat_name, sender, text_content, multi_sender=multi_sender)
         if has_media and not text_content:
-            # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 图片多模态
+            # 无文字 + 有媒体（图片/视频/表情统一当图片）→ Ctrl+C 图片路径
             logger.info(f"🖼 判断为图片消息：{chat_name}")
-            return self._process_image(chat_name, sender, None)
+            if self._describe_image(chat_name):
+                return True
+            # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
+            self._send_text("图片识别失败了，可能是什么地方出了问题呀～", chat_name)
+            return True
         if text_content:
             # 纯文字 → 任务判断 + 聊天
             logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")

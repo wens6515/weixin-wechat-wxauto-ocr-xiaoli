@@ -28,6 +28,18 @@ class TestUsageStore(unittest.TestCase):
         self.assertEqual(rec["latency_ms"], 123)
         self.assertIsInstance(rec["ts"], float)
 
+    def test_clear_removes_file_and_allows_rerecord(self):
+        self.store.record(kind="chat", model="m1", ok=True)
+        self.assertTrue(self.store.clear())
+        self.assertFalse(os.path.exists(self.path))
+        self.assertEqual(self.store._load(), [])
+        # 清空后继续记录（record 自动重建文件）
+        self.store.record(kind="chat", model="m2", ok=True)
+        self.assertEqual(len(self.store._load()), 1)
+
+    def test_clear_missing_file_returns_false(self):
+        self.assertFalse(self.store.clear())
+
     def test_missing_file_summary_empty(self):
         s = self.store.summary(days=7)
         self.assertEqual(s["total"]["calls"], 0)

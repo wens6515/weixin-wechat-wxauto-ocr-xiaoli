@@ -162,6 +162,45 @@ class TestFriendlyErrorReply(unittest.TestCase):
         self.assertEqual(roles, ["user", "assistant"])
 
 
+class TestEmptyModelFallback(unittest.TestCase):
+    """chat_model 为空（活跃卡缺失被模板补建）时的兜底：两链路都必须发
+    纯名模型，空串/带厂商前缀原样发出必 400（真机实测）。"""
+
+    def test_vision_default_model_is_plain_name(self):
+        self.assertNotIn(":", wb.VISION_MODEL_DEFAULT)
+        self.assertTrue(wb.VISION_MODEL_DEFAULT)
+
+    def test_chat_empty_model_falls_back(self):
+        bot = make_bot(chat_model="")
+
+        def fake_post(url, headers, payload, timeout, label="api", meta=None):
+            captured["model"] = payload["model"]
+            return {"choices": [{"message": {"content": "好呀"}}]}
+
+        captured = {}
+        bot._post_chat_completions = fake_post
+        reply = bot.call_chat_ai("测试好友", "在吗")
+        self.assertEqual(reply, "好呀")
+        self.assertEqual(captured["model"], wb.VISION_MODEL_DEFAULT)
+
+    def test_vision_empty_model_falls_back(self):
+        bot = make_bot(chat_model="")
+        bot.vision_api_url = "https://api.test/v1/chat/completions"
+        bot.vision_api_key = "test-key"
+        bot.vision_temp = 0.5
+        bot.vision_max_tokens = 1024
+
+        def fake_post(url, headers, payload, timeout, label="api", meta=None):
+            captured["model"] = payload["model"]
+            return {"choices": [{"message": {"content": "好的"}}]}
+
+        captured = {}
+        bot._post_chat_completions = fake_post
+        out = bot.call_vision_api([{"type": "text", "text": "hi"}], chat_id=None)
+        self.assertEqual(out["kind"], "text")
+        self.assertEqual(captured["model"], wb.VISION_MODEL_DEFAULT)
+
+
 class TestUsageHook(unittest.TestCase):
     def test_success_records_usage(self):
         store = FakeUsageStore()

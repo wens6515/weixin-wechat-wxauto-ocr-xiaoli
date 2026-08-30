@@ -294,6 +294,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
         class FakeWx:
             _current_is_group = True  # 标题 '强盗"集团(5)' 判定
+            read_marks = []           # mark_session_read 调用记录
+
+            def mark_session_read(self):
+                self.read_marks.append(1)
 
             def iter_unread_sessions(self):
                 return iter(["强盗”集团"])
@@ -331,6 +335,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
              _mock.patch.object(bot, "_tick_poll_outbox"):
             bot.process_new_messages()
         self.assertEqual(handled, [], "群聊未 @ 消息不应回复")
+        self.assertEqual(FakeWx.read_marks, [1],
+                         "无 @ 跳过时必须点输入框标记已读，防红圈滞留 8s 循环")
 
     def test_private_msg_after_group_not_filtered_by_at(self):
         """私聊在群聊之后处理：_current_is_group 缓存残留 True 不得让私聊走 @ 过滤。
@@ -490,11 +496,8 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
             reply = bot.call_chat_ai("强盗”集团", user_msg, **kwargs)
         self.assertEqual(reply, "ok")
         content = sent["json"]["messages"][-1]["content"]
-        # 首条消息（桩历史恒为空）必须注入【角色沉浸要求】——decorated 格式
-        # 断言只关心消息本体，断言注入存在后剥掉尾缀再返回
-        suffix = "\n\n" + wb.ROLE_IMMERSION_PROMPT
-        self.assertTrue(content.endswith(suffix), "首条消息必须注入角色沉浸要求")
-        return content[:-len(suffix)]
+        # 沉浸要求已随默认人设内置（运行时注入机制已删）——user 消息即原文
+        return content
 
     def test_group_with_sender(self):
         bot = self._make()
@@ -555,52 +558,14 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         self.assertEqual(content, "私聊：豆包有学生优惠了",
                          "私聊无发送者名时保持现状退化分支不变")
 
-    def test_first_message_injects_immersion_then_dedup(self):
-        """沉浸要求注入：会话首条消息后空行拼接注入一次；随消息写入历史后
-        按【角色沉浸要求】标记去重，后续请求不再重复注入。"""
-        import threading
-
-        import wechat_bot as wb
-
-        bot = wb.WeChatBot.__new__(wb.WeChatBot)
-        bot.api_url = "https://api.test/v1/chat/completions"
-        bot.api_key = "test-key"
-        bot.chat_model = "test-model"
-        bot.chat_temperature = 0.7
-        bot.chat_top_p = 0.9
-        bot.api_retry = 0
-        bot.api_timeout = 5
-        bot.system_prompt = "你是小漓"
-        bot._model_lock = threading.RLock()
-        bot.memory_db = {}  # _with_immersion 用 hasattr(memory_db) 判定历史设施存在
-        store = {}
-        bot._get_history = lambda chat_id: store.setdefault(chat_id, [])
-        bot._add_history = lambda chat_id, role, content: store.setdefault(
-            chat_id, []).append({"role": role, "content": content})
-
-        from types import SimpleNamespace
-        from unittest import mock
-
-        def post_once(user_msg):
-            sent = {}
-
-            def fake_post(url, headers=None, json=None, timeout=None):
-                sent["json"] = json
-                return SimpleNamespace(
-                    status_code=200, text="{}",
-                    json=lambda: {"choices": [{"message": {"content": "ok"}}]},
-                )
-
-            with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
-                bot.call_chat_ai("联系人甲", user_msg)
-            return sent["json"]["messages"][-1]["content"]
-
-        first = post_once("你好")
-        self.assertTrue(first.endswith("\n\n" + wb.ROLE_IMMERSION_PROMPT),
-                        "首条消息后必须空行拼接注入角色沉浸要求")
-        second = post_once("在吗")
-        self.assertEqual(second, "私聊：在吗",
-                         "历史已有沉浸标记，后续消息不得重复注入")
+    def test_immersion_baked_into_default_template(self):
+        """沉浸要求改为默认人设内置（运行时注入机制已删）：AI_DEFAULTS 与
+        CARD_TEMPLATE 的人设必须自带【角色沉浸要求】全文。"""
+        from xiaoli_app.config_store import AI_DEFAULTS, CARD_TEMPLATE
+        for prompt in (AI_DEFAULTS["system_prompt"], CARD_TEMPLATE["system_prompt"]):
+            self.assertIn("【角色沉浸要求】", prompt)
+            self.assertIn("禁止用emoji", prompt)
+            self.assertIn("永远热爱探索", prompt)
 
     def test_reply_strips_private_chat_prefix(self):
         """模型复读 [私聊 - 名字] 前缀 → call_chat_ai 返回前剥除（不污染历史）。"""
@@ -742,58 +707,91 @@ class TestGroupMultiSenderText(unittest.TestCase):
         self.assertEqual(handled, [], "群聊表情消息不应处理（即使 @ 了）")
 
 
-class TestImageProcessing(unittest.TestCase):
-    def test_process_image_visual_uses_media_box(self):
-        """visual 图片消息用媒体矩形检测定位 + 点击，而非整屏降级。"""
+class TestImageCaptureBranches(unittest.TestCase):
+    """图片/表情统一走 Ctrl+C 路径（_process_image 已删）。点击媒体后以
+    「图片和视频」查看器是否打开为分界——开了=真图片（Ctrl+C 原图，ESC
+    关查看器，全库唯一 ESC 点）；没开=表情包（绝不碰 ESC/Ctrl+C，裁剪
+    媒体矩形送视觉模型）。剪贴板为空也落表情路线（先关查看器防遮挡）。"""
+
+    @staticmethod
+    def _bot():
         from unittest import mock as _mock
-        from wx_backend.models import WeChatMessage, MessageType
-
         bot = WeChatBot.__new__(WeChatBot)
-        bot.image_click_offset = [0, 0]
-        bot.vision_prompt = "描述这张图片"
         bot.wx = _mock.MagicMock()
-        bot.wx.media_screen_boxes.return_value = [(100, 200)]
+        bot.wx.media_screen_boxes.return_value = [(100, 200, 220, 320)]
+        return bot
 
-        msg = WeChatMessage(id="v1", chat="王文生", sender="王文生",
-                            content="", type=MessageType.IMAGE)
-
+    def test_viewer_open_copies_via_clipboard(self):
+        """查看器打开（真图片）→ 复制 helper + 恰好一次 ESC，不裁剪。"""
+        from unittest import mock as _mock
+        bot = self._bot()
         with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch("uiautomation.WindowControl") as wc, \
-             _mock.patch.object(bot, "call_vision_api",
-                                return_value={"kind": "tool_call",
-                                              "name": "dispatch_task",
-                                              "arguments": '{"task":"画图"}'}), \
-             _mock.patch.object(bot, "_save_screenshot_compressed"), \
-             _mock.patch.object(bot, "_route_vision_result",
-                                return_value=True) as route, \
-             _mock.patch.object(bot, "_process_image_visual_fallback",
-                                return_value=True) as fallback:
-            preview = _mock.MagicMock()
-            preview.Exists.return_value = False  # 无预览 → 主窗口截图分支
-            wechat_win = _mock.MagicMock()
-            wechat_win.BoundingRectangle.left = 0
-            wechat_win.BoundingRectangle.top = 0
-            wechat_win.BoundingRectangle.width.return_value = 400
-            wechat_win.BoundingRectangle.height.return_value = 400
-            wc.side_effect = [preview, wechat_win]
-            pg.screenshot.return_value = _mock.MagicMock()
+             _mock.patch("wechat_bot.find_window_by_title",
+                         return_value=object()) as fw, \
+             _mock.patch.object(bot, "_copy_image_from_viewer",
+                                return_value="/tmp/orig.jpg") as copy, \
+             _mock.patch.object(bot, "_crop_media_region") as crop:
+            out = bot._capture_latest_image("王文生")
+        self.assertEqual(out, "/tmp/orig.jpg")
+        pg.click.assert_called_once_with(160, 260)  # 媒体矩形中心
+        fw.assert_called_with("图片和视频")
+        copy.assert_called_once()
+        pg.hotkey.assert_not_called()               # Ctrl+C 在 copy helper 内
+        pg.press.assert_called_once_with("esc")     # 查看器确认存在才按
+        crop.assert_not_called()
 
-            bot._process_image("王文生", "王文生", msg)
+    def test_viewer_absent_sticker_route_no_esc(self):
+        """查看器没开（表情包）→ 绝不 ESC/Ctrl+C，按媒体矩形裁剪。"""
+        from unittest import mock as _mock
+        bot = self._bot()
+        with _mock.patch("wechat_bot.pyautogui") as pg, \
+             _mock.patch("wechat_bot.find_window_by_title", return_value=None), \
+             _mock.patch.object(bot, "_copy_image_from_viewer") as copy, \
+             _mock.patch.object(bot, "_crop_media_region",
+                                return_value="/tmp/sticker.jpg") as crop:
+            out = bot._capture_latest_image("王文生")
+        self.assertEqual(out, "/tmp/sticker.jpg")
+        pg.hotkey.assert_not_called()   # 表情路线绝不 Ctrl+C
+        pg.press.assert_not_called()    # 绝不 ESC——否则关掉微信主窗口
+        copy.assert_not_called()
+        crop.assert_called_once_with(100, 200, 220, 320)
 
-            pg.click.assert_called_once_with(100, 200)
-            fallback.assert_not_called()
-            # 契约：call_vision_api 的 dict 返回原样路由给 _route_vision_result，
-            # 不压文本、不二次转述（tool_call 语义不丢失）
-            route.assert_called_once()
-            _args, _kwargs = route.call_args
-            self.assertEqual(_kwargs.get("img_path") is not None, True,
-                             "img_path 必须透传给 _route_vision_result")
-            _result = _args[2] if len(_args) > 2 else None
-            self.assertEqual(_result,
-                             {"kind": "tool_call",
-                              "name": "dispatch_task",
-                              "arguments": '{"task":"画图"}'},
-                             "tool_call dict 必须原样传给 _route_vision_result")
+    def test_copy_failure_falls_to_sticker_route_after_esc(self):
+        """查看器开了但剪贴板为空 → 先 ESC 关查看器（防遮挡）再裁剪。"""
+        from unittest import mock as _mock
+        bot = self._bot()
+        with _mock.patch("wechat_bot.pyautogui") as pg, \
+             _mock.patch("wechat_bot.find_window_by_title",
+                         return_value=object()), \
+             _mock.patch.object(bot, "_copy_image_from_viewer",
+                                return_value=None), \
+             _mock.patch.object(bot, "_crop_media_region",
+                                return_value="/tmp/f.jpg") as crop:
+            out = bot._capture_latest_image("王文生")
+        self.assertEqual(out, "/tmp/f.jpg")
+        pg.press.assert_called_once_with("esc")
+        crop.assert_called_once_with(100, 200, 220, 320)
+
+    def test_crop_media_region_translates_screen_to_window(self):
+        """表情裁剪：屏幕矩形平移到主窗口图内坐标（窗口 (1000,500) 起）。"""
+        from unittest import mock as _mock
+        bot = self._bot()
+        shot = _mock.MagicMock()
+        shot.width, shot.height = 800, 1000
+        crop_img = _mock.MagicMock()
+        shot.crop.return_value = crop_img
+        with _mock.patch("wechat_bot.pyautogui") as pg, \
+             _mock.patch("wechat_bot.find_window_by_title", return_value=1), \
+             _mock.patch("wechat_bot.ensure_window_visible"), \
+             _mock.patch("wechat_bot.window_rect",
+                         return_value=(1000, 500, 800, 1000)), \
+             _mock.patch.object(bot, "_save_screenshot_compressed",
+                                return_value=123):
+            pg.screenshot.return_value = shot
+            out = bot._crop_media_region(1040, 560, 1160, 680)
+        self.assertIsNotNone(out)
+        pg.screenshot.assert_called_once_with(region=(1000, 500, 800, 1000))
+        shot.crop.assert_called_once_with((40, 60, 160, 180))
 
 
 # ---- 文件显示名提取 + 目录快照增量（微信保留源时间戳的应对） ----
@@ -1052,7 +1050,9 @@ class TestCallVisionApi(unittest.TestCase):
         self.assertEqual(payload["tool_choice"], "auto")
         self.assertEqual(payload["model"], "deepseek-v4-flash",
                          "单模型化：视觉 model 取 chat_model（无独立 vision_model）")
-        self.assertEqual(payload["tools"], [{
+        self.assertEqual([t["function"]["name"] for t in payload["tools"]],
+                         ["dispatch_task", "web_search", "web_fetch"])
+        self.assertEqual(payload["tools"][0], {
             "type": "function",
             "function": {
                 "name": "dispatch_task",
@@ -1063,7 +1063,7 @@ class TestCallVisionApi(unittest.TestCase):
                     "required": ["task"],
                 },
             },
-        }])
+        })
 
     def test_text_content_returns_kind_text(self):
         """仅 message.content → {'kind': 'text', 'content': ...}（strip 空白）。"""
@@ -1337,10 +1337,64 @@ class TestSendTextPlaceholder(unittest.TestCase):
                          "发送失败不应计入占位计数")
 
 
+class TestMemoryFlushDue(unittest.TestCase):
+    """memory 节流兜底：脏数据超 1s 必落盘（引擎轮询顶部检查）——稀疏对话下
+    memory.json 查看不再滞后到下一条消息。"""
+
+    @staticmethod
+    def _bot(dirpath, dirty=True, last_save=None):
+        import time as _time
+
+        import wechat_bot as wb
+        bot = wb.WeChatBot.__new__(wb.WeChatBot)
+        bot.memory_db = {"小明": [{"role": "assistant", "content": "最新回复",
+                                   "time": "2026-01-01 00:00:00"}]}
+        bot.memory_file = os.path.join(dirpath, "memory.json")
+        bot.max_history = 1000
+        bot._memory_dirty = dirty
+        bot._last_memory_save = (last_save if last_save is not None
+                                 else _time.time() - 10)
+        return bot
+
+    def test_due_flushes_to_disk(self):
+        import time as _time
+        d = tempfile.mkdtemp()
+        bot = self._bot(d, last_save=_time.time() - 10)
+        bot._flush_memory_if_due()
+        self.assertFalse(bot._memory_dirty)
+        with open(bot.memory_file, encoding="utf-8") as f:
+            self.assertIn("最新回复", f.read())
+
+    def test_not_due_keeps_dirty(self):
+        import time as _time
+        d = tempfile.mkdtemp()
+        bot = self._bot(d, last_save=_time.time())  # 刚写过，未到期
+        bot._flush_memory_if_due()
+        self.assertTrue(bot._memory_dirty)
+        self.assertFalse(os.path.exists(bot.memory_file))
+
+    def test_agentbot_poll_flushes_when_paused(self):
+        """process_new_messages 顶部兜底：暂停态轮询也落盘（CLI 暂停挂机场景）。"""
+        from xiaoli_bot import AgentBot
+
+        d = tempfile.mkdtemp()
+        bot = AgentBot.__new__(AgentBot)
+        bot.memory_db = {"小明": [{"role": "assistant", "content": "回复",
+                                   "time": "t"}]}
+        bot.memory_file = os.path.join(d, "memory.json")
+        bot.max_history = 1000
+        bot._memory_dirty = True
+        bot._last_memory_save = 0.0
+        bot.paused = True
+        bot.process_new_messages()
+        self.assertFalse(bot._memory_dirty)
+        self.assertTrue(os.path.isfile(bot.memory_file))
+
+
 class TestVisionResultRouting(unittest.TestCase):
     """vision 单调用收尾契约：_route_vision_result 可覆写 hook 存在且基类
     默认返回 None（未处理）；两段式残留 _reply_with_vision / _vision_result_text
-    必须删除；_describe_image / _process_image_visual_fallback 的 call_vision_api
+    与旧 _process_image 路径必须删除；_describe_image 的 call_vision_api
     dict 返回直接路由，不压文本不转述（tool_call 语义不丢失）。"""
 
     @staticmethod
@@ -1371,29 +1425,6 @@ class TestVisionResultRouting(unittest.TestCase):
         import wechat_bot
         self.assertFalse(hasattr(wechat_bot.WeChatBot, "_vision_result_text"),
                          "_vision_result_text 无调用方应删除")
-
-    def test_visual_fallback_routes_dict_not_text(self):
-        """降级路径：call_vision_api 返回 tool_call dict → 原样路由给
-        _route_vision_result（不压 arguments 字符串、不写 [图片描述] 转述）。"""
-        from unittest import mock as _mock
-        bot = self._obj()
-        bot.vision_prompt = "描述"
-        bot.wx = _mock.MagicMock()
-        tool_call = {"kind": "tool_call", "name": "dispatch_task",
-                     "arguments": '{"task":"画一张图"}'}
-        with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch.object(bot, "_save_screenshot_compressed"), \
-             _mock.patch.object(bot, "call_vision_api", return_value=tool_call), \
-             _mock.patch.object(bot, "_route_vision_result",
-                                return_value=True) as route:
-            pg.screenshot.return_value = _mock.MagicMock()
-            ret = bot._process_image_visual_fallback("群", "小明")
-            self.assertTrue(ret)
-            route.assert_called_once()
-            _args, _kwargs = route.call_args
-            self.assertEqual(_kwargs.get("img_path") is not None, True)
-            self.assertEqual(_args[2], tool_call,
-                             "tool_call dict 必须原样路由，不压文本")
 
     def test_describe_image_routes_dict_not_text(self):
         """_describe_image：tool_call dict 原样路由，不压 arguments 字符串。"""
@@ -1454,13 +1485,15 @@ class TestVisionModelDefault(unittest.TestCase):
 
 
 class TestVisionRouteImmersion(unittest.TestCase):
-    """沉浸要求注入覆盖 vision 主路——README 流程图节点 I：所有消息主路
-    走 _vision_route 单调用，call_chat_ai 只是降级通道，只挂降级路等于
-    没挂（实测教训：首条消息注入必须在两路都生效）。
-    契约：首条消息后空行拼接注入；注入后的 user_text 随 text 分支存入
-    历史；后续请求按【角色沉浸要求】标记去重。"""
+    """沉浸要求已随默认人设内置，运行时注入机制（_with_immersion）已删：
+    _vision_route 的 user 消息必须是 decorated 原文，不拼接任何注入后缀。"""
 
-    def _agent(self):
+    def test_injection_mechanism_removed(self):
+        import wechat_bot as wb
+        self.assertFalse(hasattr(wb.WeChatBot, "_with_immersion"),
+                         "运行时沉浸注入机制必须删除（人设已内置）")
+
+    def test_vision_route_user_msg_is_raw_decorated(self):
         from xiaoli_bot import AgentBot
 
         bot = AgentBot.__new__(AgentBot)
@@ -1472,18 +1505,10 @@ class TestVisionRouteImmersion(unittest.TestCase):
         bot.vision_temp = 0.7
         bot.vision_max_tokens = 10000
         bot._model_lock = threading.RLock()
-        bot.memory_db = {}  # _with_immersion 用 hasattr(memory_db) 判定历史设施存在
-        store = {}
-        bot._get_history = lambda chat_id: store.setdefault(chat_id, [])
-        bot._add_history = lambda chat_id, role, content: store.setdefault(
-            chat_id, []).append({"role": role, "content": content})
+        bot.memory_db = {}
+        bot._get_history = lambda chat_id: []
+        bot._add_history = lambda chat_id, role, content: None
         bot._send_text = lambda *a, **k: None
-        return bot
-
-    def test_first_message_injects_then_dedup(self):
-        import wechat_bot as wb
-
-        bot = self._agent()
         sent = {}
 
         def fake_vision(content, chat_id=None):
@@ -1491,18 +1516,11 @@ class TestVisionRouteImmersion(unittest.TestCase):
             return {"kind": "text", "content": "嗨"}
 
         bot.call_vision_api = fake_vision
-
         bot._vision_route("王文生", "王文生", "你好呀")
-        self.assertTrue(sent["text"].endswith("\n\n" + wb.ROLE_IMMERSION_PROMPT),
-                        "vision 主路首条消息必须空行拼接注入沉浸要求")
-        hist = bot._get_history("王文生")
-        self.assertEqual(hist[0]["role"], "user")
-        self.assertTrue(hist[0]["content"].endswith(wb.ROLE_IMMERSION_PROMPT),
-                        "注入后的 user_text 必须随 text 分支存入历史（去重依据）")
-
-        bot._vision_route("王文生", "王文生", "在吗")
-        self.assertFalse(sent["text"].endswith(wb.ROLE_IMMERSION_PROMPT),
-                         "历史已有标记，第二条消息不得重复注入")
+        self.assertTrue(sent["text"].endswith("用户消息：\n私聊 - 王文生：你好呀"),
+                        "user 消息必须是 decorated 原文（无注入后缀）")
+        self.assertNotIn("【角色沉浸要求】", sent["text"],
+                         "运行时不得再拼接沉浸要求（人设已内置）")
 
 
 class TestVisionRoutePersona(unittest.TestCase):

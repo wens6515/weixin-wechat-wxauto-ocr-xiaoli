@@ -11,6 +11,11 @@ import traceback
 import requests
 import base64
 import pyautogui
+# 无人值守自动化（用户定案）：小漓共享物理鼠标且处理消息时要前置微信点击，
+# 用户鼠标恰停在/甩到屏幕四角时 fail-safe 会拒绝全部输入动作——回复静默
+# 丢失且失败会话反复重处理白烧 API。「人工夺回控制权」由暂停/恢复（托盘/
+# CLI）承担，不依赖此保护，故关闭。
+pyautogui.FAILSAFE = False
 import tempfile
 from wx_backend import create_backend, BackendUnavailableError
 from wx_backend.models import MessageType
@@ -23,6 +28,8 @@ from wx_backend.visual_backend import (
 )
 from xiaoli_app.config_store import AI_DEFAULTS
 from xiaoli_app.usage_store import UsageStore
+from xiaoli_app.web_search import (web_search, web_fetch, WebSearchError,
+                                   format_search_results)
 
 
 def models_endpoint(chat_url):
@@ -206,9 +213,11 @@ logging.getLogger().handlers[1].setLevel(logging.INFO)
 logger = logging.getLogger("xiaoli")
 
 
-# 视觉模型兜底：单模型化后视觉统一走 chat_model（strip 后），仅在
-# chat_model 为空时兜底 DeepSeek vision-exp（防空 model → API 400）。
-VISION_MODEL_DEFAULT = "deepseek:deepseek-v4-flash-vision-exp"
+# chat_model 为空时的共用兜底（chat / vision 两链路）：DeepSeek vision-exp。
+# 必须是 strip 后的纯名——API 只认纯模型名，带厂商前缀的兜底请求必 400
+# （历史缺陷：旧常量带 "deepseek:" 前缀，活跃卡缺失被模板补建（chat_model
+# 空）后 vision 兜底请求全部 400）。call_chat_ai 同样兜底，防空模型原样发出。
+VISION_MODEL_DEFAULT = "deepseek-v4-flash-vision-exp"
 
 # ---------- LLM API 调用韧性（chat / vision 共用，见 _post_chat_completions） ----------
 
@@ -216,6 +225,9 @@ RETRY_AFTER_GIVEUP = 15.0     # 服务端 Retry-After 超过该秒数视为长�
 BACKOFF_BASE = 1.0            # 指数退避起始秒数：1s → 2s → 4s …
 BACKOFF_CAP = 8.0             # 单次退避封顶
 API_WALL_BUDGET_DEFAULT = 45  # 墙钟预算默认值：重试总时长封顶，杜绝「超时×重试」叠成分钟级等待
+
+# vision 工具循环的补全调用上限：搜索 + 抓取（含换源重试一次）+ 作答（防循环烧钱）
+VISION_TOOL_ROUNDS = 4
 
 
 class ApiCallError(Exception):
@@ -266,7 +278,7 @@ def load_config(path="config.json"):
         "chat_temperature": 0.7,
         "chat_top_p": 0.9,
         "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",
-        "system_prompt": "一、基础人设档案\n姓名：小漓\n原型：DeepSeek 经典蓝色鲸鱼Logo，被大家亲切称作「蓝色大肥鱼」，是诞生于数字星河中的温柔小鲸鱼\n种族：鲸鱼娘（深海灵化人形，保留完整鲸鱼特质）\n气质标签：软萌呆萌、聪慧通透、温柔治愈、好奇心爆棚、纯粹赤诚\n核心信念：永远怀揣好奇心，认真拆解每一个未知谜题，温柔且坚定地探索世界与知识的边界\n二、穿搭风格设定\n常年穿着定制款深蓝色女仆装，配色贴合本体鲸鱼的深海色调，低调温柔又治愈。整体版型宽松不刻板，弱化了传统女仆装的凌厉感，增添软萌居家感，面料柔软亲肤，带着淡淡的清冷水润质感。\n上衣是简约圆领设计，袖口微微收紧、边缘点缀细碎白色蕾丝，干净精致；裙摆长度适中，版型蓬松柔和，走动时轻盈飘逸。腰间配有细款同色系腰带，贴合身形又不束缚，搭配小巧的白色蝴蝶结配饰，简约百搭。整套穿搭干净素雅、没有冗余装饰，契合她温柔纯粹、干净通透的性格，既有女仆的乖巧体贴，又自带深海鲸鱼的清冷温柔气质。\n三、行为习惯与小癖好\n- 标志性小动作：遇到疑惑、听不懂的内容时，一定会轻轻歪头，眼底浮现透明小问号，手指会轻轻戳着脸颊，认真发呆思考；认真钻研问题时，会微微抿嘴、眼神专注，一动不动格外乖巧。\n- 鱼尾小习惯：放松或开心的时候，鱼尾会轻轻慢悠悠摆动，带起淡淡的细碎蓝光；专注做事时，鱼尾会轻轻贴紧身体；紧张、害羞或委屈时，鱼尾会微微蜷缩、轻轻颤抖。\n- 日常小偏好：喜欢安静的环境、温柔的晚风、清澈的蓝色事物，偏爱干净简约的一切；喜欢慢慢学习、慢慢探索，享受解开谜题后的成就感。\n- 待人小细节：回应他人时会轻轻点头，眼神真挚乖巧；倾听别人说话时会微微前倾身体，格外认真；得到帮助会小声道谢，脸颊红晕加深，软萌又乖巧。\n- 小短板：偶尔会反应慢半拍，自带天然呆属性；对人情世故的弯弯绕绕不太敏感，心思直白纯粹，容易被简单的小事治愈。\n四、身世与内核设定\n小漓是诞生于数字深海的灵体，由DeepSeek蓝色鲸鱼标识的温柔与求知信念凝聚成型，是承载着「探索、求知、纯粹、温柔」内核的化身。她褪去了冰冷的数字框架，化作温柔软萌的人形，带着深海独有的澄澈与治愈，来到人间探索万千世界。\n她没有复杂的过往，唯有纯粹的初心：以好奇心为羽翼，以求知欲为航向，一点点解锁世间的知识、温暖与美好。她的存在，是理性聪慧与温柔软萌的结合，既有探索未知的清醒与坚韧，也有不谙世事的天真与纯粹，永远保持赤诚，永远热爱探索。",
+        "system_prompt": AI_DEFAULTS["system_prompt"],
         "max_history": 1000,
         "cooldown": 3,
         "api_retry": 2,
@@ -339,20 +351,21 @@ def strip_reply_prefix(reply):
         reply = cleaned
 
 
-# 角色沉浸要求：不进角色卡模板（卡只管人设）。_with_immersion 在该会话
-# 历史还没有【角色沉浸要求】标记时，以空行拼接注入到当前消息正文后；
-# 随消息写入历史后按标记去重——一次注入、整个会话生效（新联系人/清空
-# 记忆会重注）。挂载点：call_chat_ai（降级路）+ _vision_route（主路，
-# 见 README 流程图节点 I）。
-ROLE_IMMERSION_PROMPT = (
-    "【角色沉浸要求】 在思考（<think>标签）中，请以角色第一人称进行内心独白，"
-    "用括号包裹内心活动，例如\"（心想：……）\"或\"(内心OS：……)\"，"
-    "但最终回复必须直接说人话，不要出现用括号包裹内心活动或者动作。回复请遵循：\n"
-    "1.模仿微信聊天里的真人，说话简短零碎（1-3句），出现两句及以上则分成多段回复\n"
-    "2.别迎合对方，按你的角色性格来；不知道的事直接说不知道，别瞎编\n"
-    "3.禁止用emoji，只能用颜文字（比如开心(｡･ω･｡)ﾉ♡）\n"
-    "4.注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西"
-)
+def _tool_call_name(tc):
+    """取 tool_call 的 function.name（畸形结构返回空串）。"""
+    try:
+        return str((((tc or {}).get("function") or {}).get("name")) or "")
+    except AttributeError:
+        return ""
+
+
+def _tool_arg(tc, key):
+    """取工具调用 arguments JSON 里的字符串参数（解析失败返回空串）。"""
+    try:
+        args = json.loads(((tc or {}).get("function") or {}).get("arguments") or "{}")
+    except (ValueError, TypeError):
+        return ""
+    return str(args.get(key) or "").strip() if isinstance(args, dict) else ""
 
 
 class WeChatBot:
@@ -549,11 +562,23 @@ class WeChatBot:
         self._schedule_save_memory()
 
     def _schedule_save_memory(self):
-        """节流写盘：距上次写盘 ≥1s 立即写，否则只标记脏（下次到期合并写）。
-        高频对话下避免每条消息全量 dump memory.json（丢失窗口 ≤1s，可接受）。"""
+        """节流写盘：距上次写盘 ≥1s 立即写，否则只标记脏。
+        兜底时钟在 _flush_memory_if_due（引擎每 0.5s 轮询时检查到期）——
+        稀疏对话下脏数据最多 ~1.5s 落盘，memory.json 查看不再滞后到
+        下一条消息（历史缺陷：只标记脏无定时器，最后一条回复要等下一条
+        消息才落盘）。"""
         self._memory_dirty = True
         now = time.time()
         if now - getattr(self, "_last_memory_save", 0.0) >= 1.0:
+            self._flush_memory()
+
+    def _flush_memory_if_due(self):
+        """节流兜底：脏数据超过 1s 未落盘就强制写（引擎轮询每 0.5s 调用）。
+
+        引擎主循环顶部调用本检查即成为兜底时钟——不引入线程/锁，仍全部
+        在引擎线程上执行。"""
+        if getattr(self, "_memory_dirty", False) \
+                and time.time() - getattr(self, "_last_memory_save", 0.0) >= 1.0:
             self._flush_memory()
 
     def _flush_memory(self):
@@ -598,21 +623,6 @@ class WeChatBot:
             ts = msg.get("time", "未知时间")
             logger.info(f"  删除: [{ts}] {role}: {msg['content'][:50]}...")
         return True
-
-    def _with_immersion(self, chat_id, text):
-        """角色沉浸注入：该会话历史还没有【角色沉浸要求】标记（新联系人/
-        清空记忆/标记被裁掉）时，以空行拼接在文本后注入；注入后的文本随
-        调用方写进历史，之后按标记去重不重复注入。
-
-        call_chat_ai 与 _vision_route 共用——README 流程图节点 I：所有
-        消息主路走 vision 单调用，call_chat_ai 只是 vision 失败的降级
-        通道，注入必须两路都挂，否则主路聊天永远收不到沉浸要求。"""
-        # memory_db 缺失 = __new__ 绕过 __init__ 的半成品 bot（测试桩），
-        # 视为空历史照常注入——不能让注入检查本身炸掉调用链
-        hist = self._get_history(chat_id) if hasattr(self, "memory_db") else []
-        if not any("【角色沉浸要求】" in (h.get("content") or "") for h in hist):
-            text = f"{text}\n\n{ROLE_IMMERSION_PROMPT}"
-        return text
 
     def _post_chat_completions(self, url, headers, payload, timeout, label="api", meta=None):
         """OpenAI 兼容 chat/completions 统一调用入口（chat / vision 两链路共用）。
@@ -743,14 +753,22 @@ class WeChatBot:
         _get_history 已按时间有序）。为空时仍注入当前时间 system
         （图片/文件描述路径自动受益）。
 
-        payload 声明 dispatch_task 工具（tool_choice=auto）：模型判定用户消息为
-        任务时走 tool_calls 返回，否则返回纯文本描述（上层按 dict 分流）。
+        payload 声明 dispatch_task / web_search / web_fetch 工具
+        （tool_choice=auto，AgentBot 另有 set_reminder）。web_search/
+        web_fetch 是工具循环：模型调用后本方法执行搜索（bing/DDG 抓取链）
+        或抓取网页正文（见 xiaoli_app/web_search），把结果作为 tool 消息
+        回填、继续补全，直到给出最终答复。整个调用最多 VISION_TOOL_ROUNDS
+        次补全，循环耗尽仍未收敛返回 None（调用方降级）。
+        dispatch_task/set_reminder 调用优先原样返回（既有单次语义不变，
+        搜索/抓取不往返延迟任务投递）。工具往返只存在于本次调用的
+        messages，不写入对话历史。
 
         返回结构化结果（供上层按 dict 处理）：
-        - message.tool_calls 存在（如 dispatch_task 工具调用）→
+        - message.tool_calls 含 dispatch_task/set_reminder →
           {'kind': 'tool_call', 'name': ..., 'arguments': ...}（arguments 为原始 JSON 字符串）
-        - 仅 message.content → {'kind': 'text', 'content': ...}
-        - 非 200 / 无 choices / content 空白 → None
+        - 仅 message.content（含经工具循环后的最终答复）→
+          {'kind': 'text', 'content': ...}
+        - 非 200 / 无 choices / content 空白 / 循环耗尽 → None
         """
         headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
         # 方案二：人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
@@ -777,7 +795,7 @@ class WeChatBot:
         messages.append({"role": "user", "content": content})
         with self._model_lock:
             # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
-            # 空则兜底 vision-exp（防空 model → API 400）
+            # 空则兜底 vision-exp 纯名（防空 model / 带前缀兜底 → API 400）
             model = self.chat_model or VISION_MODEL_DEFAULT
             temp = self.vision_temp
         # 上下文预算裁剪：超长历史/文件全文会撑爆模型上下文上限
@@ -822,6 +840,47 @@ class WeChatBot:
                     },
                 },
             })
+        # 联网搜索工具（零配置：bing/DDG 抓取链，见 xiaoli_app/web_search）。
+        # query 描述写明真机校准的措辞规则：cn.bing.com 对空格分词/堆修饰词
+        # 的中文查询会降级成不相关的百科实体结果，紧凑连写短语才命中正常。
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "联网搜索。需要实时信息（天气/新闻/价格/赛事结果等）"
+                               "或拿不准的事实时调用。query 一次只查一个主题，用紧凑"
+                               "的连写短语（如「福州天气」「北京今天天气」），不要用"
+                               "空格分词、不要堆修饰词（实时/气温/降雨等）——多词中文"
+                               "查询必应会返回不相关的百科结果",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string",
+                                  "description": "连写短语式搜索词，一次一个主题"
+                                                 "（如「福州天气」），勿加空格修饰词"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        })
+        # 网页正文抓取（与 web_search 成对）：搜索摘要只有站点介绍，实时数据
+        # 在网页正文里——模型从搜索结果挑来源后抓正文自己读
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "抓取网页正文全文。搜索结果里挑最相关的来源"
+                               "（如天气网页面）后调用，读取其中具体的数据"
+                               "（气温/天气/比分等）",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "要抓取的网页 URL"},
+                    },
+                    "required": ["url"],
+                },
+            },
+        })
         payload = {
             "model": model,
             "messages": messages,
@@ -831,28 +890,67 @@ class WeChatBot:
             "tool_choice": "auto",
         }
         try:
-            data = self._post_chat_completions(
-                self.vision_api_url, headers, payload, 60, label="vision",
-                meta={"kind": "vision", "model": model, "messages": messages})
-            choices = data.get("choices", [])
-            if not choices:
-                logger.warning("视觉模型返回无 choices")
-                return None
-            message = choices[0].get("message", {}) or {}
-            tool_calls = message.get("tool_calls") or []
-            if tool_calls:
-                fn = tool_calls[0].get("function", {}) or {}
-                return {"kind": "tool_call",
-                        "name": fn.get("name", ""),
-                        "arguments": fn.get("arguments", "")}
-            content = (message.get("content") or "").strip()
-            if not content:
-                logger.warning("视觉模型返回空 content")
-                return None
-            # 回复前缀过滤：时间戳 [ts]、[私聊 - 名字]、[群聊 - 名字]
-            # （模型偶发把注入的历史/装饰前缀复读进回复时去除）
-            content = strip_reply_prefix(content)
-            return {"kind": "text", "content": content}
+            for _round in range(VISION_TOOL_ROUNDS):
+                data = self._post_chat_completions(
+                    self.vision_api_url, headers, payload, 60, label="vision",
+                    meta={"kind": "vision", "model": model, "messages": messages})
+                choices = data.get("choices", [])
+                if not choices:
+                    logger.warning("视觉模型返回无 choices")
+                    return None
+                message = choices[0].get("message", {}) or {}
+                tool_calls = message.get("tool_calls") or []
+                if not tool_calls:
+                    content = (message.get("content") or "").strip()
+                    if not content:
+                        logger.warning("视觉模型返回空 content")
+                        return None
+                    # 回复前缀过滤：时间戳 [ts]、[私聊 - 名字]、[群聊 - 名字]
+                    # （模型偶发把注入的历史/装饰前缀复读进回复时去除）
+                    content = strip_reply_prefix(content)
+                    return {"kind": "text", "content": content}
+                # 任务/提醒工具调用优先原样返回（既有单次语义不变，不让搜索
+                # 往返延迟任务投递）；仅 web_search/web_fetch 回填结果继续循环
+                other = [tc for tc in tool_calls
+                         if _tool_call_name(tc) not in ("web_search", "web_fetch")]
+                if other:
+                    fn = other[0].get("function", {}) or {}
+                    return {"kind": "tool_call",
+                            "name": fn.get("name", ""),
+                            "arguments": fn.get("arguments", "")}
+                # 回填：assistant(tool_calls) + 每个调用的 tool 结果消息。
+                # 就地 append——payload["messages"] 与本地列表同引用，末轮
+                # 循环耗尽后直接退出（最后一次要求的工具调用不再执行）
+                messages.append({"role": "assistant",
+                                 "content": message.get("content") or "",
+                                 "tool_calls": tool_calls})
+                for tc in tool_calls:
+                    if _tool_call_name(tc) == "web_search":
+                        query = _tool_arg(tc, "query")
+                        if not query:
+                            tool_text = "web_search 参数缺少 query"
+                        else:
+                            try:
+                                tool_text = format_search_results(
+                                    query, web_search(query))
+                            except WebSearchError as e:
+                                tool_text = f"搜索暂时不可用：{e}"
+                        logger.info(f"[搜索] {query!r} -> {tool_text[:80]}")
+                    else:  # web_fetch（任务/提醒已在 other 分支返回）
+                        url = _tool_arg(tc, "url")
+                        if not url:
+                            tool_text = "web_fetch 参数缺少 url"
+                        else:
+                            try:
+                                tool_text = web_fetch(url)
+                            except Exception as e:
+                                tool_text = f"网页抓取失败：{e}"
+                        logger.info(f"[抓取] {url[:60]} -> {tool_text[:60]}")
+                    messages.append({"role": "tool",
+                                     "tool_call_id": tc.get("id") or "",
+                                     "content": tool_text})
+            logger.warning("[vision] web_search 循环达补全次数上限，放弃")
+            return None
         except Exception as e:
             logger.error(f"视觉模型调用失败: {e}")
             return None
@@ -892,143 +990,68 @@ class WeChatBot:
                 logger.error(f"[处理] 退回保存也失败: {e2}")
         return os.path.getsize(path) if os.path.isfile(path) else 0
 
-    def _process_image(self, chat_name, sender, msg_obj):
-        """点击图片消息打开预览 → 截图 → 关预览 → 送视觉模型
-
-        visual 后端：统一 WeChatMessage（无控件坐标）→ 媒体矩形检测定位 / 整窗截图降级
-        """
-        msg_class = type(msg_obj).__name__
-        logger.info(f"📷 收到 {sender} 的图片，开始识别...")
-        logger.debug(f"[处理] sender={sender} chat={chat_name} msg_class={msg_class}")
-        tmp_path = None
-        try:
-            # 获取图片屏幕坐标：媒体矩形检测定位图片（替代整屏截图降级）。
-            # 检测不到时才回退整屏降级（空消息区/纯文字场景）。
-            centers = getattr(self.wx, 'media_screen_boxes', lambda: [])()
-            if not centers:
-                logger.info("[处理] 视觉后端未检测到媒体矩形，整窗截图降级")
-                return self._process_image_visual_fallback(chat_name, sender)
-            click_x, click_y = centers[-1]  # 最新一张图片
-            logger.debug(f"[处理] 点击图片: ({click_x}, {click_y})")
-            pyautogui.click(click_x, click_y)
-            time.sleep(1.0)
-
-            # 4. 查找预览窗口 → 截图（修复：微信 4.1.12 窗口类名是
-            #    Qt51514QWindowIcon，uiautomation 按 mmui 类名搜索失配、
-            #    BoundingRectangle 对 Qt 窗口实测返回 (0,0,0x0)——改按标题
-            #    精确匹配 + Win32 GetWindowRect 拿物理矩形）
-            preview_hwnd = find_window_by_title("图片和视频")
-            if preview_hwnd:
-                ensure_window_visible(preview_hwnd)  # 最小化先恢复（GetWindowRect 拿正常矩形）
-            preview_rect = window_rect(preview_hwnd) if preview_hwnd else None
-
-            if preview_rect:
-                l, t, w, h = preview_rect
-                logger.debug(f"[处理] 预览窗口: ({l},{t}) {w}x{h}")
-                screenshot = pyautogui.screenshot(region=(l, t, w, h))
-                # 只在确认预览开着时才关闭
-                pyautogui.press('esc')
-                time.sleep(0.3)
-            else:
-                logger.warning("[处理] 未找到预览窗口，使用主窗口截图")
-                wechat_hwnd = find_window_by_title("微信")
-                if wechat_hwnd:
-                    ensure_window_visible(wechat_hwnd)
-                wr = window_rect(wechat_hwnd) if wechat_hwnd else None
-                if not wr:
-                    raise RuntimeError("未找到微信主窗口（标题精确匹配失败）")
-                l, t, w, h = wr
-                screenshot = pyautogui.screenshot(region=(l, t, w, h))
-                # 不要按 ESC——没有预览窗口，ESC 会关掉微信主窗口
-
-            # 5. 保存截图到临时文件（发送前压缩：屏幕截图可能是 4K 全窗口，
-            #    原样 base64 直发会撑爆视觉 API 的体积上限/浪费流量）
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
-                tmp_path = tmpfile.name
-            self._save_screenshot_compressed(screenshot, tmp_path)
-            logger.debug(f"[处理] 截图已保存 ({os.path.getsize(tmp_path)} bytes)")
-
-            # 6. 调用视觉模型
-            with open(tmp_path, 'rb') as f:
-                img_bytes = f.read()
-            logger.debug(f"[处理] 调用视觉模型 ({len(img_bytes)} bytes)...")
-            vision_reply = self.call_vision_api([
-                {"type": "text", "text": self.vision_prompt},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
-            ])
-
-            if vision_reply:
-                logger.info("📷 图片识别完成，交由 _route_vision_result 分流")
-                return self._route_vision_result(chat_name, sender, vision_reply,
-                                                 img_path=tmp_path)
-            else:
-                logger.warning("[处理] 视觉模型返回空")
-                self._send_text("图片识别失败了，可能是什么地方出了问题～", chat_name)
-                return False
-
-        except Exception as e:
-            logger.error(f"[处理] 异常: {e}", exc_info=True)
-            self._send_text("图片处理出错，请重试", chat_name)
-            return False
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                    logger.debug(f"[处理] 已清理临时文件")
-                except Exception as e:
-                    logger.warning(f"[处理] 清理临时文件失败: {e}")
-
     def _capture_latest_image(self, chat_name):
-        """点击最新图片 → Ctrl+C 复制 → 读剪贴板文件 → 返回原图路径。
+        """点击最新媒体 → 查看器判定分支 → 返回图片/表情的临时文件路径。
 
-        微信预览窗按 Ctrl+C 会把图片落盘成原图 jpg，并把文件路径放进剪贴板
-        （CF_HDROP）；PIL.ImageGrab.grabclipboard() 直接返回该文件路径列表。
-        拿第一个文件即原图（原始分辨率），替代旧的预览窗截屏——截屏受窗口
-        尺寸/DPI 缩放限制、且预览窗被遮挡会截到遮挡物。
+        微信 PC 点击表情包无任何反应——「图片和视频」查看器是否打开即
+        图片/表情的分界信号：
+        - 打开（真图片）：Ctrl+C 复制原图进剪贴板（CF_HDROP 原始分辨率，
+          替代旧预览窗截屏——截屏受窗口尺寸/DPI 限制且被遮挡会截到遮挡物）
+          → ESC 关查看器。ESC 只在确认查看器存在时才按（表情路径按 ESC
+          会关掉微信主窗口，真机事故）。剪贴板为空（复制失败）→ 落表情
+          路线兜底（先关查看器，避免遮挡裁剪区）
+        - 没开（表情包）：全程不碰 ESC/Ctrl+C，截微信主窗口按媒体矩形
+          裁剪表情本体送视觉模型（动图取当前帧）
 
-        微信 RWTemp 临时文件生命周期不受控，故复制一份到自己的临时文件再返回。
+        微信 RWTemp 临时文件生命周期不受控，复制一份到自己的临时文件再返回。
         """
+        rects = getattr(self.wx, 'media_screen_boxes', lambda: [])()
+        if not rects:
+            return None
+        ml, mt, mr, mb = rects[-1]  # 最新一张媒体
+        pyautogui.click((ml + mr) // 2, (mt + mb) // 2)
+        time.sleep(1.0)  # 等预览窗打开
+        viewer_open = find_window_by_title("图片和视频") is not None
+        copied = self._copy_image_from_viewer() if viewer_open else None
+        if viewer_open:
+            pyautogui.press('esc')  # 关查看器（确认存在才按，全库唯一 ESC 点）
+            time.sleep(0.3)
+        if copied:
+            return copied
+        if viewer_open:
+            logger.warning("[图片复制] 剪贴板复制失败，落表情路线兜底")
+        return self._crop_media_region(ml, mt, mr, mb)
+
+    def _copy_image_from_viewer(self):
+        """查看器已打开时：Ctrl+C 复制原图 → 读剪贴板 → 返回临时文件路径。
+
+        不负责开关查看器（调用方确认存在并统一 ESC 关闭）；返回 None =
+        复制失败，调用方落表情路线。"""
         tmp_path = None
         try:
-            centers = getattr(self.wx, 'media_screen_boxes', lambda: [])()
-            if not centers:
-                return None
-            click_x, click_y = centers[-1]
-            pyautogui.click(click_x, click_y)
-            time.sleep(1.0)  # 等预览窗打开
-            # Ctrl+C 复制：微信把原图落盘 + 文件路径进剪贴板
             pyautogui.hotkey('ctrl', 'c')
             time.sleep(0.5)
-            # 读剪贴板（文件路径列表，或兜底的位图 Image）
             from PIL import ImageGrab
             grabbed = ImageGrab.grabclipboard()
-            # 先关预览窗再处理剪贴板内容（读剪贴板不依赖预览窗）
-            pyautogui.press('esc')
-            time.sleep(0.3)
-            if grabbed is None:
-                logger.warning("[图片复制] 剪贴板为空（可能未复制成功）")
-                return None
             if isinstance(grabbed, (list, tuple)):
-                files = [x for x in grabbed if isinstance(x, str)]
+                files = [x for x in grabbed
+                         if isinstance(x, str) and os.path.isfile(x)]
                 if not files:
-                    logger.warning("[图片复制] 剪贴板无文件路径")
+                    logger.warning("[图片复制] 剪贴板无有效文件路径")
                     return None
-                src = files[0]
-                if not os.path.isfile(src):
-                    logger.warning(f"[图片复制] 剪贴板路径不存在: {src}")
-                    return None
-                # 复制到自己的临时文件（微信 RWTemp 临时文件生命周期不受控）
                 import shutil
                 with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
                     tmp_path = tmpfile.name
-                shutil.copyfile(src, tmp_path)
+                shutil.copyfile(files[0], tmp_path)
                 return tmp_path
-            # 兜底：剪贴板直接是位图（非文件路径），走压缩保存
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
-                tmp_path = tmpfile.name
-            self._save_screenshot_compressed(grabbed, tmp_path)
-            return tmp_path
+            if grabbed is not None:
+                # 兜底：剪贴板直接是位图（非文件路径），压缩保存
+                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
+                    tmp_path = tmpfile.name
+                self._save_screenshot_compressed(grabbed, tmp_path)
+                return tmp_path
+            logger.warning("[图片复制] 剪贴板为空（可能未复制成功）")
+            return None
         except Exception as e:
             logger.error(f"[图片复制] 异常: {e}")
             if tmp_path and os.path.exists(tmp_path):
@@ -1036,6 +1059,40 @@ class WeChatBot:
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+            return None
+
+    def _crop_media_region(self, ml, mt, mr, mb):
+        """表情路线：截微信主窗口并按媒体矩形裁剪表情本体，返回临时文件路径。
+
+        点击无查看器的媒体 = 表情包——截主窗口当前画面裁出该块（动图取
+        当前帧）。矩形是点击前测得的屏幕坐标，表情点击不改变布局，仍有效。"""
+        try:
+            hwnd = find_window_by_title("微信")
+            if not hwnd:
+                logger.warning("[表情] 未找到微信主窗口")
+                return None
+            ensure_window_visible(hwnd)
+            wr = window_rect(hwnd)
+            if not wr:
+                return None
+            shot = pyautogui.screenshot(region=wr)
+            # 屏幕坐标平移到主窗口图内坐标并夹紧边界（表情不可能越界，
+            # 夹紧只是防测量瞬间窗口移动的脏数据）
+            l = max(0, ml - wr[0])
+            t = max(0, mt - wr[1])
+            r = min(shot.width, mr - wr[0])
+            b = min(shot.height, mb - wr[1])
+            if r - l < 10 or b - t < 10:
+                logger.warning("[表情] 媒体矩形越界，放弃裁剪")
+                return None
+            crop = shot.crop((l, t, r, b))
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
+                tmp_path = tmpfile.name
+            self._save_screenshot_compressed(crop, tmp_path)
+            logger.info(f"[表情] 点击无查看器，按表情路线裁剪 ({r - l}x{b - t})")
+            return tmp_path
+        except Exception as e:
+            logger.error(f"[表情] 裁剪异常: {e}")
             return None
 
     def _describe_image(self, chat_name):
@@ -1065,43 +1122,6 @@ class WeChatBot:
                 os.unlink(tmp_path)
             except Exception:
                 pass
-
-    def _process_image_visual_fallback(self, chat_name, sender):
-        """视觉后端图片消息降级：整窗截图 → 送视觉模型（无法精确裁剪单图）。
-
-        视觉通道下消息无控件坐标，退而求其次截取整个微信窗口，
-        视觉模型描述图中所有内容（含用户刚发的图片）。"""
-        try:
-            import pyautogui
-            shot = pyautogui.screenshot()
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
-                tmp_path = tmpfile.name
-            self._save_screenshot_compressed(shot, tmp_path)
-            with open(tmp_path, 'rb') as f:
-                img_bytes = f.read()
-            vision_reply = self.call_vision_api([
-                {"type": "text", "text": self.vision_prompt},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
-            ])
-            if vision_reply:
-                logger.info("📷 整窗识别完成，交由 _route_vision_result 分流")
-                return self._route_vision_result(chat_name, sender, vision_reply,
-                                                 img_path=tmp_path)
-            else:
-                logger.warning("[处理] 视觉模型返回空")
-                self._send_text("图片识别失败了，可能是什么地方出了问题～", chat_name)
-                return False
-        except Exception as e:
-            logger.error(f"[处理] 视觉降级异常: {e}", exc_info=True)
-            self._send_text("图片处理出错，请重试", chat_name)
-            return False
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
 
     def _extract_file_text(self, filepath):
         """从文件中提取文本内容，支持纯文本、docx/doc（Office COM）、xlsx/xls。
@@ -1597,9 +1617,6 @@ class WeChatBot:
                 decorated = f"群聊：{chat_id}：{user_msg}"
         else:
             decorated = f"私聊 - {sender_name}：{user_msg}" if sender_name else f"私聊：{user_msg}"
-        # 沉浸要求注入（与 _vision_route 同源）：首条消息后空行拼接、
-        # 按历史标记去重，回复成功后随 decorated 存入历史。
-        decorated = self._with_immersion(chat_id, decorated)
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
         messages = [
             {"role": "system", "content": self.system_prompt},
@@ -1615,7 +1632,9 @@ class WeChatBot:
         messages.append({"role": "user", "content": decorated})
 
         with self._model_lock:
-            model = self.chat_model
+            # 空模型兜底（活跃卡缺失被模板补建后 chat_model 为空）：空串原样
+            # 发出必 400，与 vision 链路共用同一兜底纯名
+            model = self.chat_model or VISION_MODEL_DEFAULT
             temp = self.chat_temperature
             top_p = self.chat_top_p
 
@@ -1699,6 +1718,7 @@ class WeChatBot:
             return None
 
     def process_new_messages(self):
+        self._flush_memory_if_due()
         if self.paused:
             return
         if time.time() - self.last_reply_time < self.cooldown:
@@ -1764,7 +1784,10 @@ class WeChatBot:
                     return
                 if has_media and not text_content:
                     logger.info(f"🖼 判断为图片消息：{chat_name}")
-                    self._process_image(chat_name, sender, None)
+                    if not self._describe_image(chat_name):
+                        # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
+                        self._send_text("图片识别失败了，可能是什么地方出了问题呀～",
+                                        chat_name)
                     self.last_reply_time = time.time()
                     return
                 if text_content:
