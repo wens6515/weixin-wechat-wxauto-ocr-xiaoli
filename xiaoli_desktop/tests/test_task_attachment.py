@@ -92,7 +92,7 @@ class TestTextTaskNoAttachment(unittest.TestCase):
             bot = _make_bot(recv_dir=recv_dir)
             bot.wx = _FakeWx([_text_msg("王", "根据文档做个网站", "m1")])
             bot._tick_poll_outbox = lambda: None
-            bot.call_vision_api = lambda content, chat_id=None: {"kind": "tool_call",
+            bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {"kind": "tool_call",
                                                    "name": "dispatch_task",
                                                    "arguments": '{"task": "做个网站"}'}
             dispatched = []
@@ -113,7 +113,7 @@ class TestTextTaskNoAttachment(unittest.TestCase):
         bot = _make_bot()
         bot.wx = _FakeWx([_text_msg("王", "帮我做个PPT", "m2")])
         bot._tick_poll_outbox = lambda: None
-        bot.call_vision_api = lambda content, chat_id=None: {"kind": "tool_call",
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {"kind": "tool_call",
                                                "name": "dispatch_task",
                                                "arguments": '{"task": "做PPT"}'}
         dispatched = []
@@ -167,7 +167,7 @@ class TestFileTaskClassifyInput(unittest.TestCase):
         闲聊。RED 复现：旧实现传纯指令，文件名丢失。"""
         bot = _make_bot()
         got = []
-        bot.call_vision_api = lambda content, chat_id=None: got.append(content) or {
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: got.append(content) or {
             "kind": "tool_call", "name": "dispatch_task",
             "arguments": '{"task": "做网页"}'}
         bot._dispatch_and_notify = lambda *a, **k: None
@@ -198,7 +198,7 @@ class TestImageMediaDrive(unittest.TestCase):
             processed.append(chat)
             return True
 
-        bot._describe_image = _describe
+        bot._process_pure_image = _describe
         bot._send_text = lambda *a, **k: None
         bot.process_new_messages()
         self.assertTrue(processed, "媒体矩形应触发图片处理")
@@ -210,7 +210,7 @@ class TestImageMediaDrive(unittest.TestCase):
         bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")], has_media=False)
         bot._tick_poll_outbox = lambda: None
         processed = []
-        bot._describe_image = lambda chat: processed.append(1) or True
+        bot._process_pure_image = lambda chat: processed.append(1) or True
         bot._send_text = lambda *a, **k: None
         bot.process_new_messages()
         self.assertFalse(processed)
@@ -271,7 +271,7 @@ class TestFileTaskNoFileText(unittest.TestCase):
         task.json 里出现多余的 file_text 字段）。"""
         bot = _make_bot()
         dispatched = []
-        bot.call_vision_api = lambda content, chat_id=None: {"kind": "tool_call",
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {"kind": "tool_call",
                                                "name": "dispatch_task",
                                                "arguments": '{"task": "做网页"}'}
         bot._dispatch_and_notify = lambda *a, **k: dispatched.append(k)
@@ -352,7 +352,7 @@ class TestVisionRoute(unittest.TestCase):
 
     def _bot(self):
         bot = _make_bot()
-        bot.call_vision_api = lambda content, chat_id=None: {"kind": "text", "content": "好的"}
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {"kind": "text", "content": "好的"}
         bot._dispatch_and_notify = lambda *a, **k: None
         bot._add_history = lambda *a, **k: None
         bot.call_chat_ai = lambda *a, **k: "降级回复"
@@ -363,7 +363,7 @@ class TestVisionRoute(unittest.TestCase):
         """kind=tool_call → 投递天枢（纯文字任务 attachment_paths=None），
         且不发送任何回复文本。"""
         bot = self._bot()
-        bot.call_vision_api = lambda content, chat_id=None: {"kind": "tool_call",
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {"kind": "tool_call",
                                                "name": "dispatch_task",
                                                "arguments": '{"task": "做个网站"}'}
         dispatched, sent = [], []
@@ -389,7 +389,7 @@ class TestVisionRoute(unittest.TestCase):
     def test_none_falls_back_to_chat(self):
         """call_vision_api 返回 None（API 失败）→ 降级回退普通聊天回复。"""
         bot = self._bot()
-        bot.call_vision_api = lambda content, chat_id=None: None
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
         sent = []
         bot._send_text = lambda *a, **k: sent.append((a, k))
         bot._handle_text("小明", "王", "在吗", None)
@@ -403,7 +403,7 @@ class TestVisionRoute(unittest.TestCase):
         tmp.write(b"fake-jpeg-bytes")
         tmp.close()
         got = []
-        bot.call_vision_api = lambda content, chat_id=None: got.append(content) or {
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: got.append(content) or {
             "kind": "text", "content": "看到了"}
         bot._capture_latest_image = lambda chat: tmp.name
         try:
@@ -423,7 +423,7 @@ class TestVisionRoute(unittest.TestCase):
     def test_image_text_none_falls_back_to_text(self):
         """图片+文字 vision 失败（None）→ 降级回退纯文字处理（保持现状）。"""
         bot = self._bot()
-        bot.call_vision_api = lambda content, chat_id=None: None
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
         bot._capture_latest_image = lambda chat: None
         handled = []
         bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
@@ -447,7 +447,7 @@ class TestSkipBotPassing(unittest.TestCase):
 
         bot.wx = Wx(chat_msgs)
         bot._tick_poll_outbox = lambda: None
-        bot.call_vision_api = lambda content, chat_id=None: {"kind": "tool_call",
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {"kind": "tool_call",
                                                "name": "dispatch_task",
                                                "arguments": '{"task": "做个网站"}'}
         bot._dispatch_and_notify = lambda *a, **k: None
@@ -570,7 +570,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
         bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
         result = {"kind": "tool_call", "name": "dispatch_task",
                   "arguments": '{"task": "做PPT"}'}
-        bot.call_vision_api = lambda content, chat_id=None: result
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: result
         bot._vision_route("小明", "王", "做PPT")
         n_via_route = len(dispatched)
         bot._route_vision_result("小明", "王", result, img_path=None)
@@ -593,7 +593,7 @@ class TestGroupNameChain(unittest.TestCase):
         bot.wx = _FakeWx([_text_msg("哆拉A萝", "豆包有学生优惠了 @小漓", "m1")])
         bot.wx._current_is_group = True
         bot._tick_poll_outbox = lambda: None
-        bot.call_vision_api = lambda content, chat_id=None: None  # vision 降级 → 回退 call_chat_ai
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None  # vision 降级 → 回退 call_chat_ai
         calls = {}
         bot.call_chat_ai = lambda chat_id, user_msg, sender_name=None, is_group=False, multi_sender=False: \
             calls.update(chat_id=chat_id, user_msg=user_msg,
@@ -625,7 +625,7 @@ class TestGroupNameChain(unittest.TestCase):
         ])
         bot.wx._current_is_group = True
         bot._tick_poll_outbox = lambda: None
-        bot.call_vision_api = lambda content, chat_id=None: None  # vision 降级 → 回退 call_chat_ai
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None  # vision 降级 → 回退 call_chat_ai
         calls = {}
         bot.call_chat_ai = lambda chat_id, user_msg, sender_name=None, is_group=False, multi_sender=False: \
             calls.update(chat_id=chat_id, user_msg=user_msg,
@@ -670,7 +670,7 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
         bot.wx = _FakeWx(msgs)
         bot.wx._current_is_group = is_group
         bot._tick_poll_outbox = lambda: None
-        bot.call_vision_api = lambda content, chat_id=None: None  # vision 降级 → 回退 call_chat_ai
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None  # vision 降级 → 回退 call_chat_ai
         # call_chat_ai 真实执行所需属性（不 mock call_chat_ai 本身）
         bot.api_url = "https://api.test/v1/chat/completions"
         bot.api_key = "test-key"
@@ -681,6 +681,11 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
         bot.api_timeout = 5
         bot.system_prompt = "你是小漓"
         bot._model_lock = threading.RLock()
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._deep_dir = ""
         bot._get_history = lambda chat_id: []
         bot._add_history = lambda *a, **k: None
         bot._send_text = lambda *a, **k: None

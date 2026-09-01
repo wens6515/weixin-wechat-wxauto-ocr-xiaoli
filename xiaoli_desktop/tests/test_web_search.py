@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""联网搜索单测：bing/DDG HTML 解析、跳转还原、后端链回退与失败语义，
-以及 call_vision_api 的 web_search 工具循环（结果回填/任务优先/次数封顶/失败降级）。"""
+"""联网搜索单测：多引擎 HTML 解析（百度/搜狗 h3 块、bing/DDG）、并发合并语义
+（优先级去重/单源降级/兜底链/失败抛错），以及 call_vision_api 的 web_search
+工具循环（结果回填/任务优先/次数封顶/失败降级）。"""
 import base64
 import threading
 import unittest
@@ -32,6 +33,27 @@ DDG_HTML = """
 <h2 class="result__title"><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fnews&amp;rut=abc">头条新闻</a></h2>
 <a class="result__snippet" href="//duckduckgo.com/l/?uddg=x">今天发生了一件大事</a>
 </div>
+</body></html>
+"""
+
+# 百度：h3 结果块 + /link?url= 重定向 + 摘要 + 内部链接应过滤
+BAIDU_HTML = """
+<html><body>
+<div class="result c-container"><h3 class="c-title"><a href="http://www.baidu.com/link?url=abc" target="_blank">唐勇-经济与管理学院</a></h3>
+<span class="c-abstract">毕业于天津大学，现为福州大学金融学教授。</span>
+<span>https://jgxy.fzu.edu.cn/i... 2023-06-16</span></div>
+<div class="result c-container"><h3 class="c-title"><a href="https://baike.baidu.com/item/x">唐勇 百度百科</a></h3>
+<span class="c-abstract">福州大学经济与管理学院教师。</span></div>
+<div class="result c-container"><h3><a href="https://www.baidu.com/s?wd=next">站内搜索</a></h3>
+<span>内部链接应被过滤</span></div>
+</body></html>
+"""
+
+# 搜狗：相对 /link?url= 需 urljoin 补全
+SOGOU_HTML = """
+<html><body>
+<div class="vrwrap"><h3><a href="/link?url=xyz">唐勇 -经济与管理 学院</a></h3>
+毕业于天津大学原管理学院，现为福州大学金融学教授。 福州大学 https://jgxy.fzu.edu.cn/i... 2023-06-16 推荐您搜索</div>
 </body></html>
 """
 
@@ -80,21 +102,108 @@ class TestDdgParse(unittest.TestCase):
         self.assertEqual(results[0]["snippet"], "今天发生了一件大事")
 
 
-class TestBackendChain(unittest.TestCase):
-    def test_bing_error_falls_to_ddg(self):
+class TestBaiduSogouParse(unittest.TestCase):
+    def test_baidu_h3_blocks_redirect_and_filter(self):
         def fake_get(url, **kwargs):
-            if "bing.com" in url:
-                raise ws.requests.ConnectionError("boom")
-            return _resp(DDG_HTML)
+            self.assertIn("baidu.com", url)
+            return _resp(BAIDU_HTML)
         with mock.patch.object(ws.requests, "get", side_effect=fake_get):
-            results = ws.web_search("q")
-        self.assertEqual(results[0]["url"], "https://example.com/news")
+            results = ws.web_search("福州大学 唐勇", backends=("baidu",))
+        self.assertEqual(len(results), 2)  # baidu /s 内部链接被过滤
+        self.assertEqual(results[0]["title"], "唐勇-经济与管理学院")
+        self.assertEqual(results[0]["url"], "http://www.baidu.com/link?url=abc")
+        self.assertEqual(results[0]["source"], "baidu")
+        self.assertIn("福州大学金融学教授", results[0]["snippet"])
+        # 摘要截掉展示网址/日期噪声
+        self.assertNotIn("jgxy.fzu", results[0]["snippet"])
 
-    def test_bing_empty_falls_to_ddg(self):
-        fake = _bing_ddg_fake_get("<html><body></body></html>", DDG_HTML)
-        with mock.patch.object(ws.requests, "get", side_effect=fake):
-            results = ws.web_search("q")
-        self.assertEqual(results[0]["url"], "https://example.com/news")
+    def test_sogou_relative_link_urljoined(self):
+        with mock.patch.object(ws.requests, "get",
+                               return_value=_resp(SOGOU_HTML)):
+            results = ws.web_search("福州大学 唐勇", backends=("sogou",))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"],
+                         "https://www.sogou.com/link?url=xyz")
+        self.assertIn("金融学教授", results[0]["snippet"])
+        self.assertNotIn("推荐您搜索", results[0]["snippet"])
+
+    def test_baidu_verification_page_yields_empty(self):
+        # 安全验证页：200 + 无 h3 结果块 → 空结果自然降级（不抛错）
+        with mock.patch.object(ws.requests, "get",
+                               return_value=_resp("<html><body>百度安全验证</body></html>")):
+            self.assertEqual(ws.web_search("q", backends=("baidu",)), [])
+
+
+class TestParallelMerge(unittest.TestCase):
+    """并发合并语义：优先级顺序 + 去重 + 单源降级 + 兜底链 + 失败抛错。"""
+
+    def _patch_backends(self, fakes):
+        # clear=True 完全接管后端表——未打桩的真实引擎不参与（否则测试
+        # 会发真网络请求）
+        return mock.patch.dict(ws._BACKENDS, fakes, clear=True)
+
+    def test_merge_priority_order_and_dedupe(self):
+        fakes = {
+            "baidu": lambda q, c: [{"title": "A", "url": "https://a", "snippet": ""}],
+            "bing": lambda q, c: [{"title": "B", "url": "https://b", "snippet": ""}],
+            "sogou": lambda q, c: [{"title": "A", "url": "https://a2", "snippet": ""}],
+        }
+        with self._patch_backends(fakes):
+            out = ws.web_search("q")
+        self.assertEqual([r["source"] for r in out], ["baidu", "bing"])  # 同题去重
+
+    def test_blocked_source_degrades_to_others(self):
+        # 百度被安全验证拦截（空）→ 必应/搜狗照常补位
+        fakes = {
+            "baidu": lambda q, c: [],
+            "bing": lambda q, c: [{"title": "B", "url": "https://b", "snippet": "s"}],
+            "sogou": lambda q, c: [{"title": "C", "url": "https://c", "snippet": ""}],
+        }
+        with self._patch_backends(fakes):
+            out = ws.web_search("q")
+        self.assertEqual([r["source"] for r in out], ["sogou", "bing"])  # 优先级：搜狗在必应前
+
+    def test_parallel_error_degrades_to_other_sources(self):
+        def boom(q, c):
+            raise ws.requests.ConnectionError("boom")
+        fakes = {
+            "baidu": boom,
+            "bing": lambda q, c: [{"title": "B", "url": "https://b", "snippet": ""}],
+        }
+        with self._patch_backends(fakes):
+            out = ws.web_search("q")
+        self.assertEqual([r["source"] for r in out], ["bing"])
+
+    def test_all_parallel_empty_falls_to_ddg(self):
+        fakes = {
+            "baidu": lambda q, c: [],
+            "bing": lambda q, c: [],
+            "sogou": lambda q, c: [],
+            "duckduckgo": lambda q, c: [{"title": "D", "url": "https://d", "snippet": ""}],
+        }
+        with self._patch_backends(fakes):
+            out = ws.web_search("q")
+        self.assertEqual([r["source"] for r in out], ["duckduckgo"])
+
+    def test_fallback_excluded_when_in_primary_chain(self):
+        # backends 里已含 ddg 时不重复兜底
+        fakes = {"duckduckgo": lambda q, c: [{"title": "D", "url": "https://d", "snippet": ""}]}
+        with self._patch_backends(fakes):
+            out = ws.web_search("q", backends=("duckduckgo",))
+        self.assertEqual(len(out), 1)
+
+    def test_merged_results_capped_to_count(self):
+        fakes = {
+            "baidu": lambda q, c: [{"title": f"a{i}", "url": f"https://a{i}",
+                                    "snippet": ""} for i in range(5)],
+            "bing": lambda q, c: [{"title": f"b{i}", "url": f"https://b{i}",
+                                   "snippet": ""} for i in range(5)],
+            "sogou": lambda q, c: [],
+        }
+        with self._patch_backends(fakes):
+            out = ws.web_search("q")
+        self.assertEqual(len(out), ws.MAX_RESULTS)
+        self.assertEqual(out[0]["title"], "a0")
 
     def test_all_backends_error_raises(self):
         with mock.patch.object(ws.requests, "get",
@@ -103,12 +212,9 @@ class TestBackendChain(unittest.TestCase):
                 ws.web_search("q")
 
     def test_backend_responded_empty_returns_empty_list(self):
-        # bing 正常响应但无结果（其余后端异常）→ 确实没搜到，返回 [] 不抛
-        def fake_get(url, **kwargs):
-            if "bing.com" in url:
-                return _resp("<html><body></body></html>")
-            raise ws.requests.ConnectionError("boom")
-        with mock.patch.object(ws.requests, "get", side_effect=fake_get):
+        # 主链全部响应但无结果、兜底也响应无结果 → 确实没搜到，返回 [] 不抛
+        with mock.patch.object(ws.requests, "get",
+                               return_value=_resp("<html><body></body></html>")):
             self.assertEqual(ws.web_search("q"), [])
 
     def test_unknown_backend_skipped(self):
@@ -121,8 +227,10 @@ class TestBackendChain(unittest.TestCase):
 class TestFormat(unittest.TestCase):
     def test_format_with_and_without_results(self):
         text = ws.format_search_results(
-            "q", [{"title": "T", "url": "https://u", "snippet": "S"}])
+            "q", [{"title": "T", "url": "https://u", "snippet": "S",
+                   "source": "baidu"}])
         self.assertIn("1. T", text)
+        self.assertIn("（baidu）", text)
         self.assertIn("S", text)
         self.assertIn("https://u", text)
         self.assertIn("没有搜到结果", ws.format_search_results("q", []))
@@ -145,7 +253,6 @@ def make_bot():
     bot._get_history = lambda chat_id: []
     bot.vision_api_url = bot.api_url
     bot.vision_api_key = bot.api_key
-    bot.vision_temp = 0.5
     bot.vision_max_tokens = 100
     return bot
 

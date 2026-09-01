@@ -140,54 +140,54 @@ def _trim_blocks(blocks, keep):
 
 
 def fit_messages_in_budget(messages, budget=100000, reserve=2000):
-    """把 messages 裁剪到 token 预算内（从最旧历史开始丢弃）。
+    """把 messages 裁剪到 token 预算内（从最旧的非 system 消息开始丢弃）。
 
     根因：文件识别把超大文件全文拼进 prompt（实测请求 272 万 token，
     模型上限 104 万 → API 400 "maximum context length"）。
-    规则：
-    - system 消息永不丢弃（裁剪其内容到预算 20%）
-    - 历史消息从最旧开始丢，直到总 token ≤ budget - reserve
-    - 最后一条 user 消息若仍超预算，截断其内容到预算 60%
-    返回裁剪后的 messages（原列表不修改）。
+    规则（保序——消息布局是缓存优化的一部分，中途的 system（重要记忆/
+    相关记忆/当前时间）绝不能被搬到最前）：
+    - system 消息永不丢弃；单条超预算 20% 时截断其内容（人设可能很长，
+      其余 system 都很短不受影响）
+    - 非 system 消息保持相对顺序，从最旧（列表前端）开始丢弃直到 ≤ 预算
+    - 末条 user 消息（当前消息）不丢弃，仍超预算时截断内容到预算 60%
+    返回裁剪后的 messages。
     """
     budget = max(1000, budget)
     cap = max(500, budget - reserve)
-    out = []
-    total = 0
-    # system 优先保留（裁剪到预算 20%）
+    trimmed = []
     for m in messages:
         if m.get("role") == "system":
             content = str(m.get("content") or "")
-            if total + estimate_tokens(content) > max(500, budget // 5):
+            limit = max(500, budget // 5)
+            if estimate_tokens(content) > limit:
                 # 保留开头（system prompt 语义在前）
-                keep = max(500, budget // 5)
-                content = content[:keep]
-            out.append({"role": "system", "content": content})
-            total += estimate_tokens(content)
-    # 历史 + user：从最旧开始，超预算的旧消息丢弃、继续往后；
-    # 最后一条 user 若仍超限则截断（可能含文件全文/多模态块）
-    tail = [m for m in messages if m.get("role") != "system"]
-    for i, m in enumerate(tail):
-        raw = m.get("content")
-        is_blocks = isinstance(raw, list)
-        content = raw if is_blocks else str(raw or "")
-        tokens = estimate_tokens(_content_to_text(raw))
-        is_last = i == len(tail) - 1
-        if total + tokens > cap:
-            if is_last and raw:
-                # 最后一条 user（可能含文件全文/多模态块）截断到预算 60%
-                keep = max(500, int(budget * 0.6))
-                if is_blocks:
-                    content = _trim_blocks(raw, keep)
-                    tokens = estimate_tokens(_content_to_text(content))
-                else:
-                    content = content[:keep] + "[内容过长已截断]…"
-                    tokens = estimate_tokens(content)
-                out.append({"role": m.get("role", "user"), "content": content})
-                total += tokens
-            continue  # 旧消息超预算 → 丢弃该条，继续尝试更近的消息
-        out.append({"role": m.get("role", "user"), "content": content})
-        total += tokens
+                trimmed.append({"role": "system", "content": content[:limit]})
+            else:
+                trimmed.append(m)
+        else:
+            trimmed.append(m)
+    total = sum(estimate_tokens(_content_to_text(m.get("content")))
+                for m in trimmed)
+    last_idx = len(trimmed) - 1
+    for idx in range(last_idx):
+        if total <= cap:
+            break
+        m = trimmed[idx]
+        if m.get("role") == "system":
+            continue
+        total -= estimate_tokens(_content_to_text(m.get("content")))
+        trimmed[idx] = None
+    out = [m for m in trimmed if m is not None]
+    # 末条 user（当前消息，可能含文件全文/多模态块）仍超预算 → 截断到 60%
+    if out and out[-1].get("role") == "user":
+        keep = max(500, int(budget * 0.6))
+        raw = out[-1].get("content")
+        if estimate_tokens(_content_to_text(raw)) > keep:
+            if isinstance(raw, list):
+                content = _trim_blocks(raw, keep)
+            else:
+                content = str(raw or "")[:keep] + "[内容过长已截断]…"
+            out[-1] = dict(out[-1], content=content)
     return out
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
@@ -250,6 +250,19 @@ FRIENDLY_API_ERROR_REPLIES = (
 )
 
 
+# 纯图/表情消息的 vision 单调用指令（与 xiaoli_bot.VISION_ROUTE_PROMPT 同一
+# 分流语义的纯图变体：看图后角色化回复，任务材料则投递）。历史缺陷：此路径
+# 曾用旧两段式时代的 vision_prompt（「专业图像描述AI，客观复述图片」），把
+# 复述文本当角色回复原样发出——已废弃统一到角色化链路。
+VISION_IMAGE_PROMPT = (
+    "请严格遵守以上人设（包括不用 emoji、改用颜文字）。用户发来了一张图片"
+    "（没有附带文字）。请看图后直接以你的身份回复用户（可以评价、接梗、"
+    "回答图里的问题）；如果图片明显是任务材料（如文档截图、带指令的截图、"
+    "需要处理的内容），调用 dispatch_task 工具投递任务，任务描述写在工具"
+    "参数里。"
+)
+
+
 # memory 键归一化（用户定案方案 A）：OCR 对引号半/全角极不稳（'强盗”集团'
 # / '强盗"集团' / '" 强盗 " 集团' 是同一会话），原样做键会让同一会话的
 # 记忆分裂到多个条目。规则：所有引号变体（单双/半全角/弯直）与空格类
@@ -269,6 +282,112 @@ def _memory_key(chat_id):
     return re.sub(r"\s+", "", s)
 
 
+def migrate_memory_data(data):
+    """memory.json 结构迁移（v2）：{chat: {"recent": [...], "important":
+    [...], "index": [...], "indexed": N}}。
+
+    旧结构 {chat: [msgs]} 原位升级——旧消息整体作为 recent（超出 recent
+    上限的部分由启动加载流程一次性归档进深层文件）；坏数据项返回空。
+    """
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    for chat, v in data.items():
+        if isinstance(v, dict) and isinstance(v.get("recent"), list):
+            out[chat] = {
+                "recent": v["recent"],
+                "important": [x for x in (v.get("important") or [])
+                              if isinstance(x, dict)],
+                "index": [x for x in (v.get("index") or [])
+                          if isinstance(x, dict)],
+                "indexed": int(v.get("indexed") or 0),
+            }
+        elif isinstance(v, list):
+            out[chat] = {"recent": v, "important": [], "index": [], "indexed": 0}
+    return out
+
+
+# ---------- 深层文件级操作（bot 未运行时 UI 直读/直删走这里，与 bot 方法共用） ----------
+
+def deep_count_lines(path):
+    """深层 jsonl 有效行数（坏行不计）。文件缺失返回 0。"""
+    n = 0
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("{"):
+                    n += 1
+    except OSError:
+        return 0
+    return n
+
+
+def deep_read_page(path, offset=0, limit=200, query=None):
+    """深层 jsonl 分页/过滤读取。
+
+    query 非空：全量按内容子串（不区分大小写）过滤，返回 (命中列表截
+    200 条, 命中总数)；否则返回 (第 offset 页的 ≤limit 条, None)。
+    """
+    msgs = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(item, dict):
+                    msgs.append(item)
+    except OSError:
+        return [], None
+    if query:
+        q = str(query).lower()
+        hits = [m for m in msgs if q in str(m.get("content") or "").lower()]
+        return hits[:200], len(hits)
+    return msgs[offset:offset + limit], None
+
+
+def deep_delete_line(path, line_no):
+    """删除深层 jsonl 第 line_no（1 基，按文件序=时间正序）行。
+
+    tmp + replace 原子重写。返回 (被删消息, 新有效行数)；行号越界/
+    文件缺失/重写失败返回 (None, 原行数)。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return None, 0
+    kept, removed, n = [], None, 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or not stripped.startswith("{"):
+            kept.append(line)  # 坏行原样保留
+            continue
+        n += 1
+        if n == line_no:
+            try:
+                removed = json.loads(stripped)
+            except ValueError:
+                pass
+            continue
+        kept.append(line)
+    if removed is None:
+        return None, n
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+        os.replace(tmp, path)
+    except OSError as e:
+        logger.error(f"[记忆] 深层文件重写失败: {e}")
+        return None, n
+    return removed, n - 1
+
+
 def load_config(path="config.json"):
     default_cfg = {
         "bot_nickname": "小漓",
@@ -277,7 +396,6 @@ def load_config(path="config.json"):
         "chat_model": "deepseek:deepseek-v4-flash",
         "chat_temperature": 0.7,
         "chat_top_p": 0.9,
-        "vision_prompt": "你是一个专业的图像描述AI。请详细、客观地描述这张图片的内容，包括主要物体、人物动作、表情、场景氛围、文字信息等。不要加入主观评价或建议，只输出观察到的客观事实。描述语言简洁但信息丰富，但是一定要详细描述图片的每一个内容，方便后续处理。",
         "system_prompt": AI_DEFAULTS["system_prompt"],
         "max_history": 1000,
         "cooldown": 3,
@@ -385,13 +503,11 @@ class WeChatBot:
         self.chat_model = strip_model_prefix(cfg["chat_model"])
         self.chat_temperature = cfg.get("chat_temperature", 0.7)
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
-        # 单模型化后视觉模型统一用 chat_model；vision_temp/vision_max_tokens
-        # 数据层已删键（AI_DEFAULTS/default_cfg），此处 get 内置默认兜底（禁止 KeyError）
-        self.vision_temp = cfg.get("vision_temp", 0.7)
+        # 单模型化后视觉调用随聊天链路：模型取 chat_model、温度取
+        # chat_temperature、system 取 system_prompt（vision_prompt/vision_temp
+        # 已随「图片复述」路径废弃删除）；vision_max_tokens 保留为视觉
+        # max_tokens 独立上限（数据层已删键，此处 get 内置默认兜底）
         self.vision_max_tokens = cfg.get("vision_max_tokens", 10000)
-        # cfg.get 兜底：config_store 统一补默认（AI_DEFAULTS），此处防御
-        # 任何调用方缺键（历史缺陷：新结构 config 缺 vision_prompt → KeyError）
-        self.vision_prompt = cfg.get("vision_prompt", AI_DEFAULTS["vision_prompt"])
         self.system_prompt = cfg.get("system_prompt", AI_DEFAULTS["system_prompt"])
         self.max_history = cfg.get("max_history", AI_DEFAULTS["max_history"])
         self.cooldown = cfg.get("cooldown", AI_DEFAULTS["cooldown"])
@@ -404,6 +520,23 @@ class WeChatBot:
         self.wechat_window_rect = cfg.get("wechat_window_rect", None)
         self.paused = cfg.get("start_paused", True)
         self.memory_file = cfg.get("memory_file", "memory.json")
+        # 长记忆（v2）配置：recent 只保留 memory_keep_recent 条，溢出消息
+        # append 进 memory_deep/<聊天>.jsonl 永不删除（深层记忆，recall_memory
+        # 工具按需检索）；压缩 = 每攒满 memory_compress_batch 条深层消息调
+        # 压缩模型提炼「重要记忆（常驻上下文）+ 关键词索引（命中时注入）」。
+        # 压缩调用由后台线程（AgentBot 的 MemoryCompressor）执行，所有
+        # memory_db/深层文件读写经 _memory_lock 串行化。
+        self.memory_deep_enabled = bool(cfg.get("memory_deep_enabled", True))
+        self.memory_compress_enabled = bool(cfg.get("memory_compress_enabled", False))
+        self.memory_keep_recent = max(5, int(cfg.get("memory_keep_recent", 30)))
+        self.memory_compress_batch = max(5, int(cfg.get("memory_compress_batch", 30)))
+        self.memory_important_max = max(3, int(cfg.get("memory_important_max", 20)))
+        self.memory_compress_model = strip_model_prefix(
+            cfg.get("memory_compress_model", "") or "")
+        self._deep_dir = os.path.join(
+            os.path.dirname(os.path.abspath(self.memory_file)) or ".", "memory_deep")
+        self._deep_count = {}   # chat -> 深层文件行数（追加时维护，启动时清点）
+        self._memory_lock = threading.RLock()
         # 文件处理配置
         self.file_model = strip_model_prefix(cfg.get("file_model", self.chat_model))
         self.file_temp = cfg.get("file_temp", 1.0)
@@ -445,21 +578,29 @@ class WeChatBot:
         with self._model_lock:
             self.chat_top_p = float(value)
 
-    def set_vision_temperature(self, value):
-        with self._model_lock:
-            self.vision_temp = float(value)
-
     def _load_memory(self):
         if os.path.exists(self.memory_file):
             try:
                 with open(self.memory_file, "r", encoding="utf-8") as f:
-                    self.memory_db = json.load(f)
-                for chat in self.memory_db:
-                    if len(self.memory_db[chat]) > self.max_history:
-                        self.memory_db[chat] = self.memory_db[chat][-self.max_history:]
+                    self.memory_db = migrate_memory_data(json.load(f))
             except Exception as e:
                 logger.error(f"加载记忆失败: {e}，将使用空白记忆")
                 self.memory_db = {}
+        # 启动一次性溢出搬运：v1 迁移来的长历史超出 recent 上限的部分
+        # 全部归档进深层文件（永不删除）；同时建立深层行数计数
+        cap = self._recent_cap()
+        for chat, st in self.memory_db.items():
+            if len(st["recent"]) > cap:
+                for msg in st["recent"][:-cap]:
+                    self._append_deep(chat, msg)
+                st["recent"] = st["recent"][-cap:]
+            self._deep_count[chat] = self._count_deep(chat)
+
+    def _recent_cap(self):
+        """近期记忆保留条数：memory_keep_recent 与 max_history 取小
+        （角色卡 max_history 若被用户调小仍然生效）。"""
+        return max(5, min(int(getattr(self, "memory_keep_recent", 30)),
+                          int(getattr(self, "max_history", 1000))))
 
     def _save_memory(self):
         try:
@@ -544,22 +685,303 @@ class WeChatBot:
         else:
             logger.warning("[定位] 微信窗口定位失败，保持当前位置")
 
+    def _chat_state(self, chat_id):
+        """取（或创建）聊天的 v2 记忆状态 {recent, important, index, indexed}。
+        调用方必须已持 _memory_lock。"""
+        st = self.memory_db.get(chat_id)
+        if st is None:
+            st = {"recent": [], "important": [], "index": [], "indexed": 0}
+            self.memory_db[chat_id] = st
+        return st
+
     def _get_history(self, chat_id):
+        """近期记忆（注入上下文的 recent 窗口）。深层历史不在此列——由
+        recall_memory 工具按需检索。"""
         chat_id = _memory_key(chat_id)
-        if chat_id not in self.memory_db:
-            self.memory_db[chat_id] = []
-        return self.memory_db[chat_id]
+        with self._memory_lock:
+            return self._chat_state(chat_id)["recent"]
 
     def _add_history(self, chat_id, role, content):
-        hist = self._get_history(chat_id)
-        hist.append({
-            "role": role,
-            "content": content,
-            "time": time.strftime("%Y-%m-%d %H:%M:%S")
-        })
-        if len(hist) > self.max_history:
-            self.memory_db[chat_id] = hist[-self.max_history:]
-        self._schedule_save_memory()
+        chat_id = _memory_key(chat_id)
+        with self._memory_lock:
+            st = self._chat_state(chat_id)
+            st["recent"].append({
+                "role": role,
+                "content": content,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S")
+            })
+            cap = self._recent_cap()
+            while len(st["recent"]) > cap:
+                # 溢出归档：深层记忆启用时写入 memory_deep/ 永久保存，
+                # 未启用则与旧行为一致（超出窗口即丢弃）
+                self._append_deep(chat_id, st["recent"].pop(0))
+            self._schedule_save_memory()
+
+    # ---------- 深层记忆（memory_deep/<chat>.jsonl，append-only 永不删除） ----------
+
+    def _deep_path(self, chat_id):
+        """深层记忆文件路径：聊天名 percent-encode（文件名安全且可逆）。"""
+        from urllib.parse import quote
+        return os.path.join(self._deep_dir, quote(chat_id, safe="") + ".jsonl")
+
+    def _append_deep(self, chat_id, msg):
+        """一条消息溢出 recent 时归档进深层文件（启用深层记忆才写）。"""
+        if not getattr(self, "memory_deep_enabled", False):
+            return
+        try:
+            os.makedirs(self._deep_dir, exist_ok=True)
+            with open(self._deep_path(chat_id), "a", encoding="utf-8") as f:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            self._deep_count[chat_id] = self._deep_count.get(chat_id, 0) + 1
+        except Exception as e:
+            logger.error(f"[记忆] 深层写入失败: {e}")
+
+    def _count_deep(self, chat_id):
+        """清点深层文件行数（启动时建立计数基线；坏行跳过不计数）。"""
+        n = 0
+        try:
+            with open(self._deep_path(chat_id), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and line.startswith("{"):
+                        n += 1
+        except OSError:
+            return 0
+        return n
+
+    def _iter_deep(self, chat_id):
+        """按序读取深层文件全部消息（坏行跳过）。"""
+        try:
+            with open(self._deep_path(chat_id), "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(item, dict):
+                        yield item
+        except OSError:
+            return
+
+    def _read_deep_range(self, chat_id, start, count):
+        """读取深层文件 [start, start+count) 区间的消息（压缩线程取待压缩段）。
+        返回 (消息列表, 实际区间终点)：文件行数少于预期（文件被外部改动）
+        时按实际返回。"""
+        out = []
+        for i, msg in enumerate(self._iter_deep(chat_id)):
+            if i < start:
+                continue
+            out.append(msg)
+            if len(out) >= count:
+                break
+        return out, start + len(out)
+
+    def _clear_deep(self, chat_id=None):
+        """删除深层记忆文件（清空记忆时联动；chat_id=None 清全部）。"""
+        try:
+            if chat_id:
+                paths = [self._deep_path(chat_id)]
+            else:
+                paths = [os.path.join(self._deep_dir, n)
+                         for n in os.listdir(self._deep_dir)
+                         if n.endswith(".jsonl")] if os.path.isdir(self._deep_dir) else []
+            for p in paths:
+                if os.path.isfile(p):
+                    os.remove(p)
+        except OSError as e:
+            logger.error(f"[记忆] 深层清理失败: {e}")
+        if chat_id:
+            self._deep_count.pop(chat_id, None)
+        else:
+            self._deep_count.clear()
+
+    # ---------- recall_memory 工具：深层 + 近期记忆关键词检索 ----------
+
+    def _recall_memory(self, chat_id, query):
+        """在本聊天的全部记忆（深层存档 + 近期窗口）中按关键词检索。
+        返回给模型的可读文本（带时间戳的命中消息列表）。"""
+        if not getattr(self, "memory_deep_enabled", False):
+            return "深层记忆未启用，无法检索历史"
+        chat_id = _memory_key(chat_id)
+        terms = [t for t in re.split(r"[\s，。！？、：；\"'（）()\[\]【】]+",
+                                     str(query or "").strip()) if t]
+        if not terms:
+            return "检索词为空，请给出人名/事件/物品等关键词"
+        terms_l = [t.lower() for t in terms]
+
+        def _hit(msg):
+            c = str(msg.get("content") or "").lower()
+            return any(t in c for t in terms_l)
+
+        with self._memory_lock:
+            hits = [m for m in self._iter_deep(chat_id) if _hit(m)]
+            hits += [m for m in self._chat_state(chat_id)["recent"] if _hit(m)]
+        if not hits:
+            return "没有找到相关记忆"
+        tail = hits[-20:]  # 最多给模型 20 条（时间最晚的优先）
+        lines = []
+        for m in tail:
+            role = "用户" if m.get("role") == "user" else "小漓"
+            lines.append(f"[{m.get('time', '')}] {role}: "
+                         f"{str(m.get('content') or '')[:150]}")
+        head = (f"共命中 {len(hits)} 条，显示最近的 {len(tail)} 条：\n"
+                if len(hits) > len(tail) else "")
+        return head + "\n".join(lines)
+
+    # ---------- 压缩产出：重要记忆（常驻注入）+ 关键词索引（命中注入） ----------
+
+    def _important_block(self, chat_id):
+        """重要记忆 system 块（无内容返回 None）。per-chat 独立 system——
+        不得并进人设消息（人设是跨聊天共享的缓存前缀）。"""
+        if not getattr(self, "memory_compress_enabled", False):
+            return None
+        st = self.memory_db.get(_memory_key(chat_id)) or {}
+        items = [str(x.get("content") or "").strip()
+                 for x in (st.get("important") or []) if isinstance(x, dict)]
+        items = [x for x in items if x]
+        if not items:
+            return None
+        return ("以下是你在与该联系人长期相处中沉淀的重要记忆，回复时遵循：\n"
+                + "\n".join(f"{i}. {c}" for i, c in enumerate(items, 1)))
+
+    def _match_related_memory(self, chat_id, user_text):
+        """关键词索引匹配：用户消息命中索引关键词时返回相关记忆注入块。"""
+        if not getattr(self, "memory_compress_enabled", False):
+            return None
+        text = str(user_text or "")
+        if not text.strip():
+            return None
+        st = self.memory_db.get(_memory_key(chat_id)) or {}
+        hits = []
+        for e in (st.get("index") or []):
+            if not isinstance(e, dict):
+                continue
+            kws = [str(k) for k in (e.get("kw") or []) if str(k).strip()]
+            mem = str(e.get("mem") or "").strip()
+            if mem and any(k in text for k in kws):
+                hits.append(mem)
+                if len(hits) >= 3:
+                    break
+        if not hits:
+            return None
+        return ("[相关记忆]（历史对话中与本次消息相关的内容，供参考）\n"
+                + "\n".join(f"- {h}" for h in hits))
+
+    def memory_commit_compression(self, chat_id, consumed, important_new, index_new):
+        """压缩线程写回：推进 indexed 边界 + 合并重要记忆/索引条目（锁内）。
+
+        consumed：本次已压缩到的深层行数（绝对值）；important_new：
+        [{"content": ...}]；index_new：[{"kw": [...], "mem": ...}]。
+        条目超上限时裁掉最旧的（重要记忆上限 memory_important_max，
+        索引上限 300——索引只增会让注入匹配越来越慢且陈旧）。"""
+        chat_id = _memory_key(chat_id)
+        with self._memory_lock:
+            st = self._chat_state(chat_id)
+            st["indexed"] = max(int(st.get("indexed") or 0), int(consumed))
+            for item in important_new:
+                if isinstance(item, dict) and str(item.get("content") or "").strip():
+                    item = dict(item, time=time.strftime("%Y-%m-%d %H:%M:%S"))
+                    st["important"].append(item)
+            limit = int(getattr(self, "memory_important_max", 20))
+            st["important"] = st["important"][-limit:]
+            for item in index_new:
+                if isinstance(item, dict) \
+                        and [k for k in (item.get("kw") or []) if str(k).strip()] \
+                        and str(item.get("mem") or "").strip():
+                    st["index"].append(item)
+            st["index"] = st["index"][-300:]
+            self._schedule_save_memory()
+
+    # ---------- 记忆管理页的数据通道（运行中经 engine.bot 调用；全部持锁） ----------
+
+    def memory_overview(self):
+        """全部聊天的计数快照（UI 线程读，锁内构建）：{chat: {recent, deep,
+        important, index}}。deep 取 _deep_count（深层文件有效行数）。"""
+        with self._memory_lock:
+            out = {}
+            for chat, st in self.memory_db.items():
+                out[chat] = {
+                    "recent": len(st.get("recent") or []),
+                    "deep": int(self._deep_count.get(chat, 0)),
+                    "important": len(st.get("important") or []),
+                    "index": len(st.get("index") or []),
+                }
+            return out
+
+    def memory_detail(self, chat_id, deep_offset=0, deep_limit=200,
+                      deep_query=None):
+        """单聊天详情快照（锁内拷贝，UI 展示用）。
+
+        deep_query 非空：深层全量过滤，deep 截 200 条 + deep_matched 总数；
+        否则深层返回第 deep_offset 页（deep_limit 条），deep_matched=None。"""
+        chat_id = _memory_key(chat_id)
+        with self._memory_lock:
+            st = self.memory_db.get(chat_id) or {}
+            deep_total = int(self._deep_count.get(chat_id, 0))
+            deep_matched = None
+            if deep_query:
+                q = str(deep_query).lower()
+                hits = [dict(m) for m in self._iter_deep(chat_id)
+                        if q in str(m.get("content") or "").lower()]
+                deep_matched = len(hits)
+                deep = hits[:200]
+            else:
+                deep = []
+                for i, m in enumerate(self._iter_deep(chat_id)):
+                    if i >= deep_offset and len(deep) < deep_limit:
+                        deep.append(dict(m))
+            return {
+                "recent": [dict(m) for m in (st.get("recent") or [])],
+                "important": [dict(m) for m in (st.get("important") or [])],
+                "index": [dict(m) for m in (st.get("index") or [])],
+                "deep_total": deep_total,
+                "deep": deep,
+                "deep_matched": deep_matched,
+            }
+
+    def delete_important(self, chat_id, idx):
+        """删除第 idx（1 基）条重要记忆。返回是否删除。"""
+        chat_id = _memory_key(chat_id)
+        with self._memory_lock:
+            st = self._chat_state(chat_id)
+            if 1 <= idx <= len(st["important"]):
+                st["important"].pop(idx - 1)
+                self._schedule_save_memory()
+                return True
+            return False
+
+    def delete_index_entry(self, chat_id, idx):
+        """删除第 idx（1 基）条关键词索引。返回是否删除。"""
+        chat_id = _memory_key(chat_id)
+        with self._memory_lock:
+            st = self._chat_state(chat_id)
+            if 1 <= idx <= len(st["index"]):
+                st["index"].pop(idx - 1)
+                self._schedule_save_memory()
+                return True
+            return False
+
+    def delete_deep_message(self, chat_id, line_no):
+        """删除深层存档第 line_no（1 基，时间正序）条消息。
+
+        深层文件原子重写；行号落在压缩边界 indexed 之前时 indexed 同步
+        -1（边界按行数推进，少一行必须回退，否则下轮压缩错位跳过一条）。
+        返回是否删除。"""
+        chat_id = _memory_key(chat_id)
+        with self._memory_lock:
+            st = self._chat_state(chat_id)
+            removed, new_count = deep_delete_line(self._deep_path(chat_id),
+                                                  line_no)
+            if removed is None:
+                return False
+            self._deep_count[chat_id] = new_count
+            if line_no - 1 < int(st.get("indexed") or 0):
+                st["indexed"] = int(st["indexed"]) - 1
+            self._schedule_save_memory()
+            return True
 
     def _schedule_save_memory(self):
         """节流写盘：距上次写盘 ≥1s 立即写，否则只标记脏。
@@ -589,34 +1011,40 @@ class WeChatBot:
             self._save_memory()
 
     def clear_history(self, chat_id=None):
-        if chat_id:
-            self.memory_db.pop(_memory_key(chat_id), None)
-            logger.info(f"已清空聊天 {chat_id} 的历史")
-        else:
-            self.memory_db.clear()
-            logger.info("已清空全部对话历史")
-        self._save_memory()
+        with self._memory_lock:
+            if chat_id:
+                key = _memory_key(chat_id)
+                self.memory_db.pop(key, None)
+                self._clear_deep(key)
+                logger.info(f"已清空聊天 {chat_id} 的历史（含深层记忆）")
+            else:
+                self.memory_db.clear()
+                self._clear_deep()
+                logger.info("已清空全部对话历史（含深层记忆）")
+            self._save_memory()
 
     def delete_messages(self, chat_id, indices):
         chat_id = _memory_key(chat_id)
-        if chat_id not in self.memory_db:
-            logger.warning(f"❌ 聊天 {chat_id} 不存在于记忆中")
-            return False
-        hist = self.memory_db[chat_id]
-        total = len(hist)
-        to_delete = []
-        for idx in indices:
-            if 1 <= idx <= total:
-                to_delete.append(idx - 1)
-            else:
-                logger.warning(f"序号 {idx} 超出范围（1-{total}），已忽略")
-        if not to_delete:
-            return False
-        to_delete = sorted(set(to_delete), reverse=True)
-        deleted_msgs = []
-        for i in to_delete:
-            deleted_msgs.append(hist.pop(i))
-        self._save_memory()
+        with self._memory_lock:
+            st = self.memory_db.get(chat_id)
+            if st is None:
+                logger.warning(f"❌ 聊天 {chat_id} 不存在于记忆中")
+                return False
+            hist = st["recent"]
+            total = len(hist)
+            to_delete = []
+            for idx in indices:
+                if 1 <= idx <= total:
+                    to_delete.append(idx - 1)
+                else:
+                    logger.warning(f"序号 {idx} 超出范围（1-{total}），已忽略")
+            if not to_delete:
+                return False
+            to_delete = sorted(set(to_delete), reverse=True)
+            deleted_msgs = []
+            for i in to_delete:
+                deleted_msgs.append(hist.pop(i))
+            self._save_memory()
         logger.info(f"已从聊天 {chat_id} 中删除 {len(deleted_msgs)} 条消息")
         for msg in deleted_msgs:
             role = "用户" if msg["role"] == "user" else "小漓"
@@ -733,7 +1161,7 @@ class WeChatBot:
         except Exception as e:
             logger.debug(f"[用量] 记录失败: {e}")
 
-    def call_vision_api(self, content, chat_id=None):
+    def call_vision_api(self, content, chat_id=None, related_memory=None):
         """单调用视觉识别（OpenAI 兼容 / chat.completions）。
 
         content：块列表 list[dict]，格式
@@ -741,27 +1169,27 @@ class WeChatBot:
            {"type": "image_url", "image_url": {"url": "data:image/..."}}]
         图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
         消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
-        带图返回 400）。人设（self.system_prompt）前置为 system 纯文本消息
-        （空人设则不插入人设 system 消息）；其后无条件追加「当前时间：」system
-        消息（逐字对齐 call_chat_ai：time.strftime('%Y-%m-%d %H:%M:%S')；
-        persona 为空时本条保证 messages 至少一条 system，消除空 messages 隐患）。
-        图片绝不放 system。
+        带图返回 400）。消息布局（缓存友好：稳定前缀在前、每轮变化区在尾）：
+          [system 人设] → [system 重要记忆] → [历史(带[ts])] →
+          [system 相关记忆] → [system 当前时间] → [user content]
+        人设（self.system_prompt）前置为 system 纯文本消息（空人设则不插入人设
+        system 消息）；重要记忆/相关记忆来自长记忆压缩产出（per-chat，未启用
+        或无内容时缺省）；「当前时间」system 紧贴当前消息——它每秒变化，绝不能
+        插在历史之前打断缓存前缀。
 
-        chat_id 可选（默认 None）：非空时在 system（人设 + 当前时间）之后、
-        最后 user 多模态块之前注入 _get_history(chat_id) 历史（语义逐字对齐
-        call_chat_ai：有 time 字段带 [ts] 前缀，否则原文；不重排，
-        _get_history 已按时间有序）。为空时仍注入当前时间 system
-        （图片/文件描述路径自动受益）。
+        chat_id 可选（默认 None）：非空时注入重要记忆块与 _get_history(chat_id)
+        近期历史（语义逐字对齐 call_chat_ai：有 time 字段带 [ts] 前缀，否则
+        原文；不重排）。为空时仍注入当前时间 system（图片/文件描述路径自动
+        受益；persona 为空时本条保证 messages 至少一条 system）。
 
-        payload 声明 dispatch_task / web_search / web_fetch 工具
-        （tool_choice=auto，AgentBot 另有 set_reminder）。web_search/
-        web_fetch 是工具循环：模型调用后本方法执行搜索（bing/DDG 抓取链）
-        或抓取网页正文（见 xiaoli_app/web_search），把结果作为 tool 消息
-        回填、继续补全，直到给出最终答复。整个调用最多 VISION_TOOL_ROUNDS
-        次补全，循环耗尽仍未收敛返回 None（调用方降级）。
-        dispatch_task/set_reminder 调用优先原样返回（既有单次语义不变，
-        搜索/抓取不往返延迟任务投递）。工具往返只存在于本次调用的
-        messages，不写入对话历史。
+        payload 声明 dispatch_task / set_reminder / recall_memory / web_search /
+        web_fetch 工具（tool_choice=auto）。web_search/web_fetch/recall_memory
+        是查询型工具循环：模型调用后本方法执行（搜索/抓正文/记忆检索），把
+        结果作为 tool 消息回填、继续补全，直到给出最终答复。整个调用最多
+        VISION_TOOL_ROUNDS 次补全，循环耗尽仍未收敛返回 None（调用方降级）。
+        dispatch_task/set_reminder 调用优先原样返回（既有单次语义不变，查询
+        往返不延迟任务投递）。工具往返只存在于本次调用的 messages，不写入
+        对话历史。
 
         返回结构化结果（供上层按 dict 处理）：
         - message.tool_calls 含 dispatch_task/set_reminder →
@@ -771,16 +1199,13 @@ class WeChatBot:
         - 非 200 / 无 choices / content 空白 / 循环耗尽 → None
         """
         headers = {"Authorization": f"Bearer {self.vision_api_key}", "Content-Type": "application/json"}
-        # 方案二：人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
-        # 只能进 user 消息）；persona 为空时不插入空 system 消息（防空消息 400，
-        # 当前时间 system 保证 messages 至少一条）。
+        # 人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
+        # 只能进 user 消息）；persona 为空时不插入空 system 消息。
         persona = (getattr(self, "system_prompt", "") or "").strip()
         messages = [{"role": "system", "content": persona}] if persona else []
-        # 当前时间 system：无条件注入（与 chat_id 无关、persona 为空也注入），
-        # 逐字对齐 call_chat_ai 的 time.strftime("%Y-%m-%d %H:%M:%S") 格式；
-        # persona 为空时本条保证 messages 至少一条 system，消除空 messages 隐患。
-        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
+        important = self._important_block(chat_id) if chat_id else None
+        if important:
+            messages.append({"role": "system", "content": important})
         if chat_id:
             # 历史注入：语义逐字对齐 call_chat_ai（system 之后、user 之前；
             # 有 time 字段带 [ts] 前缀，否则原文；不重排——_get_history 返回
@@ -792,12 +1217,20 @@ class WeChatBot:
                 else:
                     msg_content = h['content']
                 messages.append({"role": h["role"], "content": msg_content})
+        if related_memory:
+            messages.append({"role": "system", "content": related_memory})
+        # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
+        # 插在历史前会打断缓存前缀）；persona 为空时本条保证 messages 至少
+        # 一条 system，消除空 messages 隐患。
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
         messages.append({"role": "user", "content": content})
         with self._model_lock:
             # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
-            # 空则兜底 vision-exp 纯名（防空 model / 带前缀兜底 → API 400）
+            # 空则兜底 vision-exp 纯名（防空 model / 带前缀兜底 → API 400）；
+            # 温度随聊天温度（vision_temp 已删）
             model = self.chat_model or VISION_MODEL_DEFAULT
-            temp = self.vision_temp
+            temp = self.chat_temperature
         # 上下文预算裁剪：超长历史/文件全文会撑爆模型上下文上限
         # （实测请求 272 万 token → API 400 "maximum context length"）。
         # 逐字对齐 call_chat_ai：从最旧历史开始丢弃，保证单次请求不超模型上下文。
@@ -840,24 +1273,29 @@ class WeChatBot:
                     },
                 },
             })
-        # 联网搜索工具（零配置：bing/DDG 抓取链，见 xiaoli_app/web_search）。
-        # query 描述写明真机校准的措辞规则：cn.bing.com 对空格分词/堆修饰词
-        # 的中文查询会降级成不相关的百科实体结果，紧凑连写短语才命中正常。
+        # 联网搜索工具（零配置：百度/必应/搜狗并发合并，见 xiaoli_app/web_search）。
+        # query 描述写明真机校准的措辞规则：多个主体用空格分开（百度/搜狗对
+        # 「机构 人名」式查询精准命中，cn.bing 反而会分词失败）；并给出结果
+        # 无关时的换措辞重试策略——模型拿到垃圾结果只会硬答或放弃是此前
+        # 搜索「不精确」的主因之一。
         tools.append({
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "联网搜索。需要实时信息（天气/新闻/价格/赛事结果等）"
-                               "或拿不准的事实时调用。query 一次只查一个主题，用紧凑"
-                               "的连写短语（如「福州天气」「北京今天天气」），不要用"
-                               "空格分词、不要堆修饰词（实时/气温/降雨等）——多词中文"
-                               "查询必应会返回不相关的百科结果",
+                "description": "联网搜索（百度/必应/搜狗多引擎）。需要实时信息"
+                               "（天气/新闻/价格/赛事结果等）或拿不准的事实时调用。"
+                               "query 一次只查一个主题，用简短中文短语，多个主体用"
+                               "空格分开（如「福州天气」「福州大学 唐勇」），不要堆"
+                               "修饰词。若返回结果与查询主题明显无关（如搜人名得到"
+                               "无关实体），换措辞再搜一次：调整词序、增删限定词"
+                               "（如加「教授」「简介」）或改用更具体的表述",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string",
-                                  "description": "连写短语式搜索词，一次一个主题"
-                                                 "（如「福州天气」），勿加空格修饰词"},
+                                  "description": "简短中文短语，一次一个主题，"
+                                                 "多个主体用空格分开"
+                                                 "（如「福州天气」「福州大学 唐勇」）"},
                     },
                     "required": ["query"],
                 },
@@ -881,6 +1319,28 @@ class WeChatBot:
                 },
             },
         })
+        # 深层记忆检索工具：仅启用深层记忆且有聊天上下文时声明——模型在
+        # 「用户提到过去的事但自己记不清」时主动调用，避免凭空编造
+        if chat_id and getattr(self, "memory_deep_enabled", False):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "recall_memory",
+                    "description": "在本聊天的全部历史记忆中检索（包括很久以前的"
+                                   "对话存档）。当用户提到过去聊过的事、之前的约定"
+                                   "或承诺、或问你记不记得某件事而你一时想不起来时"
+                                   "调用，不要凭空编造",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string",
+                                      "description": "检索关键词，如人名/事件/物品名"
+                                                     "（可给多个，空格分开）"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            })
         payload = {
             "model": model,
             "messages": messages,
@@ -909,10 +1369,12 @@ class WeChatBot:
                     # （模型偶发把注入的历史/装饰前缀复读进回复时去除）
                     content = strip_reply_prefix(content)
                     return {"kind": "text", "content": content}
-                # 任务/提醒工具调用优先原样返回（既有单次语义不变，不让搜索
-                # 往返延迟任务投递）；仅 web_search/web_fetch 回填结果继续循环
+                # 任务/提醒工具调用优先原样返回（既有单次语义不变，不让查询
+                # 工具往返延迟任务投递）；查询型工具（搜索/抓取/记忆检索）
+                # 回填结果继续循环
                 other = [tc for tc in tool_calls
-                         if _tool_call_name(tc) not in ("web_search", "web_fetch")]
+                         if _tool_call_name(tc) not in
+                         ("web_search", "web_fetch", "recall_memory")]
                 if other:
                     fn = other[0].get("function", {}) or {}
                     return {"kind": "tool_call",
@@ -925,7 +1387,8 @@ class WeChatBot:
                                  "content": message.get("content") or "",
                                  "tool_calls": tool_calls})
                 for tc in tool_calls:
-                    if _tool_call_name(tc) == "web_search":
+                    name = _tool_call_name(tc)
+                    if name == "web_search":
                         query = _tool_arg(tc, "query")
                         if not query:
                             tool_text = "web_search 参数缺少 query"
@@ -936,6 +1399,18 @@ class WeChatBot:
                             except WebSearchError as e:
                                 tool_text = f"搜索暂时不可用：{e}"
                         logger.info(f"[搜索] {query!r} -> {tool_text[:80]}")
+                    elif name == "recall_memory":
+                        query = _tool_arg(tc, "query")
+                        if not chat_id:
+                            tool_text = "没有可检索的记忆上下文"
+                        elif not query:
+                            tool_text = "recall_memory 参数缺少 query"
+                        else:
+                            try:
+                                tool_text = self._recall_memory(chat_id, query)
+                            except Exception as e:
+                                tool_text = f"记忆检索失败：{e}"
+                        logger.info(f"[记忆检索] {query!r} -> {tool_text[:60]}")
                     else:  # web_fetch（任务/提醒已在 other 分支返回）
                         url = _tool_arg(tc, "url")
                         if not url:
@@ -1095,10 +1570,12 @@ class WeChatBot:
             logger.error(f"[表情] 裁剪异常: {e}")
             return None
 
-    def _describe_image(self, chat_name):
-        """点击最新图片 → 截图 → 视觉模型 → dict 原样路由给
-        _route_vision_result（不压文本；img_path 由调用方 finally 清理，
-        覆写方需在返回前同步消费）。sender 无独立来源，以 chat_name 兜底。"""
+    def _process_pure_image(self, chat_name):
+        """纯图/表情消息处理：捕获媒体 → vision 单调用（人设 + 历史 + 看图
+        角色化回复/任务判定）→ dict 原样路由给 _route_vision_result（不压
+        文本；img_path 由调用方 finally 清理，覆写方需在返回前同步消费）。
+        sender 无独立来源，以 chat_name 兜底。与图+文路径（_vision_route）
+        同一链路语义：角色化回复而非旧两段式的客观图片复述。"""
         tmp_path = self._capture_latest_image(chat_name)
         if not tmp_path:
             return None
@@ -1106,16 +1583,16 @@ class WeChatBot:
             with open(tmp_path, 'rb') as f:
                 img_bytes = f.read()
             result = self.call_vision_api([
-                {"type": "text", "text": self.vision_prompt},
+                {"type": "text", "text": VISION_IMAGE_PROMPT},
                 {"type": "image_url", "image_url": {
                     "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
-            ])
+            ], chat_id=chat_name)
             if result:
                 return self._route_vision_result(chat_name, chat_name, result,
                                                  img_path=tmp_path)
             return None
         except Exception as e:
-            logger.error(f"[图片描述] 异常: {e}")
+            logger.error(f"[图片处理] 异常: {e}")
             return None
         finally:
             try:
@@ -1618,10 +2095,15 @@ class WeChatBot:
         else:
             decorated = f"私聊 - {sender_name}：{user_msg}" if sender_name else f"私聊：{user_msg}"
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        # 消息布局（缓存友好，与 call_vision_api 对齐）：稳定前缀在前
+        # （人设 → 重要记忆 → 历史），每轮变化区在尾（相关记忆 → 当前时间
+        # → 当前消息）。「当前时间」每秒变化，绝不能插在历史之前打断前缀。
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "system", "content": f"当前时间：{current_time}"},
         ]
+        important = self._important_block(chat_id)
+        if important:
+            messages.append({"role": "system", "content": important})
         for h in self._get_history(chat_id):
             if "time" in h:
                 ts = h["time"]
@@ -1629,6 +2111,10 @@ class WeChatBot:
             else:
                 msg_content = h['content']
             messages.append({"role": h["role"], "content": msg_content})
+        related = self._match_related_memory(chat_id, user_msg)
+        if related:
+            messages.append({"role": "system", "content": related})
+        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
         messages.append({"role": "user", "content": decorated})
 
         with self._model_lock:
@@ -1784,7 +2270,7 @@ class WeChatBot:
                     return
                 if has_media and not text_content:
                     logger.info(f"🖼 判断为图片消息：{chat_name}")
-                    if not self._describe_image(chat_name):
+                    if not self._process_pure_image(chat_name):
                         # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
                         self._send_text("图片识别失败了，可能是什么地方出了问题呀～",
                                         chat_name)
@@ -1848,7 +2334,6 @@ class Controller:
         "model": "切换聊天模型（model 交互选择 / model <名称> 直接切换并持久化）",
         "chat-temp": "设置聊天模型温度 (0~2)",
         "chat-top-p": "设置聊天模型 top_p (0~1)",
-        "vision-temp": "设置视觉模型温度 (0~2)",
         "clear": "清空对话历史（全部 / clear <聊天ID>）",
         "del": "删除聊天中的消息：del <聊天ID> <序号1> [序号2] [3-5]",
         "memory": "查看聊天历史消息（带序号）",
@@ -1872,7 +2357,6 @@ class Controller:
             "model": self._cmd_model,
             "chat-temp": self._cmd_chat_temp,
             "chat-top-p": self._cmd_chat_top_p,
-            "vision-temp": self._cmd_vision_temp,
             "clear": self._cmd_clear,
             "del": self._cmd_del,
             "memory": self._cmd_memory,
@@ -1954,9 +2438,6 @@ class Controller:
     def _cmd_chat_top_p(self, cmd):
         self._set_numeric(cmd, "chat-top-p", 0, 1, "top_p", self.bot.set_chat_top_p)
 
-    def _cmd_vision_temp(self, cmd):
-        self._set_numeric(cmd, "vision-temp", 0, 2, "温度", self.bot.set_vision_temperature)
-
     def _set_numeric(self, cmd, name, lo, hi, label, setter):
         rest = cmd[len(name):].strip()
         if not rest:
@@ -2021,14 +2502,17 @@ class Controller:
         self.bot._flush_memory()  # 节流窗口内的记忆落盘（run 退出路径也会 flush，双保险）
 
     def _show_status(self):
-        total_msgs = sum(len(v) for v in self.bot.memory_db.values())
+        total_msgs = sum(
+            len(v.get("recent", [])) if isinstance(v, dict) else len(v)
+            for v in self.bot.memory_db.values())
+        deep_msgs = sum(self.bot._deep_count.values())
         chat_count = len(self.bot.memory_db)
         print(f"当前聊天模型：{self.bot.chat_model}")
         print(f"  聊天温度: {self.bot.chat_temperature}")
         print(f"  聊天 top_p: {self.bot.chat_top_p}")
         print(f"视觉模型：随聊天模型（{self.bot.chat_model}，单模型化）")
-        print(f"  视觉温度: {self.bot.vision_temp}")
-        print(f"对话记忆：共 {chat_count} 个聊天，总计 {total_msgs} 条消息")
+        print(f"对话记忆：共 {chat_count} 个聊天，近期 {total_msgs} 条"
+              f"（深层存档 {deep_msgs} 条）")
         if chat_count > 0:
             print("具体聊天对象：")
             for chat in self.bot.memory_db.keys():
@@ -2041,13 +2525,24 @@ class Controller:
             logger.info(f"❌ 未找到包含 '{target}' 的聊天记录")
             return
         chat_key = matches[0]
-        msgs = self.bot.memory_db[chat_key]
-        print(f"📂 聊天对象: {chat_key}，共 {len(msgs)} 条消息：")
-        for i, msg in enumerate(msgs, 1):
+        st = self.bot.memory_db[chat_key]
+        recent = st.get("recent", []) if isinstance(st, dict) else st
+        print(f"📂 聊天对象: {chat_key}，近期 {len(recent)} 条消息：")
+        for i, msg in enumerate(recent, 1):
             role = "用户" if msg["role"] == "user" else "小漓"
             ts = msg.get("time", "未知时间")
             content = msg["content"]
             print(f"  {i}. [{ts}] {role}: {content}")
+        if isinstance(st, dict):
+            imp = [x.get("content") for x in st.get("important", [])
+                   if isinstance(x, dict) and x.get("content")]
+            if imp:
+                print("📌 重要记忆：")
+                for c in imp:
+                    print(f"  - {c}")
+            if st.get("index"):
+                print(f"🗂 关键词索引：{len(st['index'])} 条"
+                      "（命中时自动注入，memory <聊天ID> 不逐条展示）")
 
     def _select_model(self, model_type):
         was_paused = self.bot.paused

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """memory 键归一化单测：引号与空格全剥、记忆存取同键（含 OCR 丢引号场景）。"""
+import threading
 import unittest
 
 import wechat_bot as wb
@@ -26,6 +27,12 @@ class TestMemoryKey(unittest.TestCase):
         bot = wb.WeChatBot.__new__(wb.WeChatBot)
         bot.memory_db = {}
         bot.max_history = 100
+        bot.memory_keep_recent = 30
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot._deep_dir = ""
         bot._schedule_save_memory = lambda: None
         # 各种 OCR 变体读写的应是同一份历史
         bot._add_history("“强盗”集团", "user", "在吗")

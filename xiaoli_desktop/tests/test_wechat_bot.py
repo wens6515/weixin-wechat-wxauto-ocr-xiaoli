@@ -472,6 +472,11 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         bot.api_timeout = 5
         bot.system_prompt = "你是小漓"
         bot._model_lock = threading.RLock()
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._deep_dir = ""
         bot._get_history = lambda chat_id: []
         bot._add_history = lambda *a, **k: None
         return bot
@@ -911,10 +916,16 @@ class TestClearHistory(unittest.TestCase):
     memory_db，bot 节流写盘把旧记忆覆盖回来 → 点按钮后 bot 仍有记忆）。"""
 
     def _make(self):
+        import threading
         import wechat_bot
         bot = object.__new__(wechat_bot.WeChatBot)
         bot._memory_dirty = False
         bot._last_memory_save = 0.0
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._deep_dir = ""
         return bot
 
     def test_clear_history_clears_ram_and_disk_and_flush_does_not_resurrect(self):
@@ -953,9 +964,14 @@ class TestCallVisionApi(unittest.TestCase):
         bot.vision_api_key = "test-key"
         # 单模型化：call_vision_api 的 model 取 chat_model（无独立 vision_model）
         bot.chat_model = "deepseek-v4-flash"
-        bot.vision_temp = 0.7
+        bot.chat_temperature = 0.7
         bot.vision_max_tokens = 10000
         bot._model_lock = threading.RLock()
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._deep_dir = ""
         return bot
 
     def _post(self, payload):
@@ -1135,12 +1151,11 @@ class TestCallVisionApi(unittest.TestCase):
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
-        self.assertEqual(msgs[1]["role"], "system")
-        self.assertIn("当前时间：", msgs[1]["content"],
-                      "当前时间 system 紧跟人设之后（历史注入之前）")
-        hist_msgs = msgs[2:-1]
+        hist_msgs = msgs[1:-2]
         self.assertEqual([m["role"] for m in hist_msgs], ["user", "assistant"],
-                         "历史注入在 system 之后、user 之前，保持 _get_history 原序")
+                         "历史紧跟人设（稳定前缀区），保持 _get_history 原序")
+        self.assertIn("当前时间：", msgs[-2]["content"],
+                      "当前时间 system 紧贴当前消息（历史之后，缓存前缀不断）")
         self.assertEqual(hist_msgs[0]["content"],
                          "[2026-06-14 10:00:00] 我上一条说的什么",
                          "历史消息带 [time] 前缀")
@@ -1197,15 +1212,14 @@ class TestCallVisionApi(unittest.TestCase):
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
-        self.assertEqual(msgs[1]["role"], "system")
-        self.assertTrue(re.match(r"^当前时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
-                                 msgs[1]["content"]),
-                        "当前时间 system 紧跟 persona 之后，格式对齐 "
-                        "time.strftime('%Y-%m-%d %H:%M:%S')，实际: "
-                        f"{msgs[1]['content']}")
-        self.assertEqual(msgs[2]["content"],
+        self.assertEqual(msgs[1]["content"],
                          "[2026-06-14 10:00:00] 我上一条说的什么",
-                         "历史注入在当前时间 system 之后，[ts] 前缀行为不变")
+                         "历史紧跟 persona（稳定前缀区），[ts] 前缀行为不变")
+        self.assertTrue(re.match(r"^当前时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
+                                 msgs[-2]["content"]),
+                        "当前时间 system 紧贴当前消息（历史之后），格式对齐 "
+                        "time.strftime('%Y-%m-%d %H:%M:%S')，实际: "
+                        f"{msgs[-2]['content']}")
         self.assertEqual(msgs[-1]["role"], "user")
 
     def test_history_without_time_field_passes_content_raw(self):
@@ -1220,11 +1234,11 @@ class TestCallVisionApi(unittest.TestCase):
         with patcher:
             bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
         msgs = captured["json"]["messages"]
-        # 无 persona → 当前时间 system 为第一条，history 紧随其后
-        self.assertIn("当前时间：", msgs[0]["content"],
-                      "无 persona 时当前时间 system 仍无条件注入")
-        self.assertEqual(msgs[1]["content"], "没时间戳的历史",
+        # 无 persona → 历史为第一条，当前时间 system 紧贴当前消息
+        self.assertEqual(msgs[0]["content"], "没时间戳的历史",
                          "无 time 字段的历史原样注入，不加前缀")
+        self.assertIn("当前时间：", msgs[-2]["content"],
+                      "无 persona 时当前时间 system 仍无条件注入")
 
     def test_text_reply_strips_timestamp_prefix(self):
         """text 响应 content 带时间戳前缀 → 返回前过滤（逐字复用
@@ -1283,11 +1297,11 @@ class TestCallVisionApi(unittest.TestCase):
                          "budget 取 getattr(self, 'max_context_tokens', 100000)")
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "裁剪收到 system 人设")
-        self.assertEqual(msgs[1]["role"], "system")
-        self.assertIn("当前时间：", msgs[1]["content"],
-                      "裁剪收到当前时间 system（人设之后）")
-        self.assertEqual([m["role"] for m in msgs[2:-1]], ["user", "assistant"],
-                         "裁剪收到历史（system 之后、user 之前）")
+        self.assertEqual([m["role"] for m in msgs[1:-2]], ["user", "assistant"],
+                         "裁剪收到历史（人设之后、时间 system 之前）")
+        self.assertEqual(msgs[-2]["role"], "system")
+        self.assertIn("当前时间：", msgs[-2]["content"],
+                      "当前时间 system 紧贴当前消息（历史之后，缓存前缀不断）")
         self.assertEqual(msgs[-1]["content"], self.TEXT_ONLY,
                          "裁剪收到最后一条 user 多模态块（append 之后才裁剪）")
 
@@ -1394,7 +1408,7 @@ class TestMemoryFlushDue(unittest.TestCase):
 class TestVisionResultRouting(unittest.TestCase):
     """vision 单调用收尾契约：_route_vision_result 可覆写 hook 存在且基类
     默认返回 None（未处理）；两段式残留 _reply_with_vision / _vision_result_text
-    与旧 _process_image 路径必须删除；_describe_image 的 call_vision_api
+    与旧 _process_image 路径必须删除；_process_pure_image 的 call_vision_api
     dict 返回直接路由，不压文本不转述（tool_call 语义不丢失）。"""
 
     @staticmethod
@@ -1426,11 +1440,10 @@ class TestVisionResultRouting(unittest.TestCase):
         self.assertFalse(hasattr(wechat_bot.WeChatBot, "_vision_result_text"),
                          "_vision_result_text 无调用方应删除")
 
-    def test_describe_image_routes_dict_not_text(self):
-        """_describe_image：tool_call dict 原样路由，不压 arguments 字符串。"""
+    def test_pure_image_routes_dict_not_text(self):
+        """_process_pure_image：tool_call dict 原样路由，不压 arguments 字符串。"""
         from unittest import mock as _mock
         bot = self._obj()
-        bot.vision_prompt = "描述"
         bot.wx = _mock.MagicMock()
         tool_call = {"kind": "tool_call", "name": "dispatch_task",
                      "arguments": '{"task":"做PPT"}'}
@@ -1444,7 +1457,7 @@ class TestVisionResultRouting(unittest.TestCase):
                                     return_value=tool_call), \
                  _mock.patch.object(bot, "_route_vision_result",
                                     return_value=True) as route:
-                ret = bot._describe_image("群")
+                ret = bot._process_pure_image("群")
                 self.assertTrue(ret)
                 route.assert_called_once()
                 _args, _kwargs = route.call_args
@@ -1502,16 +1515,21 @@ class TestVisionRouteImmersion(unittest.TestCase):
         bot.vision_api_url = "https://api.test/v1/chat/completions"
         bot.vision_api_key = "test-key"
         bot.chat_model = "test-model"
-        bot.vision_temp = 0.7
+        bot.chat_temperature = 0.7
         bot.vision_max_tokens = 10000
         bot._model_lock = threading.RLock()
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._deep_dir = ""
         bot.memory_db = {}
         bot._get_history = lambda chat_id: []
         bot._add_history = lambda chat_id, role, content: None
         bot._send_text = lambda *a, **k: None
         sent = {}
 
-        def fake_vision(content, chat_id=None):
+        def fake_vision(content, chat_id=None, related_memory=None):
             sent["text"] = content[0]["text"]
             return {"kind": "text", "content": "嗨"}
 
@@ -1540,9 +1558,14 @@ class TestVisionRoutePersona(unittest.TestCase):
         bot.vision_api_url = "https://api.deepseek.com/v1/chat/completions"
         bot.vision_api_key = "test-key"
         bot.chat_model = "deepseek-v4-flash"
-        bot.vision_temp = 0.7
+        bot.chat_temperature = 0.7
         bot.vision_max_tokens = 10000
         bot._model_lock = threading.RLock()
+        bot._memory_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot._deep_dir = ""
         bot.memory_db = {}  # __new__ 绕过 __init__，需补齐 _get_history 依赖
         return bot
 
