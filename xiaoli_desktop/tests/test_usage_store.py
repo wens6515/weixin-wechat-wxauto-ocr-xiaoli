@@ -46,7 +46,11 @@ class TestUsageStore(unittest.TestCase):
         self.assertEqual(s["by_day"], {})
 
     def test_summary_groups_by_day_and_model(self):
+        # 锚定正午构造时间戳：直接用 time.time() 时，午夜前后运行会让
+        # now-3600 跨到前一天，by_day 断言随机翻车
         now = time.time()
+        local_noon = time.mktime(time.localtime(now)[:3] + (12, 0, 0, 0, 0, -1))
+        now = local_noon
         rows = [
             {"ts": now, "kind": "chat", "model": "m1", "prompt_tokens": 100,
              "completion_tokens": 20, "ok": True, "status": 200, "latency_ms": 50},

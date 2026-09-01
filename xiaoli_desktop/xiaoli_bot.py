@@ -13,7 +13,9 @@ import queue
 import threading
 import requests as req
 import pyautogui
-from wechat_bot import WeChatBot, Controller, load_config, logger, is_group_chat, _extract_file_name_token
+from wechat_bot import (WeChatBot, Controller, load_config, logger,
+                        is_group_chat, _extract_file_name_token,
+                        VISION_MODEL_DEFAULT)
 from wx_backend.models import MessageType
 from xiaoli_app.reminders_store import RemindersStore, GRACE_SECONDS
 
@@ -607,6 +609,143 @@ class ReminderScheduler(threading.Thread):
             self._stop_evt.wait(self._scan_seconds)
 
 
+# 长记忆压缩：提炼「必须记住的重要记忆 + 关键词记忆索引」（一次调用双产出）。
+# 每攒满 memory_compress_batch 条深层消息触发一次；输入带上已有条目供模型
+# 去重（不重复提炼、不重复建索引）。
+MEMORY_COMPRESS_PROMPT = (
+    "你是微信机器人小漓的记忆整理器。下面是与某位联系人的一段聊天记录"
+    "（按时间顺序，[用户]/[小漓] 标记说话方）。请完成两件事：\n"
+    "1. 提炼「必须记住的重要记忆」：身份信息、长期偏好、重要承诺或约定、"
+    "重大事件、称呼与关系变化等长期有效的信息。只提炼确实重要且长期有效的，"
+    "每条不超过 50 字；已给出的重要记忆里已有的不要再输出；没有就输出空数组。\n"
+    "2. 为这段记录配置「关键词记忆索引」：挑出用户日后可能再次提起的话题，"
+    "每个话题给 2-5 个具体检索关键词（人名/事件/物品名等，不要宽泛词如"
+    "「聊天」「事情」），并写一段对应的记忆描述（保留关键细节，不超过 80 字）。\n"
+    "只输出一个 JSON 对象，不要输出任何其他文字：\n"
+    '{"important": [{"content": "重要记忆"}], "index": [{"kw": ["关键词1", "关键词2"], "mem": "记忆描述"}]}'
+)
+
+
+def parse_compress_json(raw):
+    """解析压缩模型输出。任何异常/缺字段都兜底为空产出（不中断压缩循环）。"""
+    if not raw:
+        return [], []
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.S)
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    data = None
+    if m:
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return [], []
+    important = []
+    for item in (data.get("important") or []):
+        if isinstance(item, dict) and str(item.get("content") or "").strip():
+            important.append({"content": str(item["content"]).strip()})
+        elif isinstance(item, str) and item.strip():
+            important.append({"content": item.strip()})
+    index = []
+    for item in (data.get("index") or []):
+        if not isinstance(item, dict):
+            continue
+        kws = [str(k).strip() for k in (item.get("kw") or item.get("keywords") or [])
+               if str(k).strip()]
+        mem = str(item.get("mem") or item.get("memory") or "").strip()
+        if kws and mem:
+            index.append({"kw": kws, "mem": mem})
+    return important, index
+
+
+class MemoryCompressor(threading.Thread):
+    """长记忆压缩线程：扫描各聊天的深层记忆增量，攒满 batch 条调压缩模型
+    提炼「重要记忆 + 关键词索引」，结果经 bot.memory_commit_compression
+    锁内写回。API 调用不持锁（只持锁快照段与写回结果）；每轮最多压缩一个
+    聊天（串行 API，失败不重试——下轮扫描重新尝试同一段，索引边界不推进）。"""
+
+    def __init__(self, bot, stop_event=None, scan_seconds=20.0):
+        super().__init__(name="xiaoli-memory-compress", daemon=True)
+        self.bot = bot
+        self._stop_evt = stop_event if stop_event is not None else threading.Event()
+        self._scan_seconds = scan_seconds
+
+    def run(self):
+        while not self._stop_evt.is_set():
+            try:
+                self._scan_once()
+            except Exception as e:
+                logger.error(f"[记忆压缩] 扫描异常: {e}")
+            self._stop_evt.wait(self._scan_seconds)
+
+    def _scan_once(self):
+        bot = self.bot
+        if not getattr(bot, "memory_compress_enabled", False):
+            return
+        if not getattr(bot, "memory_deep_enabled", False):
+            return  # 深层记忆关着则没有溢出归档，无从压缩
+        batch = int(bot.memory_compress_batch)
+        with bot._memory_lock:
+            chats = list(bot.memory_db.keys())
+        for chat in chats:
+            st = bot.memory_db.get(chat)
+            if not isinstance(st, dict):
+                continue
+            total = int(bot._deep_count.get(chat, 0))
+            if total - int(st.get("indexed") or 0) < batch:
+                continue
+            self._compress_chat(chat)
+            return  # 每轮最多压缩一个聊天（串行 API 调用）
+
+    def _compress_chat(self, chat):
+        bot = self.bot
+        st = bot.memory_db.get(chat) or {}
+        indexed = int(st.get("indexed") or 0)
+        msgs, consumed = bot._read_deep_range(
+            chat, indexed, int(bot.memory_compress_batch))
+        if not msgs:
+            # 文件行数与计数不一致（外部改动）：把边界推进到计数处防死循环
+            bot.memory_commit_compression(
+                chat, int(bot._deep_count.get(chat, 0)), [], [])
+            return
+        existing_imp = [str(x.get("content") or "").strip()
+                        for x in (st.get("important") or [])]
+        existing_kw = [str(k)
+                       for e in (st.get("index") or [])
+                       for k in (e.get("kw") or [])]
+        parts = []
+        if existing_imp:
+            parts.append("已有重要记忆（勿重复提炼）：\n"
+                         + "\n".join(f"- {x}" for x in existing_imp if x))
+        if existing_kw:
+            parts.append("已有关键词（勿重复建索引）：\n"
+                         + "、".join(dict.fromkeys(existing_kw)))
+        parts.append("聊天记录：\n" + "\n".join(
+            f"[{'用户' if m.get('role') == 'user' else '小漓'}]"
+            f"[{m.get('time', '')}] {str(m.get('content') or '')[:300]}"
+            for m in msgs))
+        model = bot.memory_compress_model or bot.chat_model \
+            or VISION_MODEL_DEFAULT
+        headers = {"Authorization": f"Bearer {bot.api_key}",
+                   "Content-Type": "application/json"}
+        messages = [{"role": "system", "content": MEMORY_COMPRESS_PROMPT},
+                    {"role": "user", "content": "\n\n".join(parts)}]
+        payload = {"model": model, "messages": messages,
+                   "temperature": 0.3, "max_tokens": 2000}
+        try:
+            data = bot._post_chat_completions(
+                bot.api_url, headers, payload, 60, label="memory",
+                meta={"kind": "memory", "model": model, "messages": messages})
+            raw = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        except Exception as e:
+            logger.warning(f"[记忆压缩] {chat} 调用失败（下轮重试）: {e}")
+            return
+        important, index = parse_compress_json(raw)
+        bot.memory_commit_compression(chat, consumed, important, index)
+        logger.info(f"[记忆压缩] {chat} 已压缩 {consumed - indexed} 条"
+                    f"（重要 +{len(important)}，索引 +{len(index)}）")
+
+
 class AgentBot(WeChatBot):
     """小漓合并版：继承原 WeChatBot（聊天/图片/文件识别），叠加天枢任务桥"""
 
@@ -663,6 +802,10 @@ class AgentBot(WeChatBot):
         self._reminder_sched = ReminderScheduler(
             self.reminders, self._reminder_queue, stop_event=stop_event)
         self._reminder_sched.start()
+        # 长记忆压缩线程：深层记忆攒满 batch 条后提炼重要记忆/关键词索引
+        # （memory_compress_enabled 关闭时线程空转等待，设置热改后自动生效）
+        self._memory_compressor = MemoryCompressor(self, stop_event=stop_event)
+        self._memory_compressor.start()
         logger.info(f"[AgentBot] tasks_dir={self.tasks_dir}, task_enabled={self.task_enabled}")
 
     def _load_sent_back_stems(self):
@@ -783,6 +926,9 @@ class AgentBot(WeChatBot):
             decorated = f"私聊 - {sender}：{text}" if sender else f"私聊：{text}"
         prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{decorated}"
         content = [{"type": "text", "text": prompt}]
+        # 关键词记忆索引：用原始用户消息（非装饰串）匹配，命中的相关记忆
+        # 由 call_vision_api 注入到历史之后
+        related = self._match_related_memory(chat_name, text)
         if img_path:
             try:
                 with open(img_path, "rb") as f:
@@ -794,7 +940,8 @@ class AgentBot(WeChatBot):
             except OSError as e:
                 logger.error(f"[vision] 图片读取失败，忽略图片: {e}")
         try:
-            resp = self.call_vision_api(content, chat_id=chat_name)
+            resp = self.call_vision_api(content, chat_id=chat_name,
+                                        related_memory=related)
         except Exception as e:
             logger.error(f"[vision] 调用异常: {e}")
             return None
@@ -858,7 +1005,8 @@ class AgentBot(WeChatBot):
     def _route_vision_result(self, chat_name, sender, result, img_path=None):
         """纯图路径 hook 覆写：复用 _apply_vision_result 分流核心。
 
-        纯图路径（_capture_latest_image 截图 → vision → 本 hook）的 vision 单
+        纯图路径（_process_pure_image：捕获媒体 → vision 单调用 → 本 hook）
+        的 vision 单
         调用结果分流：tool_call → 投递天枢（attachment_paths=[img_path]）；
         text → 直接回复（实质回复 → 占位归零）；None → 返回 None，调用方降级。
         无用户文字，JSON 解析失败降级用 arguments 原文。
@@ -1382,7 +1530,7 @@ class AgentBot(WeChatBot):
         if has_media and not text_content:
             # 无文字 + 有媒体（图片/视频/表情统一当图片）→ Ctrl+C 图片路径
             logger.info(f"🖼 判断为图片消息：{chat_name}")
-            if self._describe_image(chat_name):
+            if self._process_pure_image(chat_name):
                 return True
             # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
             self._send_text("图片识别失败了，可能是什么地方出了问题呀～", chat_name)
@@ -1830,19 +1978,26 @@ def run_self_test():
             b.memory_db = {}
             b.memory_file = os.path.join(dirpath, "mem.json")
             b.max_history = 1000
+            b._memory_lock = threading.RLock()
+            b.memory_deep_enabled = False
+            b.memory_compress_enabled = False
+            b.memory_keep_recent = 30
+            b._deep_count = {}
+            b._deep_dir = ""
             return b
 
         mem_dir = os.path.join(tmp, "mem")
         os.makedirs(mem_dir)
         mb = make_mem_bot(mem_dir)
         mb._remember_task_result("小明", {"status": "success", "reply_text": "网站做好了，见成果文件", "files": ["site.zip"]})
-        hist = mb.memory_db.get("小明", [])
+        hist = mb.memory_db.get("小明", {}).get("recent", [])
         check("T15 成功结果写入记忆",
               len(hist) == 1 and hist[0]["role"] == "assistant"
               and "[任务结果] 网站做好了，见成果文件，成果文件: site.zip" in hist[0]["content"], str(hist))
         mb._remember_task_result("小明", {"status": "failed", "reply_text": ""})
         check("T15 失败结果写入记忆（默认文案）",
-              len(mb.memory_db["小明"]) == 2 and "任务处理失败了" in mb.memory_db["小明"][1]["content"],
+              len(mb.memory_db["小明"]["recent"]) == 2
+              and "任务处理失败了" in mb.memory_db["小明"]["recent"][1]["content"],
               str(mb.memory_db["小明"]))
         mb._remember_task_result("", {"status": "success", "reply_text": "x"})
         check("T15 空 chat 不写记忆", len(mb.memory_db) == 1, str(mb.memory_db))
@@ -1850,7 +2005,8 @@ def run_self_test():
         mb2 = make_mem_bot(mem_dir)
         mb2._load_memory()
         check("T15 重启后任务结果记忆仍在",
-              "小明" in mb2.memory_db and "[任务结果]" in mb2.memory_db["小明"][0]["content"],
+              "小明" in mb2.memory_db
+              and "[任务结果]" in mb2.memory_db["小明"]["recent"][0]["content"],
               str(mb2.memory_db.keys()))
 
     finally:

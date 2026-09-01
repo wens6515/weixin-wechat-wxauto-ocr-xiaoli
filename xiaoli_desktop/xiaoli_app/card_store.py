@@ -11,13 +11,14 @@ import shutil
 import time
 import uuid
 
-# 卡允许的字段白名单（校验时未知字段静默丢弃）
+# 卡允许的字段白名单（校验时未知字段静默丢弃）。vision_temp/vision_max_tokens
+# 已随单模型化+图片复述路径废弃移出白名单（旧卡残留字段保存时被丢弃）
 CARD_FIELDS = {
     "id", "name", "emoji", "system_prompt", "nickname",
     "chat_provider", "chat_model",
     "vision_provider", "vision_model",
     "classify_provider", "classify_model",
-    "temperature", "top_p", "vision_temp", "vision_max_tokens", "max_history",
+    "temperature", "top_p", "max_history",
 }
 # 必填字段
 REQUIRED_FIELDS = {"id", "name", "system_prompt"}

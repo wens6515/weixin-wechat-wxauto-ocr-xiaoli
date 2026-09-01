@@ -703,7 +703,7 @@ class TestLoadCompleteness(unittest.TestCase):
     # __init__ 不再裸索引 vision_model（视觉 model 取 chat_model）
     REQUIRED_KEYS = [
         "bot_nickname", "ai_api_url", "ai_api_key", "chat_model",
-        "vision_prompt", "system_prompt", "max_history",
+        "system_prompt", "max_history",
         "cooldown", "api_retry", "api_timeout",
     ]
 
@@ -720,8 +720,6 @@ class TestLoadCompleteness(unittest.TestCase):
             os.path.join(self.tmp, "config.json"), self.cards_dir)
         for k in self.REQUIRED_KEYS:
             self.assertIn(k, cfg, f"全新安装 cfg 缺 {k} → 初始化 KeyError")
-        self.assertTrue(str(cfg["vision_prompt"] or "").strip(),
-                        "vision_prompt 必须有非空默认值")
         self.assertNotIn("vision_model", cfg,
                          "单模型化：cfg 不应投影独立 vision_model（视觉走 chat_model）")
 
@@ -741,8 +739,6 @@ class TestLoadCompleteness(unittest.TestCase):
         cfg = config_store.load_config_store(path, self.cards_dir)
         for k in self.REQUIRED_KEYS:
             self.assertIn(k, cfg, f"新结构 config 缺 {k} → 初始化 KeyError")
-        self.assertTrue(str(cfg["vision_prompt"] or "").strip(),
-                        "vision_prompt 必须有非空默认值")
         self.assertNotIn("vision_model", cfg,
                          "单模型化：新结构 config 不应投影独立 vision_model（视觉走 chat_model）")
 

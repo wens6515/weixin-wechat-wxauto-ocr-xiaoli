@@ -184,9 +184,14 @@ class TestSetReminderTool(unittest.TestCase):
         bot_with.vision_api_key = "k"
         bot_with.system_prompt = "p"
         bot_with.chat_model = "m"
-        bot_with.vision_temp = 0.5
+        bot_with.chat_temperature = 0.7
         bot_with.vision_max_tokens = 100
         bot_with._model_lock = threading.RLock()
+        bot_with._memory_lock = threading.RLock()
+        bot_with._deep_count = {}
+        bot_with.memory_deep_enabled = False
+        bot_with.memory_compress_enabled = False
+        bot_with._deep_dir = ""
         bot_with._get_history = lambda chat_id: []
         captured = []
         with mock.patch.object(bot_with, "_post_chat_completions",
@@ -200,9 +205,14 @@ class TestSetReminderTool(unittest.TestCase):
         bot_without.vision_api_key = "k"
         bot_without.system_prompt = "p"
         bot_without.chat_model = "m"
-        bot_without.vision_temp = 0.5
+        bot_without.chat_temperature = 0.7
         bot_without.vision_max_tokens = 100
         bot_without._model_lock = threading.RLock()
+        bot_without._memory_lock = threading.RLock()
+        bot_without._deep_count = {}
+        bot_without.memory_deep_enabled = False
+        bot_without.memory_compress_enabled = False
+        bot_without._deep_dir = ""
         bot_without._get_history = lambda chat_id: []
         captured2 = []
         with mock.patch.object(bot_without, "_post_chat_completions",

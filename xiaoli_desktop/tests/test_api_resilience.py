@@ -33,6 +33,11 @@ def make_bot(**extra):
     bot.api_wall_budget = 45
     bot.system_prompt = "你是小漓"
     bot._model_lock = threading.RLock()
+    bot._memory_lock = threading.RLock()
+    bot._deep_count = {}
+    bot.memory_deep_enabled = False
+    bot.memory_compress_enabled = False
+    bot._deep_dir = ""
     bot._get_history = lambda chat_id: []
     history = []
     bot._add_history = lambda chat_id, role, content: history.append((role, content))
@@ -187,7 +192,7 @@ class TestEmptyModelFallback(unittest.TestCase):
         bot = make_bot(chat_model="")
         bot.vision_api_url = "https://api.test/v1/chat/completions"
         bot.vision_api_key = "test-key"
-        bot.vision_temp = 0.5
+        bot.chat_temperature = 0.7
         bot.vision_max_tokens = 1024
 
         def fake_post(url, headers, payload, timeout, label="api", meta=None):
@@ -242,7 +247,7 @@ class TestUsageHook(unittest.TestCase):
         bot = make_bot(api_retry=0, usage_store=store)
         bot.vision_api_url = "https://api.test/v1/chat/completions"
         bot.vision_api_key = "test-key"
-        bot.vision_temp = 0.5
+        bot.chat_temperature = 0.7
         bot.vision_max_tokens = 1024
         with mock.patch("wechat_bot.requests.post", return_value=fake_resp(500)):
             out = bot.call_vision_api([{"type": "text", "text": "hi"}], chat_id=None)
