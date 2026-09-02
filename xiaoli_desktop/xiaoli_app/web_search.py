@@ -4,13 +4,17 @@
 引擎选择由真机探针定案（「福州大学 唐勇」等查询实测）：
 - cn.bing 对中文实体查询（人名/机构名）分词失败——「唐勇 福州大学」返回
   「唐朝(历史朝代)」「比亚迪唐」等无关实体卡，加引号/换 mkt/setlang 参数
-  均无效；「福州天气」类简单查询则完全正常。
+  均无效；「福州天气」类简单查询则完全正常。2026-07 改版后部分布局
+  b_algo 块内 <h2> 消失（标题链接变裸 <a>，见 Tianshu-harness 同款适配），
+  解析带新布局兜底。
 - 百度、搜狗对人名/机构/错别字查询全部精准命中（百度甚至比必应强），
-  国内直连零配置——但百度对自动化访问高频触发「安全验证」页（返回
-  200 + 空结果），不能当唯一源。
+  国内直连零配置——但百度对自动化访问高频触发「安全验证」页（真机实测
+  升级为 302 → wappass 图形验证码，高频环境下基本全灭），不能当唯一源；
+  搜狗在真机高频下仍稳定供给。因此主链顺序搜狗 > 必应 > 百度（合并结果
+  按此优先级拼接）。
 - html.duckduckgo 国内直连被墙，仅代理环境可用。
 
-因此主链 = baidu + bing + sogou 三源并发、按源优先级合并去重（任一源
+因此主链 = sogou + bing + baidu 三源并发、按源优先级合并去重（任一源
 被验证页拦截/超时只损失该源，其余照常），DDG 降级为三源全空时的顺序
 兜底。所有引擎都是 GET + 正则解析 HTML，无第三方依赖。抓取式搜索没有
 SLA——搜索引擎改版或反爬升级会失效，靠多源 + 调用方失败降级兜底
@@ -18,6 +22,10 @@ SLA——搜索引擎改版或反爬升级会失效，靠多源 + 调用方失�
 
 另含 web_fetch：抓取网页正文纯文本，与 web_search 成对——搜索摘要只有
 站点介绍，具体实时数据（气温/雨情等）在网页正文里，模型挑来源后抓来读。
+真机事故定案：搜狗 /link 重定向返回的是 JS 跳转桩
+（window.location.replace("目标URL")），requests 不执行 JS → 剥完标签
+零正文 → 误判「无正文」失败。web_fetch 对正文过短的页面自动提取跳转
+目标（window.location / meta refresh）跟随再抓（上限 3 跳），根治该场景。
 """
 import base64
 import html as _html
@@ -28,9 +36,9 @@ from concurrent.futures import ThreadPoolExecutor
 import requests
 
 # 并发主链（按优先级排序：合并结果按此顺序拼接）+ 兜底链（主链全空才试）。
-# 搜狗列在必应前：探针中搜狗对中文人名/机构/错别字查询全部精准命中，
-# cn.bing 逢人名查询即分词失败（返回无关实体卡）。
-DEFAULT_BACKENDS = ("baidu", "sogou", "bing")
+# 搜狗第一：真机高频实测唯一定期供给的源（百度 302 图形验证码、必应逢
+# 中文实体查询分词失败），且对中文人名/机构/错别字查询全部精准命中。
+DEFAULT_BACKENDS = ("sogou", "bing", "baidu")
 FALLBACK_BACKENDS = ("duckduckgo",)
 SEARCH_TIMEOUT = 15          # 单引擎超时（秒）；并发墙钟 = 最慢者
 MAX_RESULTS = 8              # 合并后喂给模型的条数上限
@@ -159,6 +167,37 @@ def _decode_bing_url(url):
         return url
 
 
+def _bing_host_internal(url):
+    """主机属于 Bing/微软基础设施（图标/导航链接）——新布局兜底扫描用。
+    与 _is_engine_internal 不同：/ck/a 包裹的跳转入口在兜底扫描里同样视为
+    内部链接（cn.bing 新布局的标题链接是直链，块头 /ck/a 只会是图标）。"""
+    try:
+        host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+    except ValueError:
+        return True
+    return (host == "bing.com" or host.endswith(".bing.com")
+            or host == "microsoft.com" or host.endswith(".microsoft.com"))
+
+
+def _extract_bing_title_link(block):
+    """b_algo 块的标题链接 (raw_href, title_html)。
+
+    旧版：块内 <h2><a>（h2 锚点天然跳过块首 tilk 图标链接）。2026-07 改版
+    后部分布局 <h2> 消失（Tianshu-harness 同款适配）：标题链接是块头裸
+    <a> 直链——取块头 4KB 内第一个非 Bing/微软主机的 http(s) 链接。"""
+    h2 = re.search(r"<h2[^>]*>(.*?)</h2>", block, re.S)
+    if h2:
+        m = re.search(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', h2.group(1), re.S)
+        if m:
+            return m.group(1), m.group(2)
+    head = block[:4096]
+    for m in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', head, re.S):
+        href = _html.unescape(m.group(1))
+        if href.startswith("http") and not _bing_host_internal(href):
+            return href, m.group(2)
+    return None
+
+
 def _search_bing(query, count):
     resp = requests.get("https://cn.bing.com/search", params={"q": query},
                         headers=_HEADERS, timeout=SEARCH_TIMEOUT)
@@ -167,14 +206,13 @@ def _search_bing(query, count):
     for block in resp.text.split('<li class="b_algo')[1:]:
         if len(results) >= count:
             break
-        m = re.search(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-                      block, re.S)
-        if not m:
+        link = _extract_bing_title_link(block)
+        if not link:
             continue
-        url = _decode_bing_url(_html.unescape(m.group(1)))
+        url = _decode_bing_url(_html.unescape(link[0]))
         if _is_engine_internal(url):
             continue
-        title = _strip_html(m.group(2))
+        title = _strip_html(link[1])
         if not title:
             continue
         # 摘要取块内第一个 <p>（b_caption/b_lineclamp 等），无则留空
@@ -317,6 +355,29 @@ def format_search_results(query, results):
 
 FETCH_TIMEOUT = 15         # 抓取超时（秒）
 FETCH_MAX_CHARS = 3000     # 喂给模型的正文字数上限（约 1.5K token）
+FETCH_MAX_HOPS = 3         # 跳转桩跟随上限（搜狗 /link 一跳即达，3 足够）
+
+# 跳转桩目标提取：搜狗 /link 返回 window.location.replace("URL") 桩；
+# 通用形式还有 location.href 赋值与 <meta http-equiv="refresh" content="0;url=URL">
+# （URL 可能被单引号再包一层，如 content="0;URL='https://…'"）。
+_JS_REDIRECT_RE = re.compile(
+    r"""(?:window\.)?location(?:\.replace\(\s*|\.href\s*=\s*)["']([^"']+)["']""")
+_META_REFRESH_RE = re.compile(
+    r"""<meta[^>]+http-equiv\s*=\s*["']?refresh["']?[^>]*"""
+    r"""content\s*=\s*["']\s*\d+\s*;\s*url\s*=\s*['\"]?([^"'>]+)""", re.I)
+
+
+def _extract_redirect_target(html_text):
+    """从跳转桩 HTML 提取目标 URL（无桩返回 None）。"""
+    m = _JS_REDIRECT_RE.search(html_text or "")
+    if not m:
+        m = _META_REFRESH_RE.search(html_text or "")
+    if not m:
+        return None
+    target = next((g for g in m.groups() if g), None)
+    if not target:
+        return None
+    return target.strip().strip("'\"").strip()
 
 
 def web_fetch(url, max_chars=FETCH_MAX_CHARS):
@@ -325,24 +386,67 @@ def web_fetch(url, max_chars=FETCH_MAX_CHARS):
     只接受 http/https 的文本类页面（text/*、xml、json）；二进制内容、
     HTTP 错误、无可读正文（需 JS 渲染的空壳页）抛 WebFetchError——
     调用方把失败文本喂回模型，模型自行换来源或向用户说明。
-    百度/搜狗的 /link?url= 重定向链由 requests 自动跟随 302。
-    """
+
+    跳转桩跟随（真机事故定案）：搜狗 /link 等重定向返回的是
+    window.location.replace("目标URL") 的 JS 桩，requests 不执行 JS——
+    剥完标签零正文。正文过短时自动提取桩内跳转目标（含相对 URL 补全）
+    跟随再抓，最多 FETCH_MAX_HOPS 跳；无桩仍短才报「无正文」。
+    百度/搜狗的 HTTP 302 重定向链由 requests 自动跟随。"""
     u = str(url or "").strip()
     if not re.match(r"^https?://", u, re.I):
         raise WebFetchError(f"仅支持 http/https URL: {u[:80]!r}")
-    try:
-        resp = requests.get(u, headers=_HEADERS, timeout=FETCH_TIMEOUT)
-        resp.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        raise WebFetchError(f"请求失败: {e}") from e
-    ctype = (resp.headers.get("Content-Type") or "").lower()
-    if ctype and not (ctype.startswith("text/")
-                      or "xml" in ctype or "json" in ctype):
-        raise WebFetchError(f"非网页内容: {ctype[:60]}")
-    # 中文站常见 GBK：HTTP 头未声明时 requests 退回 iso-8859-1，按内容探测纠正
-    if (resp.encoding or "").lower() in ("iso-8859-1", "ascii"):
-        resp.encoding = resp.apparent_encoding or resp.encoding
-    text = _strip_page(resp.text)
+    text = ""
+    for hop in range(FETCH_MAX_HOPS):
+        try:
+            resp = requests.get(u, headers=_HEADERS, timeout=FETCH_TIMEOUT)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            raise WebFetchError(f"请求失败: {e}") from e
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if ctype and not (ctype.startswith("text/")
+                          or "xml" in ctype or "json" in ctype):
+            raise WebFetchError(f"非网页内容: {ctype[:60]}")
+        # 中文站常见 GBK：HTTP 头未声明时 requests 退回 iso-8859-1，按内容探测纠正
+        if (resp.encoding or "").lower() in ("iso-8859-1", "ascii"):
+            resp.encoding = resp.apparent_encoding or resp.encoding
+        text = _strip_page(resp.text)
+        if len(text) >= 30 or hop + 1 >= FETCH_MAX_HOPS:
+            break
+        target = _extract_redirect_target(resp.text)
+        if not target:
+            break
+        u = urllib.parse.urljoin(resp.url, target)
+        if not re.match(r"^https?://", u, re.I):
+            break
     if len(text) < 30:
         raise WebFetchError("页面没有可读正文（可能需要 JS 渲染）")
     return text[:max_chars]
+
+
+def resolve_redirect(url, timeout=FETCH_TIMEOUT):
+    """解析重定向到最终真实 URL（best-effort，不抛异常）。
+
+    用于状态监视创建时把搜狗 /link 等跳转链接换算成真实目标页——轮询一个
+    会过期的搜索引擎跳转链接既不稳妥、展示也无意义。requests 自动跟 HTTP
+    302；返回体是 JS/meta 跳转桩时手动提目标再跟（最多 2 跳）。任何失败
+    都原样返回入参 URL（拿不到最终地址就按原地址轮询）。"""
+    u = str(url or "").strip()
+    for _hop in range(2):
+        try:
+            resp = requests.get(u, headers=_HEADERS, timeout=timeout)
+        except requests.exceptions.RequestException:
+            return u
+        final = str(getattr(resp, "url", "") or u)
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if ctype and not (ctype.startswith("text/")
+                          or "xml" in ctype or "json" in ctype):
+            return final  # 二进制内容：不再解析桩
+        if len(_strip_page(resp.text)) < 30:
+            target = _extract_redirect_target(resp.text)
+            if target:
+                nxt = urllib.parse.urljoin(final, target)
+                if re.match(r"^https?://", nxt, re.I):
+                    u = nxt
+                    continue
+        return final
+    return u

@@ -17,7 +17,9 @@ from wechat_bot import (WeChatBot, Controller, load_config, logger,
                         is_group_chat, _extract_file_name_token,
                         VISION_MODEL_DEFAULT)
 from wx_backend.models import MessageType
-from xiaoli_app.reminders_store import RemindersStore, GRACE_SECONDS
+from xiaoli_app.reminders_store import (RemindersStore, GRACE_SECONDS,
+                                        WATCH_INTERVAL_MIN, WATCH_DEFAULT_TTL)
+from xiaoli_app.web_search import web_fetch, resolve_redirect
 
 if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
     try:
@@ -609,6 +611,220 @@ class ReminderScheduler(threading.Thread):
             self._stop_evt.wait(self._scan_seconds)
 
 
+# =====================================================================
+# 条件监视（set_reminder kind=condition）：轮询固定 URL → 判定 → 事件入队
+# =====================================================================
+
+# 连续抓取/判定异常次数达到该值判 dead（页面改版/长期失效），提前走到期回递
+WATCH_MAX_FAILS = 10
+# absent 型本地判定的最小片段长度：切片/整页短于该值视为异常（防验证页/
+# 空壳页被误判「关键词已消失」）
+WATCH_MIN_SLICE_CHARS = 20
+# api 判定喂给模型的页面文本上限
+WATCH_EVIDENCE_CHARS = 3000
+
+WATCH_JUDGE_PROMPT = (
+    "你是状态监视判定器。判断给定网页文本中，用户关心的条件**当前**是否已经达成。"
+    "注意：页面可能同时包含当前实况与未来时段（预报）的内容——只依据当前时段判断，"
+    "未来时段的内容一律不算数。只输出一个 JSON 对象，不要输出任何其他文字：\n"
+    '{"met": true 或 false, "reason": "一句话依据（引用页面里的原文短语）"}'
+)
+
+
+def parse_watch_json(raw):
+    """解析 api 判定输出。任何异常返回 (None, "")——调用方按异常计次，不误判。"""
+    if not raw:
+        return None, ""
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.S)
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    if not m:
+        return None, ""
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None, ""
+    if not isinstance(data, dict) or "met" not in data:
+        return None, ""
+    met = data.get("met")
+    if not isinstance(met, bool):
+        return None, ""  # "yes"/"true" 等非布尔输出按解析失败计（宁可异常重试，不误判达成）
+    return met, str(data.get("reason") or "").strip()
+
+
+class ConditionWatcher(threading.Thread):
+    """条件监视线程（用户定案模型）：轮询固定 URL + 判定 + 事件入队，绝不
+    碰微信窗口（发送在主循环 _drain_conditions 节点）。
+
+    - bot.paused 或 state_watch_enabled=False：只等待不轮询（不烧 API）；
+      expire_at 是固定截止时刻，暂停不顺延——恢复后已过截止直接走到期回递
+    - 抓取失败/切片标记缺失/判定异常 → fail_count 累计，达 WATCH_MAX_FAILS
+      判 dead 提前终止（防页面改版后干烧）
+    - 每轮串行处理（一个监视一轮），判定调用走 _post_chat_completions
+      label="watch"（同一唯一 API 链路）"""
+
+    def __init__(self, bot, stop_event=None, scan_seconds=5.0):
+        super().__init__(name="xiaoli-condition-watch", daemon=True)
+        self.bot = bot
+        self._stop_evt = stop_event if stop_event is not None else threading.Event()
+        self._scan_seconds = scan_seconds
+
+    def run(self):
+        while not self._stop_evt.is_set():
+            try:
+                if self.bot.state_watch_enabled and not self.bot.paused:
+                    self._scan_once()
+            except Exception as e:
+                logger.error(f"[状态监视] 扫描异常: {e}")
+            self._stop_evt.wait(self._scan_seconds)
+
+    def _scan_once(self):
+        bot = self.bot
+        now = time.time()
+        for r in bot.reminders.list_conditions():
+            expire_at = r.get("expire_at") or 0
+            if expire_at and now >= expire_at:
+                # 固定截止（非倒计时）：暂停期间照常流逝，恢复后已过期即回递
+                evidence = self._final_evidence(r)
+                bot.reminders.finish_condition(r["id"], "expired", evidence)
+                bot._condition_queue.put({
+                    "type": "expired", "chat": r.get("chat"),
+                    "condition": r.get("condition"),
+                    "evidence": evidence,
+                })
+                logger.info(f"[状态监视] 到期未达成: {r.get('condition')!r}")
+                continue
+            if now < (r.get("next_check_at") or 0):
+                continue
+            self._check_once(r, now)
+
+    def _check_once(self, r, now):
+        bot = self.bot
+        interval = int(r.get("interval_seconds") or 60)
+        try:
+            text = web_fetch(r.get("url") or "")
+        except Exception as e:
+            logger.debug(f"[状态监视] 抓取失败 {r.get('url')!r}: {e}")
+            text = None
+            seg = None
+        else:
+            seg = self._slice(text, r.get("scope_start"), r.get("scope_end"))
+            if seg is None:
+                # 切片标记在页面里找不到（改版/异常页）——按异常计次，
+                # 绝不整页兜底（用户实验定案：整页匹配会被未来预报误触发）
+                logger.warning(f"[状态监视] 切片标记未命中 "
+                               f"{r.get('scope_start')!r}~{r.get('scope_end')!r}")
+        met, evidence = (None, "")
+        if text is not None and seg is not None:
+            if r.get("judge") == "api":
+                met, evidence = self._judge_api(r, text)
+            else:
+                met, evidence = self._judge_local(r, seg)
+        if met is None:
+            fails = bot.reminders.record_fail(r["id"])
+            if fails >= WATCH_MAX_FAILS:
+                bot.reminders.finish_condition(
+                    r["id"], "dead", "监控的网页连续无法访问或内容结构变化")
+                bot._condition_queue.put({
+                    "type": "dead", "chat": r.get("chat"),
+                    "condition": r.get("condition"),
+                    "evidence": "监控的网页连续无法访问或内容结构变化",
+                })
+                logger.warning(f"[状态监视] 连续失效判 dead: {r.get('condition')!r}")
+            else:
+                bot.reminders.schedule_next(r["id"], now + interval)
+            return
+        if met:
+            bot.reminders.finish_condition(r["id"], "met", evidence)
+            bot._condition_queue.put({
+                "type": "met", "chat": r.get("chat"),
+                "condition": r.get("condition"),
+                "evidence": evidence,
+            })
+            logger.info(f"[状态监视] 条件达成: {r.get('condition')!r} ({evidence[:50]})")
+        else:
+            bot.reminders.schedule_next(r["id"], now + interval, reset_fail=True)
+
+    @staticmethod
+    def _slice(text, start, end):
+        """按创建时模型给的标记切出当前时段片段。任一标记给了但找不到 →
+        None（异常）；两个都没给 → 整页（模型确认过页面只有单时段）。"""
+        seg = text
+        if start:
+            i = seg.find(start)
+            if i < 0:
+                return None
+            seg = seg[i:]
+        if end:
+            j = seg.find(end, len(start) if start else 0)
+            if j < 0:
+                return None
+            seg = seg[:j]
+        return seg
+
+    def _judge_local(self, r, seg):
+        """本地关键词判定（零 API）：present=出现任一关键词；absent=关键词
+        全部消失（等雨停）。absent 有最小片段长度守卫——验证页/空壳页会
+        被「关键词不出现」误判成达成，片段过短按异常处理（present 出现
+        即命中，短页面不影响判定）。"""
+        kws = [str(k) for k in (r.get("met_keywords") or []) if str(k)]
+        if not kws:
+            return None, ""
+        low = seg.lower()
+        hit = [k for k in kws if k.lower() in low]
+        if r.get("match_type") == "absent":
+            if len(seg) < WATCH_MIN_SLICE_CHARS:
+                return None, ""
+            if hit:
+                return False, f"片段内仍有: {hit[0]}"
+            excerpt = seg[:120].replace("\n", " ")
+            return True, f"关键词 {kws} 已不在当前时段出现。片段：{excerpt}"
+        if not hit:
+            return False, ""
+        i = low.find(hit[0].lower())
+        excerpt = seg[max(0, i - 40):i + 80].replace("\n", " ")
+        return True, f"命中关键词 {hit[0]}：…{excerpt}…"
+
+    def _judge_api(self, r, text):
+        """api 判定（每次轮询一次小调用，走唯一链路 label=watch）。
+        调用失败/解析失败返回 (None, "")——按异常计次，不误判达成。"""
+        bot = self.bot
+        model = bot.chat_model or VISION_MODEL_DEFAULT
+        headers = {"Authorization": f"Bearer {bot.api_key}",
+                   "Content-Type": "application/json"}
+        messages = [
+            {"role": "system", "content": WATCH_JUDGE_PROMPT},
+            {"role": "user", "content":
+                f"用户关心的条件：{r.get('condition')}\n"
+                f"（达成后要做的事：{r.get('content')}）\n\n网页文本：\n"
+                + text[:WATCH_EVIDENCE_CHARS]},
+        ]
+        payload = {"model": model, "messages": messages,
+                   "temperature": 0, "max_tokens": 200}
+        try:
+            data = bot._post_chat_completions(
+                bot.api_url, headers, payload, 60, label="watch",
+                meta={"kind": "watch", "model": model, "messages": messages})
+            raw = (data.get("choices") or [{}])[0].get("message", {}) \
+                .get("content", "")
+        except Exception as e:
+            logger.warning(f"[状态监视] api 判定调用失败（计异常）: {e}")
+            return None, ""
+        met, reason = parse_watch_json(raw)
+        if met is None:
+            return None, ""
+        return met, (reason or ("模型判定达成" if met else ""))
+
+    def _final_evidence(self, r):
+        """到期回递前尽力抓一次页面，给出「到期时的状况」摘要。"""
+        try:
+            text = web_fetch(r.get("url") or "")
+        except Exception:
+            return "（到期时页面无法访问）"
+        seg = self._slice(text, r.get("scope_start"), r.get("scope_end"))
+        seg = seg if seg is not None else text
+        return (f"页面片段：{seg[:200]}".replace("\n", " "))
+
+
 # 长记忆压缩：提炼「必须记住的重要记忆 + 关键词记忆索引」（一次调用双产出）。
 # 每攒满 memory_compress_batch 条深层消息触发一次；输入带上已有条目供模型
 # 去重（不重复提炼、不重复建索引）。
@@ -802,6 +1018,11 @@ class AgentBot(WeChatBot):
         self._reminder_sched = ReminderScheduler(
             self.reminders, self._reminder_queue, stop_event=stop_event)
         self._reminder_sched.start()
+        # 条件监视（kind=condition）：轮询线程只抓页/判定，事件入队；
+        # 发送在主循环 _drain_conditions 节点（窗口互斥纪律同定时消息）
+        self._condition_queue = queue.Queue()
+        self._condition_watcher = ConditionWatcher(self, stop_event=stop_event)
+        self._condition_watcher.start()
         # 长记忆压缩线程：深层记忆攒满 batch 条后提炼重要记忆/关键词索引
         # （memory_compress_enabled 关闭时线程空转等待，设置热改后自动生效）
         self._memory_compressor = MemoryCompressor(self, stop_event=stop_event)
@@ -1266,12 +1487,12 @@ class AgentBot(WeChatBot):
 
 
     def _drain_reminders(self):
-        """消费到期提醒队列（主循环节点）。
+        """消费到期定时触发器（kind=time）队列（主循环节点）。
 
-        发送走 wx.send_text 直发——旁路 _send_text 的占位计数（定时消息
-        不得破坏 skip_bot/N[chat] 语义：占位挂起时定时消息若归零计数，
-        占位会被当成实质回复，用户其后的消息将被漏读）。发送失败也确认
-        出队（mark_fired），避免死循环重发刷屏。"""
+        火线统一（用户定案）：到点不再发固定文案【定时提醒】，而是把触发
+        事件作为消息回递给 API（call_chat_ai，唯一链路，人设+历史+缓存布局
+        全沿用）生成角色内回复后发送。发送失败也确认出队（mark_fired），
+        避免死循环重发刷屏。"""
         while True:
             try:
                 r = self._reminder_queue.get_nowait()
@@ -1281,27 +1502,117 @@ class AgentBot(WeChatBot):
             try:
                 now = time.time()
                 if now - (r.get("fire_at") or now) > GRACE_SECONDS:
-                    logger.warning(f"[定时] 提醒 {rid} 超宽限（暂停/滞留），按错过处理")
+                    logger.warning(f"[定时] 触发器 {rid} 超宽限（暂停/滞留），按错过处理")
                     continue
-                self.wx.send_text(r.get("chat"), f"【定时提醒】{r.get('content')}")
-                logger.info(f"[定时] 已发送 -> {r.get('chat')}: {str(r.get('content'))[:40]}")
+                chat = r.get("chat") or ""
+                if not chat:
+                    continue
+                fire_hm = time.strftime("%m-%d %H:%M",
+                                        time.localtime(r.get("fire_at") or now))
+                trigger = (f"[定时触发] 与用户约定的指定时间（{fire_hm}）到了。"
+                           f"这条触发器创建时的对话就在历史里，"
+                           f"请按人设自然地主动回复。")
+                reply = self.call_chat_ai(chat, trigger)
+                self._send_trigger_reply(reply, chat)
+                logger.info(f"[定时] 已触发 -> {chat}: {content[:40]}")
             except Exception as e:
-                logger.error(f"[定时] 发送失败 {rid}: {e}")
+                logger.error(f"[定时] 触发失败 {rid}: {e}")
             finally:
                 self.reminders.mark_fired(rid)
 
-    def _handle_set_reminder(self, chat_name, sender, result, user_text):
-        """节点 I 的 set_reminder 工具分支：解析时间/内容 → 入库 → 角色内确认。
+    def _drain_conditions(self):
+        """消费条件监视事件队列（主循环节点）：达成/到期/失效统一回递 API
+        生成角色内回复后发送（与定时触发同一火线，用户定案）。
 
-        时间解析失败 / 已过 / reminders 不可用 → 返回 None 降级普通聊天。"""
+        触发消息只带条件与页面状况——达成后的措辞由 API 自行生成（content
+        提醒事项字段已随「回递即回复」语义废除，用户定案）。
+        call_chat_ai 自身会把触发消息与回复写入对话历史（不在此重复写）。
+        发送失败不再重试——终态已在 store 落盘（done 标记），重发会造成
+        重复打扰。"""
+        while True:
+            try:
+                ev = self._condition_queue.get_nowait()
+            except queue.Empty:
+                break
+            chat = str(ev.get("chat") or "").strip()
+            if not chat:
+                continue
+            condition = str(ev.get("condition") or "")
+            evidence = str(ev.get("evidence") or "")
+            kind = ev.get("type")
+            if kind == "met":
+                trigger = (f"[条件达成] 你之前答应帮用户盯着的条件出现了——\n"
+                           f"条件：{condition}\n页面状况：{evidence}\n"
+                           f"请按人设把这个消息告诉用户。")
+            elif kind == "expired":
+                trigger = (f"[监视到期] 你之前答应帮用户盯着「{condition}」，"
+                           f"到截止时间了仍未达成。最后看到的页面状况：{evidence}\n"
+                           f"请按人设告诉用户没等到，别再让他等了。")
+            else:  # dead
+                trigger = (f"[监视失效] 你之前答应帮用户盯着「{condition}」，但监控"
+                           f"的网页一直无法访问（可能改版了），监视被迫停止。\n"
+                           f"请按人设向用户说明情况并致歉。")
+            try:
+                reply = self.call_chat_ai(chat, trigger)
+                self._send_trigger_reply(reply, chat)
+                logger.info(f"[状态监视] 已回递 -> {chat} ({kind})")
+            except Exception as e:
+                logger.error(f"[状态监视] 回递失败 {chat}: {e}")
+
+    def _send_trigger_reply(self, text, chat):
+        """触发器回复直发（旁路 _send_text 的占位归零——定时/条件触发消息
+        不得破坏 skip_bot/N[chat] 语义：占位挂起时若被归零，占位会被当成
+        实质回复，用户其后的消息将被漏读）。拆分规则与 _send_text 一致
+        （按换行分段，空段丢弃）。"""
+        for part in [p.strip() for p in re.split(r"\n+", text or "") if p.strip()]:
+            try:
+                self.wx.send_text(chat, part)
+                logger.info(f"🤖 → [{chat}]: {part[:50]}")
+            except Exception as e:
+                logger.error(f"[触发回复] 发送失败: {e}")
+
+    def _record_reply_latency(self, t0):
+        """记录一次端到端回复耗时（识别到红圈 → 产出回复），供用量页
+        「平均回复耗时」列。记录为 kind="reply"——聚合时不计入 API 调用
+        数（summary 里单独走 reply 桶），含媒体防抖等待等全部处理耗时。"""
+        store = getattr(self, "usage_store", None)
+        if store is None:
+            return
+        try:
+            store.record(kind="reply", model=self.chat_model, ok=True,
+                         latency_ms=(time.time() - t0) * 1000.0)
+        except Exception as e:
+            logger.debug(f"[用量] 回复耗时记录失败: {e}")
+
+    def _handle_set_reminder(self, chat_name, sender, result, user_text):
+        """节点 I 的 set_reminder 工具分支（统一触发器）：kind=time 定时 /
+        kind=condition 状态监视。解析 → 校验 → 入库 → 固定文案确认。
+
+        参数非法 / 时间已过 / reminders 不可用 → 返回 None 降级普通聊天；
+        状态监视未在设置开启 → 不降级（降级会让模型凭空答应），直接友好
+        告知用户去设置页开启。"""
         try:
             args = json.loads(result.get("arguments") or "{}")
         except (ValueError, TypeError):
             return None
+        if not isinstance(args, dict):
+            return None
+        kind = str(args.get("kind") or "").strip().lower()
+        if not kind:
+            # 旧格式兼容：给了 time 即定时，给了 url 即状态监视
+            kind = "condition" if str(args.get("url") or "").strip() else "time"
+        if kind == "condition":
+            return self._create_condition_watch(chat_name, args, user_text)
+        # 无 content 概念（用户定案）：到点/达成只回递事件，回复由 API 结合
+        # 创建时的历史对话自行生成，模型不预写任何提醒文案
+        return self._create_time_reminder(chat_name, args, user_text)
+
+    def _create_time_reminder(self, chat_name, args, user_text):
+        if getattr(self, "reminders", None) is None:
+            return None
         raw_time = str(args.get("time") or "").strip()
-        content = str(args.get("content") or "").strip()
         repeat = str(args.get("repeat") or "once").strip()
-        if not raw_time or not content:
+        if not raw_time:
             return None
         try:
             fire_at = time.mktime(time.strptime(raw_time, "%Y-%m-%d %H:%M"))
@@ -1311,14 +1622,84 @@ class AgentBot(WeChatBot):
         if fire_at <= time.time():
             logger.info(f"[定时] 模型给的触发时间已过: {raw_time}，降级聊天")
             return None
-        if getattr(self, "reminders", None) is None:
-            return None
-        self.reminders.add(chat_name, content, fire_at, repeat)
+        self.reminders.add(chat_name, "", fire_at, repeat)
         if user_text:
             self._add_history(chat_name, "user", user_text)
-        self._add_history(chat_name, "assistant", f"[已设定时提醒 {raw_time} {content}]")
-        reply = f"记住啦，{raw_time} 我会提醒你「{content}」(๑•̀ㅁ•́๑)"
-        logger.info(f"[定时] 已创建提醒 -> {chat_name} @ {raw_time}: {content[:40]}")
+        self._add_history(chat_name, "assistant",
+                          f"[已设定时触发 {raw_time}，到点回递自行回复]")
+        reply = f"记住啦，{raw_time} 我会准时找你 (๑•̀ㅁ•́๑)"
+        logger.info(f"[定时] 已创建触发器 -> {chat_name} @ {raw_time}")
+        self._send_text(reply, chat_name)
+        return True
+
+    def _create_condition_watch(self, chat_name, args, user_text):
+        """创建状态监视：校验 → 入库 → 固定文案确认。
+
+        条件监视不再依赖 content（提醒事项）——达成后是回递 API 让其根据
+        条件与页面状况自行回复（用户定案），content 仅作备注存档可缺省。
+        校验失败返回 None 降级普通聊天；功能未开启（state_watch_enabled，
+        用户在设置页决定——会产生额外 API 调用）→ 发提示并返回 True。"""
+        if getattr(self, "reminders", None) is None:
+            return None
+        if not getattr(self, "state_watch_enabled", False):
+            logger.info("[状态监视] 未开启（设置页开关），已告知用户")
+            if user_text:
+                self._add_history(chat_name, "user", user_text)
+            self._add_history(chat_name, "assistant",
+                              "[状态监视未开启，已告知用户到设置页打开]")
+            self._send_text("这个「盯着状态提醒我」的功能还没有开启呢～"
+                            "请先在小漓的设置页里打开「状态监视」，再让我试一次好不好",
+                            chat_name)
+            return True
+        url = str(args.get("url") or "").strip()
+        condition = str(args.get("condition") or "").strip()
+        if not url.startswith(("http://", "https://")) or not condition:
+            logger.warning(f"[状态监视] 参数非法 url={url[:60]!r}，降级聊天")
+            return None
+        # 解析跳转链到真实目标页（模型常直接选搜索结果里的搜狗 /link——
+        # 跳转链接会过期且展示无意义；失败原样保留）
+        resolved = resolve_redirect(url)
+        if resolved != url:
+            logger.info(f"[状态监视] 轮询目标已解析: {url[:60]} -> {resolved[:60]}")
+            url = resolved
+        judge = str(args.get("judge") or "local").strip().lower()
+        match_type = str(args.get("match_type") or "present").strip().lower()
+        raw_kws = args.get("met_keywords")
+        if isinstance(raw_kws, str):
+            raw_kws = re.split(r"[,，、\s]+", raw_kws)
+        kws = [str(k).strip() for k in (raw_kws or []) if str(k).strip()]
+        if judge == "local" and not kws:
+            logger.warning("[状态监视] local 判定缺 met_keywords，降级聊天")
+            return None
+        try:
+            interval = int(float(args.get("interval_seconds") or 60))
+        except (TypeError, ValueError):
+            interval = 60
+        raw_expire = str(args.get("expire_at") or "").strip()
+        if raw_expire:
+            try:
+                expire_at = time.mktime(time.strptime(raw_expire, "%Y-%m-%d %H:%M"))
+                if expire_at <= time.time():
+                    logger.info("[状态监视] 截止时间已过，降级聊天")
+                    return None
+            except (ValueError, TypeError):
+                expire_at = time.time() + WATCH_DEFAULT_TTL
+        else:
+            expire_at = time.time() + WATCH_DEFAULT_TTL
+        content = str(args.get("content") or "").strip()  # 备注，可缺省
+        item = self.reminders.add_condition(
+            chat_name, content, url, condition, judge=judge, match_type=match_type,
+            met_keywords=kws, scope_start=args.get("scope_start"),
+            scope_end=args.get("scope_end"), interval_seconds=interval,
+            expire_at=expire_at)
+        if user_text:
+            self._add_history(chat_name, "user", user_text)
+        self._add_history(chat_name, "assistant",
+                          f"[已创建状态监视 {condition[:40]} -> {url[:60]}]")
+        reply = (f"好，我会盯着「{condition[:40]}」，一有动静或者到截止时间"
+                 f"就告诉你 (๑•̀ㅁ•́๑)")
+        logger.info(f"[状态监视] 已创建 -> {chat_name}: {condition[:40]} "
+                    f"@ {item['url'][:60]} every {item['interval_seconds']}s")
         self._send_text(reply, chat_name)
         return True
 
@@ -1366,6 +1747,8 @@ class AgentBot(WeChatBot):
         # 不了这里（上面 return），错过的提醒由宽限/滚动逻辑兜底
         if getattr(self, "_reminder_queue", None) is not None:
             self._drain_reminders()
+        if getattr(self, "_condition_queue", None) is not None:
+            self._drain_conditions()
         # 任务成果轮询不受 cooldown / 任务暂停限制，必须最先执行
         self._tick_poll_outbox()
         resume, self._task_was_active, self._task_end_time = should_resume_listen(
@@ -1397,12 +1780,14 @@ class AgentBot(WeChatBot):
                     logger.debug(f"[退避] {chat_name} 上次处理失败未满 {self._fail_backoff:.0f}s，跳过")
                     continue
                 logger.info(f"🔔 发现新消息：{chat_name}")
+                t0 = time.time()  # 端到端回复耗时起点（识别到红圈）
                 try:
                     handled = self._handle_unread_session(chat_name)
                 except Exception as e:
                     logger.error(f"处理会话 {chat_name} 异常: {e}\n{traceback.format_exc()}")
                     handled = False
                 if handled:
+                    self._record_reply_latency(t0)
                     self._chat_fail_at.pop(chat_name, None)  # 处理成功，解除退避
                     self.last_reply_time = time.time()
                     return  # 每轮只处理一个会话，回复后回到红点监听

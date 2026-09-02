@@ -86,7 +86,48 @@ class TestUsageStore(unittest.TestCase):
         s = self.store.summary(days=7)
         self.assertEqual(s["today"], {"calls": 0, "ok": 0, "fail": 0,
                                       "prompt": 0, "completion": 0,
-                                      "latency_sum": 0.0})
+                                      "latency_sum": 0.0, "cache_hit": 0,
+                                      "cache_miss": 0, "reasoning": 0,
+                                      "total": 0})
+
+    def test_record_cache_fields_and_hit_ratio(self):
+        """缓存字段透传 + 命中率聚合；无缓存数据显示「无数据」（None）而非 0%。"""
+        from xiaoli_app.usage_store import hit_ratio
+        self.store.record(kind="chat", model="m1", prompt_tokens=1000,
+                          completion_tokens=100, ok=True,
+                          cache_hit=800, cache_miss=200, reasoning=40,
+                          total_tokens=1140, src="api")
+        self.store.record(kind="chat", model="m1", prompt_tokens=500,
+                          completion_tokens=50, ok=True,
+                          cache_hit=250, cache_miss=250, src="api")
+        s = self.store.summary(days=7)
+        b = s["total"]
+        self.assertEqual(b["cache_hit"], 1050)
+        self.assertEqual(b["cache_miss"], 450)
+        self.assertEqual(b["reasoning"], 40)
+        self.assertEqual(b["total"], 1140)
+        self.assertAlmostEqual(hit_ratio(b), 1050 / 1500)
+        self.assertAlmostEqual(s["by_model"]["m1"]["cache_hit"], 1050)
+        # 旧记录（无缓存字段）不参与命中率——None 而非 0%
+        self.store.record(kind="chat", model="old", ok=True)
+        s2 = self.store.summary(days=7)
+        self.assertIsNone(hit_ratio(s2["by_model"]["old"]))
+        self.assertIsNone(hit_ratio({"calls": 1, "cache_hit": 0, "cache_miss": 0}))
+
+    def test_reply_records_separate_from_calls(self):
+        """kind=reply 是端到端回复耗时记录：不计入调用/token 各桶，单独聚
+        合进 reply_by_model 供「平均回复耗时」列。"""
+        self.store.record(kind="chat", model="m1", prompt_tokens=100,
+                          completion_tokens=10, ok=True, latency_ms=500)
+        self.store.record(kind="reply", model="m1", ok=True, latency_ms=15300)
+        self.store.record(kind="reply", model="m1", ok=True, latency_ms=2700)
+        s = self.store.summary(days=7)
+        self.assertEqual(s["total"]["calls"], 1)          # reply 不算调用
+        self.assertEqual(s["total"]["prompt"], 100)
+        self.assertEqual(s["by_day"][UsageStore._day_key(time.time())]["calls"], 1)
+        rep = s["reply_by_model"]["m1"]
+        self.assertEqual(rep["count"], 2)
+        self.assertAlmostEqual(rep["latency_sum"], 18000.0)  # 平均 9s
 
     def test_default_path_under_data_dir(self):
         from xiaoli_app.usage_store import default_usage_path

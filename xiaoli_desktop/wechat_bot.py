@@ -537,6 +537,11 @@ class WeChatBot:
             os.path.dirname(os.path.abspath(self.memory_file)) or ".", "memory_deep")
         self._deep_count = {}   # chat -> 深层文件行数（追加时维护，启动时清点）
         self._memory_lock = threading.RLock()
+        # 状态监视（set_reminder kind=condition）总开关：会产生额外 API 调用
+        # （api 判定模式每轮一次小调用 + 触发回递），是否开启由用户在设置页
+        # 决定（默认关）。关闭时工具分支直接友好告知，不降级普通聊天
+        # （降级会让模型凭空答应没做到的提醒）。
+        self.state_watch_enabled = bool(cfg.get("state_watch_enabled", False))
         # 文件处理配置
         self.file_model = strip_model_prefix(cfg.get("file_model", self.chat_model))
         self.file_temp = cfg.get("file_temp", 1.0)
@@ -1137,7 +1142,12 @@ class WeChatBot:
         """用量统计埋点（_post_chat_completions 终态调用一次）。
 
         usage_store 缺失（测试桩 bot / 未初始化）时静默跳过。API 响应缺
-        usage 字段时用 estimate_tokens 兜底估算。"""
+        usage 字段时用 estimate_tokens 兜底估算。缓存字段（命中/未命中/
+        推理 tokens）从响应 usage 透传：DeepSeek 用顶层 prompt_cache_hit/
+        miss_tokens，OpenAI 系用 prompt_tokens_details.cached_tokens 与
+        completion_tokens_details.reasoning_tokens——v2.5.0 的消息布局缓存
+        优化效果就靠这几列验证。src 标记数据来源：api=响应实测，est=本地
+        估算（可信度分开，不混算）。"""
         store = getattr(self, "usage_store", None)
         if store is None:
             return
@@ -1155,9 +1165,33 @@ class WeChatBot:
                         data["choices"][0]["message"]["content"] or "")
                 except (KeyError, IndexError, TypeError):
                     pass
+
+            def _int(v):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return 0
+
+            p_details = usage.get("prompt_tokens_details") or {}
+            c_details = usage.get("completion_tokens_details") or {}
+            cache_hit = usage.get("prompt_cache_hit_tokens")
+            if cache_hit is None:
+                cache_hit = p_details.get("cached_tokens")
+            cache_hit = _int(cache_hit)
+            cache_miss = usage.get("prompt_cache_miss_tokens")
+            if cache_miss is None and prompt_t is not None:
+                cache_miss = _int(prompt_t) - cache_hit
+            else:
+                cache_miss = _int(cache_miss)
             store.record(kind=meta.get("kind"), model=meta.get("model"),
                          prompt_tokens=prompt_t, completion_tokens=completion_t,
-                         ok=ok, status=status, latency_ms=latency_ms)
+                         ok=ok, status=status, latency_ms=latency_ms,
+                         cache_hit=cache_hit, cache_miss=cache_miss,
+                         reasoning=_int(c_details.get("reasoning_tokens")),
+                         total_tokens=usage.get("total_tokens"),
+                         src="api" if (usage.get("prompt_tokens") is not None
+                                       or usage.get("completion_tokens") is not None)
+                         else "est")
         except Exception as e:
             logger.debug(f"[用量] 记录失败: {e}")
 
@@ -1251,25 +1285,87 @@ class WeChatBot:
             },
         }]
         if getattr(self, "reminders", None) is not None:
-            # 定时提醒工具：仅 AgentBot（有 reminders 存储）时声明；
-            # 模型依据 system 的「当前时间」消息把相对表达换算成绝对时间
+            # 统一触发器工具（kind=time 定时 / kind=condition 状态监视）：
+            # 模型依据 system 的「当前时间」消息把相对表达换算成绝对时间。
+            # 无 content 参数——到点/达成只回递事件，回复由模型结合创建时
+            # 的历史对话自行生成（用户定案：不做预写文案的闹钟）。
+            # 状态监视纪律（真机实验定案，见 ConditionWatcher）：创建前必须
+            # 用 web_search 挑页面并 web_fetch 看过实际内容，轮询期只访问
+            # 固定 URL、不再调用搜索引擎；页面混合当前与未来时段（如天气预报
+            # 页「今天暴雨…周六晴」）时必须给 scope 切片，否则本地判定会被
+            # 未来预报误触发。
             tools.append({
                 "type": "function",
                 "function": {
                     "name": "set_reminder",
-                    "description": "用户要求定时提醒/定时发消息时调用"
-                                   "（如「明天下午3点提醒我查成绩」「每天早上8点叫我起床」）",
+                    "description": "创建触发器，两种模式二选一（到点/达成时系统会把"
+                                   "触发事件回递给你，由你结合创建该触发器时的对话"
+                                   "历史按人设自然回复，因此不需要预先写提醒文案）：\n"
+                                   "① kind=time 定时：到指定时间触发"
+                                   "（如「明天下午3点提醒我查成绩」「每天早上8点叫我起床」）。\n"
+                                   "② kind=condition 状态监视：轮询监控一个固定网页，"
+                                   "条件达成或到截止时间时触发"
+                                   "（如「如果一会儿福州大学旗山校区下雨了提醒我去拿快递」"
+                                   "「盯着一个商品页面，降价了告诉我」）。\n"
+                                   "状态监视创建规则：先用 web_search 搜索并挑一个内容"
+                                   "稳定的页面，用 web_fetch 看过实际内容后再创建"
+                                   "（关键词要按页面实际措辞给全同义形式）；轮询期只"
+                                   "访问该固定 URL、不再调用搜索引擎；若页面同时包含"
+                                   "当前与未来时段的信息（如天气预报页），必须给"
+                                   "scope_start/scope_end 圈出与条件相关的当前时段切片"
+                                   "（如「今天」到「明天」），绝不能整页匹配；条件无法"
+                                   "用关键词判断（需要理解语义或比较数值）时用 judge=api。",
                     "parameters": {
                         "type": "object",
                         "properties": {
+                            "kind": {"type": "string", "enum": ["time", "condition"],
+                                     "description": "触发器类型：time=定时，"
+                                                    "condition=状态监视"},
                             "time": {"type": "string",
-                                     "description": "触发时间，格式 YYYY-MM-DD HH:MM"
-                                                    "（24 小时制；依据当前时间换算相对表达）"},
-                            "content": {"type": "string", "description": "提醒内容（届时原样转告用户）"},
+                                     "description": "kind=time 必填。触发时间，格式"
+                                                    " YYYY-MM-DD HH:MM（24 小时制；"
+                                                    "依据当前时间换算相对表达）"},
                             "repeat": {"type": "string", "enum": ["once", "daily", "weekly"],
-                                       "description": "重复规则，默认 once"},
+                                       "description": "kind=time：重复规则，默认 once"},
+                            "condition": {"type": "string",
+                                          "description": "kind=condition 必填。自然语言"
+                                                         "条件原文（判定与到期回递的依据）"},
+                            "url": {"type": "string",
+                                    "description": "kind=condition 必填。要固定轮询监控"
+                                                   "的网页 URL（创建时已用 web_fetch 验看过）"},
+                            "judge": {"type": "string", "enum": ["local", "api"],
+                                      "description": "kind=condition：达成判定方式，默认"
+                                                     " local。local=本地关键词匹配（零 API"
+                                                     " 成本，适合文字标记型条件）；api=每次"
+                                                     "抓取后调模型判定（适合需理解语义或比较"
+                                                     "数值的条件）"},
+                            "match_type": {"type": "string", "enum": ["present", "absent"],
+                                           "description": "kind=condition 且 judge=local："
+                                                          "present=切片内出现任一关键词即达成"
+                                                          "（如「有货」）；absent=切片内关键词"
+                                                          "全部消失即达成（如「等雨停」盯「雨」"
+                                                          "消失）。默认 present"},
+                            "met_keywords": {"type": "array",
+                                             "items": {"type": "string"},
+                                             "description": "kind=condition 且 judge=local"
+                                                            " 必填：判定关键词数组（如"
+                                                            " [\"雨\",\"降雨\",\"雷阵雨\"]），"
+                                                            "按页面实际措辞给全同义形式"},
+                            "scope_start": {"type": "string",
+                                            "description": "kind=condition 可选：切片起始"
+                                                           "标记（页面文本原文，如「今天」）"},
+                            "scope_end": {"type": "string",
+                                          "description": "kind=condition 可选：切片结束标记"
+                                                         "（如「明天」），只匹配两标记之间，"
+                                                         "隔离未来时段"},
+                            "interval_seconds": {"type": "integer",
+                                                 "description": "kind=condition：轮询间隔秒，"
+                                                                "默认 60，最小 10"},
+                            "expire_at": {"type": "string",
+                                          "description": "kind=condition 可选：截止时间"
+                                                         " YYYY-MM-DD HH:MM，不填默认 7 天后"},
                         },
-                        "required": ["time", "content"],
+                        "required": ["kind"],
                     },
                 },
             })
@@ -1282,7 +1378,7 @@ class WeChatBot:
             "type": "function",
             "function": {
                 "name": "web_search",
-                "description": "联网搜索（百度/必应/搜狗多引擎）。需要实时信息"
+                "description": "联网搜索（搜狗/必应/百度多引擎并发）。需要实时信息"
                                "（天气/新闻/价格/赛事结果等）或拿不准的事实时调用。"
                                "query 一次只查一个主题，用简短中文短语，多个主体用"
                                "空格分开（如「福州天气」「福州大学 唐勇」），不要堆"
