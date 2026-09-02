@@ -1,15 +1,22 @@
 # -*- coding: utf-8 -*-
-"""定时消息（提醒）存储：reminders.json CRUD + 到期扫描（无 Qt 依赖）。
+"""触发器存储：reminders.json CRUD + 到期扫描（无 Qt 依赖）。
 
 数据以文件为唯一事实源：设置页（UI 线程）增删改、调度线程扫描、
 引擎主循环确认触发，全部经本类的类级路径锁串行化，跨实例互斥。
 
-字段：id / chat（目标聊天）/ content（提醒内容）/ fire_at（epoch 秒）/
-repeat（once | daily | weekly）/ enabled / last_fired / missed。
+统一触发器（v2）：一张表两种 kind，火线一致——time 到点 / condition 达成
+或到期，都回递 API 生成角色内回复，不再有固定文案直发。
 
-触发模型（用户定案）：只做系统时间（wall clock）单轨——相对表达
-（「半小时后」）在创建那一刻折算成绝对时间点入库，之后同一张表同一条
-触发路径；系统时间天然抗睡眠/挂起，倒计时会漂移。
+- kind="time"（定时）：id / chat / content / fire_at（epoch 秒）/
+  repeat（once | daily | weekly）/ enabled / last_fired / missed。
+  只做系统时间（wall clock）单轨——相对表达（「半小时后」）在创建那一刻
+  折算成绝对时间点入库；系统时间天然抗睡眠/挂起，倒计时会漂移。
+- kind="condition"（状态监视）：content / url（固定轮询网页，搜索引擎只在
+  创建时用）/ condition（自然语言条件原文）/ judge（local | api）/
+  match_type（present | absent）/ met_keywords / scope_start / scope_end
+  （当前时段切片标记，防未来预报误触发）/ interval_seconds（下限 10）/
+  expire_at（固定截止时刻，非倒计时，暂停不顺延）/ next_check_at /
+  fail_count / done（None=进行中，"met"|"expired"|"dead"=终态）/ evidence。
 """
 import json
 import os
@@ -18,6 +25,9 @@ import time
 import uuid
 
 GRACE_SECONDS = 300  # 补发宽限：暂停/关机错过的提醒 5 分钟内照发，超过按错过处理
+WATCH_INTERVAL_MIN = 10       # 条件监视轮询间隔下限（秒）
+WATCH_DEFAULT_INTERVAL = 60   # 条件监视默认轮询间隔（秒）
+WATCH_DEFAULT_TTL = 7 * 86400  # 条件监视默认截止：创建时刻 + 7 天（不填 expire_at 时）
 
 
 def default_reminders_path():
@@ -61,6 +71,7 @@ class RemindersStore:
     def add(self, chat, content, fire_at, repeat="once"):
         item = {
             "id": uuid.uuid4().hex[:12],
+            "kind": "time",
             "chat": str(chat),
             "content": str(content),
             "fire_at": float(fire_at),
@@ -74,6 +85,52 @@ class RemindersStore:
             items.append(item)
             self._save(items)
         return item
+
+    def add_condition(self, chat, content, url, condition, judge="local",
+                      match_type="present", met_keywords=None,
+                      scope_start=None, scope_end=None,
+                      interval_seconds=WATCH_DEFAULT_INTERVAL, expire_at=None):
+        """登记条件监视（参数合法性由调用方校验，这里只做规范化兜底）。"""
+        item = {
+            "id": uuid.uuid4().hex[:12],
+            "kind": "condition",
+            "chat": str(chat),
+            "content": str(content),
+            "url": str(url or "").strip(),
+            "condition": str(condition or "").strip(),
+            "judge": judge if judge in ("local", "api") else "local",
+            "match_type": match_type if match_type in ("present", "absent") else "present",
+            "met_keywords": [str(k).strip() for k in (met_keywords or [])
+                             if str(k).strip()],
+            "scope_start": (str(scope_start).strip() or None) if scope_start else None,
+            "scope_end": (str(scope_end).strip() or None) if scope_end else None,
+            "interval_seconds": max(WATCH_INTERVAL_MIN, int(interval_seconds
+                                                           or WATCH_DEFAULT_INTERVAL)),
+            "expire_at": float(expire_at) if expire_at else None,
+            "next_check_at": time.time(),
+            "fail_count": 0,
+            "enabled": True,
+            "done": None,
+            "evidence": None,
+        }
+        with self._lock():
+            items = self._load_unlocked()
+            items.append(item)
+            self._save(items)
+        return item
+
+    def list_conditions(self, active_only=True):
+        """条件监视条目快照（拷贝）。active_only=True 只返回进行中的。"""
+        with self._lock():
+            items = self._load_unlocked()
+        out = []
+        for r in items:
+            if r.get("kind") != "condition":
+                continue
+            if active_only and (not r.get("enabled") or r.get("done")):
+                continue
+            out.append(dict(r))
+        return out
 
     def remove(self, rid):
         with self._lock():
@@ -101,8 +158,8 @@ class RemindersStore:
             items = self._load_unlocked()
             changed = False
             for r in items:
-                if not r.get("enabled"):
-                    continue
+                if not r.get("enabled") or r.get("kind") == "condition":
+                    continue  # 条件监视由 list_conditions/ConditionWatcher 单独处理
                 fire_at = r.get("fire_at") or 0
                 if fire_at > now:
                     continue
@@ -135,6 +192,36 @@ class RemindersStore:
                 r["fire_at"] = max(r.get("fire_at") or now, now) + step
             else:
                 r["enabled"] = False
+        return self._mutate(rid, _fn)
+
+    # ---------- 条件监视（ConditionWatcher 线程调用） ----------
+
+    def schedule_next(self, rid, when, reset_fail=False):
+        """推进下一次轮询时刻（未达成时调用）。reset_fail：抓取/判定恢复正常
+        时清零连续失败计数。"""
+        def _fn(r):
+            r["next_check_at"] = float(when)
+            if reset_fail:
+                r["fail_count"] = 0
+        return self._mutate(rid, _fn)
+
+    def record_fail(self, rid):
+        """轮询/判定异常计一次连续失败，返回累计值（达到阈值判 dead）。"""
+        count = {"n": 0}
+        def _fn(r):
+            r["fail_count"] = int(r.get("fail_count") or 0) + 1
+            count["n"] = r["fail_count"]
+        self._mutate(rid, _fn)
+        return count["n"]
+
+    def finish_condition(self, rid, outcome, evidence=None):
+        """条件监视终态：met（达成）/ expired（到截止未达成）/ dead（页面
+        连续失效）。enabled=False 保留记录，UI 可见。"""
+        assert outcome in ("met", "expired", "dead")
+        def _fn(r):
+            r["enabled"] = False
+            r["done"] = outcome
+            r["evidence"] = str(evidence or "")[:500] or None
         return self._mutate(rid, _fn)
 
     def _mutate(self, rid, fn):

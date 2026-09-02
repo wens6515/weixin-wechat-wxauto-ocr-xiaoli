@@ -150,6 +150,10 @@ AI_DEFAULTS = {
     "memory_compress_batch": 30,
     "memory_important_max": 20,
     "memory_compress_model": "",
+    # 状态监视（set_reminder kind=condition）：轮询固定网页 + api 判定模式
+    # 每轮一次小调用 + 触发回递，会产生额外 API 调用——是否开启由用户在
+    # 设置页决定（默认关）。定时提醒（kind=time）不受此开关影响。
+    "state_watch_enabled": False,
 }
 
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。

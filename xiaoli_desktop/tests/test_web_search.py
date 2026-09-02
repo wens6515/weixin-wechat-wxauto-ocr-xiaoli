@@ -150,7 +150,7 @@ class TestParallelMerge(unittest.TestCase):
         }
         with self._patch_backends(fakes):
             out = ws.web_search("q")
-        self.assertEqual([r["source"] for r in out], ["baidu", "bing"])  # 同题去重
+        self.assertEqual([r["source"] for r in out], ["sogou", "bing"])  # 同题去重，搜狗优先
 
     def test_blocked_source_degrades_to_others(self):
         # 百度被安全验证拦截（空）→ 必应/搜狗照常补位
@@ -203,7 +203,7 @@ class TestParallelMerge(unittest.TestCase):
         with self._patch_backends(fakes):
             out = ws.web_search("q")
         self.assertEqual(len(out), ws.MAX_RESULTS)
-        self.assertEqual(out[0]["title"], "a0")
+        self.assertEqual(out[0]["title"], "b0")  # 搜狗空 → 必应按优先级顶上
 
     def test_all_backends_error_raises(self):
         with mock.patch.object(ws.requests, "get",
@@ -222,6 +222,122 @@ class TestParallelMerge(unittest.TestCase):
         with mock.patch.object(ws.requests, "get", side_effect=fake):
             results = ws.web_search("q", backends=("nope", "bing"))
         self.assertEqual(len(results), 2)
+
+
+class TestBingNewLayout(unittest.TestCase):
+    """2026-07 改版兜底：b_algo 块内 <h2> 消失，标题链接为块头裸 <a> 直链
+    （前置 tilk 图标链接须按主机跳过——真机日志：改版布局下必应零贡献）。"""
+
+    NEW_HTML = """
+    <li class="b_algo"><link rel="stylesheet" href="a.css"/>
+    <div class="b_tpcn"><a class="tilk" href="https://cn.bing.com/ck/a?x=1" h="ID=SERP,1.1">icon</a></div>
+    <a class="tilk" href="https://example.com/qishan" h="ID=SERP,1.2">旗山校区天气预报</a>
+    <div class="b_caption"><p class="b_lineclamp2">今天旗山校区阴，气温 25 度</p></div></li>
+    <li class="b_algo"><h2><a href="https://example.org/legacy">旧版结果</a></h2><p>旧版仍在</p></li>
+    """
+
+    def test_new_layout_bare_anchor_with_icon_skipped(self):
+        with mock.patch.object(ws.requests, "get",
+                               return_value=_resp(self.NEW_HTML)):
+            results = ws._search_bing("q", 5)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["url"], "https://example.com/qishan")
+        self.assertEqual(results[0]["title"], "旗山校区天气预报")
+        self.assertIn("阴", results[0]["snippet"])
+        self.assertEqual(results[1]["url"], "https://example.org/legacy")
+
+    def test_backend_order_sogou_first(self):
+        """真机高频实测：百度 302 图形验证码全灭、搜狗唯一稳定供给 → 主链
+        顺序搜狗 > 必应 > 百度。"""
+        self.assertEqual(ws.DEFAULT_BACKENDS, ("sogou", "bing", "baidu"))
+
+
+class TestWebFetchRedirectStub(unittest.TestCase):
+    """搜狗 /link 返回 window.location.replace 桩（requests 不执行 JS →
+    零正文误判失败，真机事故）——web_fetch 必须提取跳转目标跟随再抓。"""
+
+    @staticmethod
+    def _resp_with(text, url, ctype="text/html; charset=utf-8"):
+        r = _resp(text)
+        r.headers = {"Content-Type": ctype}
+        r.url = url
+        return r
+
+    STUB_JS = ('<meta content="always" name="referrer">'
+               '<script>window.location.replace("https://tq.example/fuzhou/")</script>')
+    STUB_META = ("<noscript><META http-equiv=\"refresh\" "
+                 "content=\"0;URL='https://tq.example/fuzhou/'\"></noscript>")
+    REAL = "<html><body>" + "今天福州阴转小雨，气温 25 到 30 度，湿度很大。" * 4 + "</body></html>"
+
+    def test_js_redirect_stub_followed(self):
+        side = [self._resp_with(self.STUB_JS, "https://www.sogou.com/link?url=x"),
+                self._resp_with(self.REAL, "https://tq.example/fuzhou/")]
+        with mock.patch.object(ws.requests, "get", side_effect=side) as m:
+            out = ws.web_fetch("https://www.sogou.com/link?url=x")
+        self.assertIn("阴转小雨", out)
+        self.assertEqual(m.call_count, 2)
+        self.assertEqual(m.call_args_list[1][0][0], "https://tq.example/fuzhou/")
+
+    def test_meta_refresh_stub_followed(self):
+        side = [self._resp_with(self.STUB_META, "https://www.sogou.com/link?url=y"),
+                self._resp_with(self.REAL, "https://tq.example/fuzhou/")]
+        with mock.patch.object(ws.requests, "get", side_effect=side):
+            self.assertIn("阴转小雨", ws.web_fetch("https://www.sogou.com/link?url=y"))
+
+    def test_hop_cap_then_error(self):
+        side = [self._resp_with(self.STUB_JS, "https://s/x") for _ in range(5)]
+        with mock.patch.object(ws.requests, "get", side_effect=side) as m:
+            with self.assertRaises(ws.WebFetchError):
+                ws.web_fetch("https://s/x")
+        self.assertEqual(m.call_count, ws.FETCH_MAX_HOPS)
+
+    def test_short_page_without_stub_raises_once(self):
+        side = [self._resp_with("<p>hi</p>", "https://s/x")]
+        with mock.patch.object(ws.requests, "get", side_effect=side) as m:
+            with self.assertRaises(ws.WebFetchError):
+                ws.web_fetch("https://s/x")
+        self.assertEqual(m.call_count, 1)
+
+    def test_relative_target_urljoined(self):
+        stub = '<script>location.href="/real/page"</script>'
+        side = [self._resp_with(stub, "https://s/link?u=1"),
+                self._resp_with(self.REAL, "https://s/real/page")]
+        with mock.patch.object(ws.requests, "get", side_effect=side) as m:
+            out = ws.web_fetch("https://s/link?u=1")
+        self.assertIn("阴转小雨", out)
+        self.assertEqual(m.call_args_list[1][0][0], "https://s/real/page")
+
+
+class TestResolveRedirect(unittest.TestCase):
+    """状态监视创建时把搜索引擎跳转链接解析成真实目标（失败原样返回）。"""
+
+    def test_js_stub_resolved_to_final_url(self):
+        stub = '<script>window.location.replace("https://tq.example/fuzhou/")</script>'
+        stub_resp = _resp(stub)
+        stub_resp.headers = {"Content-Type": "text/html"}
+        stub_resp.url = "https://www.sogou.com/link?url=x"
+        final_resp = _resp("<p>" + "正文" * 40 + "</p>")
+        final_resp.headers = {"Content-Type": "text/html"}
+        final_resp.url = "https://tq.example/fuzhou/"
+        with mock.patch.object(ws.requests, "get",
+                               side_effect=[stub_resp, final_resp]) as m:
+            out = ws.resolve_redirect("https://www.sogou.com/link?url=x")
+        self.assertEqual(out, "https://tq.example/fuzhou/")
+        self.assertEqual(m.call_count, 2)
+
+    def test_direct_page_returns_resp_url(self):
+        final_resp = _resp("<p>" + "正文" * 40 + "</p>")
+        final_resp.headers = {"Content-Type": "text/html"}
+        final_resp.url = "https://example.com/page"
+        with mock.patch.object(ws.requests, "get", return_value=final_resp):
+            out = ws.resolve_redirect("https://example.com/page")
+        self.assertEqual(out, "https://example.com/page")
+
+    def test_network_failure_returns_original(self):
+        with mock.patch.object(ws.requests, "get",
+                               side_effect=ws.requests.ConnectionError("boom")):
+            out = ws.resolve_redirect("https://www.sogou.com/link?url=x")
+        self.assertEqual(out, "https://www.sogou.com/link?url=x")
 
 
 class TestFormat(unittest.TestCase):

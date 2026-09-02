@@ -89,9 +89,18 @@ def make_rem_bot(dirpath):
     bot = AgentBot.__new__(AgentBot)
     bot.reminders = RemindersStore(os.path.join(dirpath, "rem.json"))
     bot._reminder_queue = queue.Queue()
+    bot._condition_queue = queue.Queue()
     bot.wx = _FakeWx()
     bot._add_history = lambda *a, **k: None
     bot._send_text = lambda text, chat: bot.wx.sent.append((chat, text))
+    # 触发器火线（用户定案）：到点/达成/到期都回递 API 生成角色内回复——
+    # 测试桩直接返回固定回复，记录 (chat, trigger) 供断言
+    bot._chats = []
+
+    def fake_chat_ai(chat_id, user_msg, **kw):
+        bot._chats.append((chat_id, user_msg))
+        return f"回复[{chat_id}]"
+    bot.call_chat_ai = fake_chat_ai
     return bot
 
 
@@ -115,12 +124,20 @@ class TestSchedulerAndDrain(unittest.TestCase):
         time.sleep(0.15)  # 再扫几轮也不得重复入队（claimed 去重）
         self.assertTrue(q.empty())
 
-    def test_drain_sends_and_marks_fired(self):
+    def test_drain_calls_api_and_sends_reply(self):
+        """火线统一：到点回递 API（call_chat_ai）生成角色内回复后直发，
+        不再发固定文案【定时提醒】，也不注入预写提醒事项（content 已废）。"""
         bot = make_rem_bot(self.dir)
-        r = bot.reminders.add("王文生", "开会啦", time.time() - 1)
+        fire_at = time.time() - 1
+        r = bot.reminders.add("王文生", "", fire_at)
         bot._reminder_queue.put(dict(r))
         bot._drain_reminders()
-        self.assertEqual(bot.wx.sent, [("王文生", "【定时提醒】开会啦")])
+        self.assertEqual(len(bot._chats), 1)
+        chat, trigger = bot._chats[0]
+        self.assertEqual(chat, "王文生")
+        self.assertIn("定时触发", trigger)
+        self.assertIn("指定时间", trigger)
+        self.assertEqual(bot.wx.sent, [("王文生", "回复[王文生]")])
         rec = [x for x in bot.reminders.list() if x["id"] == r["id"]][0]
         self.assertFalse(rec["enabled"])  # 单次触发后关闭
         self.assertEqual(len(bot._reminder_queue.queue), 0)
@@ -149,10 +166,21 @@ class TestSetReminderTool(unittest.TestCase):
         self.assertTrue(out)
         recs = self.bot.reminders.list()
         self.assertEqual(len(recs), 1)
-        self.assertEqual(recs[0]["content"], "查成绩")
         self.assertEqual(recs[0]["chat"], "王文生")
+        self.assertEqual(recs[0]["kind"], "time")
         self.assertEqual(self.bot.wx.sent[-1][0], "王文生")
-        self.assertIn("查成绩", self.bot.wx.sent[-1][1])
+        # 无预写文案（用户定案）：确认回复只确认时间，不带「提醒事项」
+        self.assertIn("记住啦", self.bot.wx.sent[-1][1])
+
+    def test_time_without_content_ok(self):
+        """time 模式不填 content 也能创建（到点回递 API 自行回复）。"""
+        fire = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 3600))
+        result = {"kind": "tool_call", "name": "set_reminder",
+                  "arguments": json.dumps({"time": fire})}
+        self.assertTrue(
+            self.bot._apply_vision_result("王文生", "王文生", result,
+                                          user_text="明天下午三点叫我"))
+        self.assertEqual(len(self.bot.reminders.list()), 1)
 
     def test_bad_time_degrades_to_chat(self):
         result = {"kind": "tool_call", "name": "set_reminder",

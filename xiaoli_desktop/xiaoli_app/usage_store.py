@@ -23,7 +23,17 @@ def default_usage_path():
 
 def _empty_bucket():
     return {"calls": 0, "ok": 0, "fail": 0, "prompt": 0, "completion": 0,
-            "latency_sum": 0.0}
+            "latency_sum": 0.0, "cache_hit": 0, "cache_miss": 0,
+            "reasoning": 0, "total": 0}
+
+
+def hit_ratio(bucket):
+    """缓存命中率：hit/(hit+miss)。无缓存数据（旧记录/未启用缓存的模型
+    两项全 0）返回 None——UI 显示「—」，不显示伪造的 0%。"""
+    denom = bucket["cache_hit"] + bucket["cache_miss"]
+    if denom <= 0:
+        return None
+    return bucket["cache_hit"] / denom
 
 
 class UsageStore:
@@ -34,8 +44,15 @@ class UsageStore:
         self._lock = threading.Lock()
 
     def record(self, kind=None, model=None, prompt_tokens=None,
-               completion_tokens=None, ok=True, status=None, latency_ms=None):
-        """终态记录一条。写失败静默（统计永不阻塞消息主流程）。"""
+               completion_tokens=None, ok=True, status=None, latency_ms=None,
+               cache_hit=0, cache_miss=0, reasoning=0, total_tokens=None,
+               src=None):
+        """终态记录一条。写失败静默（统计永不阻塞消息主流程）。
+
+        cache_hit/cache_miss：缓存命中/未命中 tokens（DeepSeek 顶层字段或
+        OpenAI prompt_tokens_details 归一而来，见 wechat_bot._finish_usage）；
+        reasoning：推理 tokens；total_tokens：响应 total；src：数据来源
+        （"api"=响应实测 / "est"=本地估算）——旧记录无这些字段按缺省值读。"""
         rec = {
             "ts": time.time(),
             "kind": kind,
@@ -45,6 +62,11 @@ class UsageStore:
             "ok": bool(ok),
             "status": status,
             "latency_ms": round(latency_ms) if latency_ms is not None else None,
+            "cache_hit": int(cache_hit or 0),
+            "cache_miss": int(cache_miss or 0),
+            "reasoning": int(reasoning or 0),
+            "total_tokens": total_tokens,
+            "src": src,
         }
         try:
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
@@ -93,15 +115,25 @@ class UsageStore:
     def summary(self, days=7):
         """近 days 天聚合：total / today / by_day / by_model 四个视角。
 
-        token 缺失（记录时无法估算）按 0 计，不影响调用数统计。
-        """
+        token 缺失（记录时无法估算）按 0 计，不影响调用数统计。缓存字段
+        （cache_hit/cache_miss/reasoning/total）来自响应 usage 透传，旧记录
+        按 0 读——命中率用 hit_ratio() 判「无数据」而非 0%。kind="reply"
+        是端到端回复耗时记录（非 API 调用），不进调用/token 各桶，单独聚
+        合进 reply_by_model（{model: {count, latency_sum}}）。"""
         start = time.time() - days * 86400
         total = _empty_bucket()
         by_day = {}
         by_model = {}
+        reply_by_model = {}
         for r in self._load():
             ts = r.get("ts")
             if not isinstance(ts, (int, float)) or ts < start:
+                continue
+            if r.get("kind") == "reply":
+                b = reply_by_model.setdefault(str(r.get("model") or "未知"),
+                                              {"count": 0, "latency_sum": 0.0})
+                b["count"] += 1
+                b["latency_sum"] += (r.get("latency_ms") or 0)
                 continue
             ok = bool(r.get("ok"))
             p = r.get("prompt_tokens") or 0
@@ -114,6 +146,10 @@ class UsageStore:
                 bucket["prompt"] += p
                 bucket["completion"] += c
                 bucket["latency_sum"] += (r.get("latency_ms") or 0)
+                bucket["cache_hit"] += (r.get("cache_hit") or 0)
+                bucket["cache_miss"] += (r.get("cache_miss") or 0)
+                bucket["reasoning"] += (r.get("reasoning") or 0)
+                bucket["total"] += (r.get("total_tokens") or 0)
         today_key = self._day_key(time.time())
         return {
             "days": days,
@@ -122,4 +158,5 @@ class UsageStore:
             "by_day": dict(sorted(by_day.items())),
             "by_model": dict(sorted(by_model.items(),
                                     key=lambda kv: -kv[1]["calls"])),
+            "reply_by_model": reply_by_model,
         }
