@@ -534,6 +534,24 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
     return _connected_boxes(content, min_h=40, min_w=40)
 
 
+def filter_media_boxes(boxes: list[tuple], min_top: int | None = None,
+                       exclude_rows: list[tuple[int, int]] | None = None,
+                       ) -> list[tuple]:
+    """媒体框过滤（纯几何，模块级供单测复用）：
+    - min_top：只保留 top ≥ 阈值的框（上层传 bot_bottom，排除 bot 历史
+      媒体与其文件卡片图标碎片）
+    - exclude_rows：y 区间 [(top, bottom), ...]，与任一区间垂直相交的框
+      剔除——文件卡片的类型图标（W/PDF 彩色小方块）会从面板跳出成独立
+      小媒体框（面板本身判气泡），与文件名行同块垂直相交；消息纵向堆叠
+      保证跨块必不相交，真实图片不受影响
+    """
+    if min_top is not None:
+        boxes = [(t, b, l, r) for (t, b, l, r) in boxes if t >= min_top]
+    for (rt, rb) in (exclude_rows or []):
+        boxes = [(t, b, l, r) for (t, b, l, r) in boxes if b < rt or t > rb]
+    return list(boxes)
+
+
 def _bucket_avatar(top: int, tops: list[int]) -> int | None:
     """头像划块归属：top 落入排序头像边界序列的哪个区间。
 
@@ -1368,7 +1386,9 @@ class VisualBackend:
         仍会走 force 重切兜底（toggle 取消选中防线保留）。
         """
         if assume_switched and self._current_chat == chat:
-            logger.info(f"[读取] {chat!r} 标题={self._current_title!r}（复用切换结果）")
+            # 诊断行降 DEBUG：每个含文件/媒体的事件跑两遍读取管线（10s 防抖），
+            # INFO 级会刷爆前端日志（bot_run.log）；排障看 bot.log 全量
+            logger.debug(f"[读取] {chat!r} 标题={self._current_title!r}（复用切换结果）")
         else:
             # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
             self._switch_chat(chat)
@@ -1383,7 +1403,7 @@ class VisualBackend:
                 logger.warning(f"[读取] {chat!r} 标题={title!r}（空），force 重切")
                 self._switch_chat(chat, force=True)
                 title = self.read_title(foreground=True)
-            logger.info(f"[读取] {chat!r} 标题={title!r}")
+            logger.debug(f"[读取] {chat!r} 标题={title!r}")
             if title:
                 name, is_group, _ = parse_title(title)
                 self._current_title = name or chat
@@ -1429,7 +1449,7 @@ class VisualBackend:
                     logger.warning(f"[读取] {chat!r} 标题区空（联合 OCR），force 重切")
                     self._switch_chat(chat, force=True)
                 else:
-                    logger.info(f"[读取] {chat!r} 标题={title!r}（联合 OCR）")
+                    logger.debug(f"[读取] {chat!r} 标题={title!r}（联合 OCR）")
                     name, is_group, _ = parse_title(title)
                     self._current_title = name or chat
                     self._current_is_group = is_group
@@ -1832,7 +1852,9 @@ class VisualBackend:
             pass
         return None
 
-    def media_screen_boxes(self, min_top: int | None = None) -> list[tuple[int, int, int, int]]:
+    def media_screen_boxes(self, min_top: int | None = None,
+                           exclude_rows: list[tuple[int, int]] | None = None,
+                           ) -> list[tuple[int, int, int, int]]:
         """检测消息区媒体内容（图片/视频/表情）的屏幕矩形，供点击与裁剪。
 
         截图消息区 → 探测气泡色 → find_media_boxes 检测「非背景非气泡」的
@@ -1842,8 +1864,12 @@ class VisualBackend:
 
         min_top：消息区 1x 坐标下沿阈值——只保留 top ≥ min_top 的框。上层
         传 analyze_window 的 bot_bottom（bot 最后回复之后第一条消息的上边
-        框），即可只取对方本轮新媒体，排除 bot 自己的文件卡片与历史媒体
-        （文件卡片在视觉层同为 media 框，多图捕获必须滤掉）。
+        框），即可只取对方本轮新媒体，排除 bot 自己的文件卡片与历史媒体。
+
+        exclude_rows：消息区 1x 坐标 y 区间 [(top, bottom), ...]，上层传文件
+        名 OCR 行区间——文件卡片的类型图标（W/PDF 彩色小方块）会从面板
+        跳出成独立小媒体框（面板本身判气泡），与文件名行同块垂直相交，
+        相交即排除；消息纵向堆叠保证跨块必不相交，真实图片不受影响。
         """
         if self._hwnd is None:
             return []
@@ -1858,9 +1884,8 @@ class VisualBackend:
         colors = detect_bubble_colors(region)
         if not (colors.get("self") or colors.get("other")):
             return []
-        boxes = find_media_boxes(region, colors)
-        if min_top is not None:
-            boxes = [(t, b, l, r) for (t, b, l, r) in boxes if t >= min_top]
+        boxes = filter_media_boxes(find_media_boxes(region, colors),
+                                   min_top=min_top, exclude_rows=exclude_rows)
         if not boxes:
             return []
         rect = wt.RECT()
@@ -1891,6 +1916,7 @@ class VisualBackend:
         返回 dict：
         {
             "bot_bottom": int | None,       # 我方最后回复之后第一条消息的上边框（1x）；无下一条=消息区高，None=无 bot 回复
+            "other_first_top": int | None,  # bot_bottom 之下第一个对方头像上边框（1x）；对方本轮新消息的严格下界（占位挂起时 > bot_bottom）
             "other_text": [(t,b,l,r), ...],  # 窗口内对方文字气泡框
             "other_media": [(t,b,l,r), ...], # 窗口内对方媒体矩形（图/视频/表情/文件卡片）
             "has_text": bool,
@@ -1906,7 +1932,8 @@ class VisualBackend:
         # 消息时刷新 _current_is_group；本返回值的 is_group 仅为缓存快照
         # （可能来自上一轮事件），调用方必须在 _window_msgs 之后再取缓存。
         is_group = bool(getattr(self, "_current_is_group", False))
-        empty = {"bot_bottom": None, "other_text": [], "other_media": [],
+        empty = {"bot_bottom": None, "other_first_top": None,
+                 "other_text": [], "other_media": [],
                  "has_text": False, "has_media": False, "has_other": False,
                  "is_group": is_group, "width": 0, "height": 0}
         for attempt in range(2):
@@ -1970,6 +1997,8 @@ class VisualBackend:
                 continue
             return {
                 "bot_bottom": bot_bottom,
+                "other_first_top": (min(other_new_tops)
+                                    if other_new_tops else None),
                 "other_text": other_text,
                 "other_media": other_media,
                 "has_text": bool(other_text),

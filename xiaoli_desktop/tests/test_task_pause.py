@@ -21,8 +21,6 @@ def make_bot(**over):
     bot._task_end_time = None
     bot._listen_hold_seconds = 2
     bot._pending_files = {}
-    bot._sent_back_files = {}
-    bot._sent_back_stems = {}
     bot._last_poll_time = 0
     bot.tianshu_poll_interval = 5
     bot.last_reply_time = 0

@@ -26,6 +26,7 @@ from wx_backend.visual_backend import (
     VisualBackend,
     _bucket_avatar,
     _norm_cjk,
+    filter_media_boxes,
     ocr_image,
     region_changed,
     detect_bubble_colors,
@@ -201,6 +202,34 @@ class TestBubbleDetection(unittest.TestCase):
         t, b, l, r = boxes[0]
         self.assertLess(abs(t - 130), 10)
         self.assertLess(abs(b - 260), 10)
+
+
+class TestFilterMediaBoxes(unittest.TestCase):
+    """media_screen_boxes 的纯几何过滤：min_top 下沿阈值 + exclude_rows
+    行区间剔除（文件卡片类型图标碎片与文件名行同块相交）。"""
+
+    # 真机探针实测几何（王文生窗口，文件+图片同轮）：
+    # bot 侧 docx 图标碎片 / 对方真图 / 对方 PDF 卡图标碎片
+    BOXES = [(320, 389, 533, 588), (565, 844, 119, 398), (918, 987, 470, 525)]
+
+    def test_min_top_excludes_bot_side_history(self):
+        """bot_bottom=565：bot 侧图标碎片 (320,389) 被阈值排除。"""
+        out = filter_media_boxes(self.BOXES, min_top=565)
+        self.assertEqual(out, [(565, 844, 119, 398), (918, 987, 470, 525)])
+
+    def test_exclude_rows_drops_file_card_icon(self):
+        """文件行 y=935 的相交带 (915,985) 剔除同块的 PDF 图标碎片 (918,987)，
+        真实图片块 (565,844) 与文件行分属不同消息块必不相交 → 保留。"""
+        out = filter_media_boxes(self.BOXES, min_top=565,
+                                 exclude_rows=[(915, 985)])
+        self.assertEqual(out, [(565, 844, 119, 398)],
+                         "只剩真实图片块，图标碎片被剔除")
+
+    def test_no_filters_passthrough(self):
+        """min_top=None 且无排除行 → 原样返回（拷贝，不共享列表）。"""
+        out = filter_media_boxes(self.BOXES)
+        self.assertEqual(out, self.BOXES)
+        self.assertIsNot(out, self.BOXES)
 
 
 # ---- 后端行为（mock 窗口与 OCR） ----

@@ -42,6 +42,7 @@ class _FakeWx:
     def analyze_window(self, chat, foreground=True, skip_bot=0):
         return {
             "bot_bottom": self._bot_bottom,
+            "other_first_top": None,
             "other_text": [],
             "other_media": [],
             "has_text": True,
@@ -405,12 +406,15 @@ class TestVisionRoute(unittest.TestCase):
         got = []
         bot.call_vision_api = lambda content, chat_id=None, related_memory=None: got.append(content) or {
             "kind": "text", "content": "看到了"}
-        bot._capture_media_images = lambda chat, min_top=None: [tmp.name]
+        bot._capture_media_images = lambda chat, min_top=None, exclude_rows=None: [tmp.name]
         try:
             bot._handle_image_with_text("小明", "王", "这是什么")
         finally:
-            os.unlink(tmp.name)
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
         self.assertEqual(len(got), 1)
+        self.assertFalse(os.path.exists(tmp.name),
+                         "泄漏修复：路由结束后临时图片必须已删除")
         content = got[0]
         self.assertEqual(content[0]["type"], "text")
         self.assertEqual(content[1]["type"], "image_url")
@@ -432,7 +436,7 @@ class TestVisionRoute(unittest.TestCase):
             tmps.append(t.name)
         got = []
 
-        def fake_capture(chat, min_top=None):
+        def fake_capture(chat, min_top=None, exclude_rows=None):
             # 捕获顺序即时间正序：调用方应原样透传给 content 块
             return list(tmps)
 
@@ -448,8 +452,11 @@ class TestVisionRoute(unittest.TestCase):
             bot._handle_image_with_text("小明", "王", "看这几张图")
         finally:
             for p in tmps:
-                os.unlink(p)
+                if os.path.exists(p):
+                    os.unlink(p)
         self.assertEqual(len(got_seq), 1)
+        self.assertFalse(any(os.path.exists(p) for p in tmps),
+                         "泄漏修复：路由结束后全部临时图片必须已删除")
         content = got_seq[0]
         self.assertEqual(content[0]["type"], "text")
         self.assertEqual(len(content), 3, "两张图必须都进 content（text + 2×image_url）")
@@ -463,12 +470,54 @@ class TestVisionRoute(unittest.TestCase):
         """图片+文字 vision 失败（None）→ 降级回退纯文字处理（保持现状）。"""
         bot = self._bot()
         bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
-        bot._capture_media_images = lambda chat, min_top=None: []
+        bot._capture_media_images = lambda chat, min_top=None, exclude_rows=None: []
         handled = []
         bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append(content)
         bot._handle_image_with_text("小明", "王", "在吗")
         self.assertEqual(handled, ["在吗"])
+
+    def test_image_text_tmp_files_deleted_after_dispatch(self):
+        """泄漏修复：图+文路径任务投递后临时图片必须删除（dispatch 同步
+        copy2 进任务目录，路由返回后原件无用）。"""
+        bot = self._bot()
+        tmps = []
+        for i in range(2):
+            t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            t.write(b"x")
+            t.close()
+            tmps.append(t.name)
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: {
+            "kind": "tool_call", "name": "dispatch_task",
+            "arguments": '{"task": "做个网站"}'}
+        bot._capture_media_images = \
+            lambda chat, min_top=None, exclude_rows=None: list(tmps)
+        bot._dispatch_and_notify = lambda *a, **k: None
+        try:
+            bot._handle_image_with_text("小明", "王", "根据图做网页")
+            self.assertFalse(any(os.path.exists(p) for p in tmps),
+                             "任务投递后临时图片必须已删除")
+        finally:
+            for p in tmps:
+                if os.path.exists(p):
+                    os.unlink(p)
+
+    def test_image_text_tmp_files_deleted_on_fallback(self):
+        """泄漏修复：vision 失败降级到纯文字时，临时图片同样不留残留。"""
+        bot = self._bot()
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.write(b"x")
+        tmp.close()
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
+        bot._capture_media_images = \
+            lambda chat, min_top=None, exclude_rows=None: [tmp.name]
+        bot._handle_text = lambda *a, **k: True
+        try:
+            bot._handle_image_with_text("小明", "王", "在吗")
+            self.assertFalse(os.path.exists(tmp.name), "降级路径同样必须删除")
+        finally:
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
 
 
 class TestSkipBotPassing(unittest.TestCase):
@@ -790,3 +839,74 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
         ], is_group=False)
         self.assertEqual(content, "私聊 - 王文生：在吗",
                          "私聊格式保持不变")
+
+
+class TestWindowFileFloor(unittest.TestCase):
+    """文件候选阈值 = other_first_top（bot_bottom 之下第一个对方头像上边框）。
+    旧旁路（_looks_like_file_text 直通 bot_bottom 过滤，d3c6f4e 重构混入）
+    已删：窗口里残留的旧文件文本不再每轮进候选（用户实测「文件处理完后，
+    后续普通聊天被旧文件重新响应/重复问文件已收到」的根因）；bot 的文件
+    卡文本即使被误判 sender，y < other_first_top 也进不了候选（占位挂起
+    态 bot_bottom 落在 bot 头像上，裸阈值挡不住）；对方本轮新文件照常识别。"""
+
+    @staticmethod
+    def _msg(sender, content, y):
+        return SimpleNamespace(sender=sender, content=content, id=f"m{y}",
+                               type=MessageType.TEXT, y=y)
+
+    def _run(self, msgs, win_extra):
+        bot = _make_bot()
+        calls = {"file": [], "text": [], "capture": []}
+
+        class Wx(_FakeWx):
+            def analyze_window(self, chat, foreground=True, skip_bot=0):
+                win = super().analyze_window(chat)
+                win.update(win_extra)
+                return win
+
+        bot.wx = Wx(msgs)
+        bot._tick_poll_outbox = lambda: None
+        bot._handle_file_message = \
+            lambda *a, **k: calls["file"].append(a[2]) or True
+        bot._handle_text = lambda *a, **k: calls["text"].append(a[2]) or True
+
+        def _capture(chat, min_top=None, exclude_rows=None):
+            calls["capture"].append((min_top, exclude_rows))
+            return []
+
+        bot._capture_media_images = _capture
+        with mock.patch("time.sleep"):
+            bot._handle_unread_session("小明")
+        return calls
+
+    def test_stale_file_above_floor_excluded(self):
+        """场景①：bot_bottom=100、other_first_top=400——y=200 的旧文件文本
+        （bot 卡误判 sender）不进候选；y=450 的新文件照常触发文件分支，
+        且捕获排除行只含新文件行的相交带。"""
+        calls = self._run(
+            [self._msg("王", "旧成果.html", 200),
+             self._msg("王", "新报告.pdf", 450),
+             self._msg("王", "帮忙处理", 460)],
+            {"bot_bottom": 100, "other_first_top": 400, "has_media": True})
+        self.assertEqual(calls["file"], ["新报告.pdf"],
+                         "旧文件文本不得进候选（旧旁路已删），新文件照常")
+        self.assertEqual(calls["capture"], [(100, [(430, 500)])],
+                         "排除行 = 新文件名行的相交带（y-20 ~ y+50）")
+
+    def test_no_bot_messages_all_new(self):
+        """场景②：bot_bottom=None（窗口内无 bot 消息）= 全部视为新，
+        旧语义不变。"""
+        calls = self._run([self._msg("王", "旧文件.docx", 50)],
+                          {"bot_bottom": None, "other_first_top": None})
+        self.assertEqual(calls["file"], ["旧文件.docx"])
+
+    def test_placeholder_state_bot_file_card_blocked(self):
+        """场景③：占位挂起（skip>0）时 bot_bottom 落在 bot 头像上（100），
+        bot 最后回复的文件卡（y=200，误判 sender）被 other_first_top=400
+        挡住；本轮只有对方新文字 → 走文本分支而非文件分支。"""
+        calls = self._run(
+            [self._msg("王", "任务成果.zip", 200),
+             self._msg("王", "谢谢", 450)],
+            {"bot_bottom": 100, "other_first_top": 400})
+        self.assertEqual(calls["file"], [], "bot 文件卡不得进候选")
+        self.assertEqual(calls["text"], ["谢谢"])

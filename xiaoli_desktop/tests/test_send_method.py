@@ -4,6 +4,7 @@
 wxauto 后端移除后，成果文件发送恒走剪贴板（_send_file_clipboard）优先，
 失败才兜底协议 send_file（visual 后端未实现，返回 False）。
 本测试锚定该语义，防止后续改动破坏「剪贴板主用」路径。
+（成果登记/快照刷新随显示名锚定找文件重构删除，不再有发送后登记动作。）
 """
 import os
 import sys
@@ -31,8 +32,6 @@ class TestSendMethodConverged(unittest.TestCase):
         bot._send_file_clipboard = mock.Mock(return_value=True)
         bot.wx = mock.Mock()
         bot.wx.send_file = mock.Mock(return_value=True)
-        bot._register_sent_back = mock.Mock()
-        bot._refresh_file_snapshot = mock.Mock()
         bot._remember_task_result = mock.Mock()
         return bot
 
@@ -52,7 +51,7 @@ class TestSendMethodConverged(unittest.TestCase):
         bot._poll_outbox()
 
     def test_clipboard_success_skips_send_file(self):
-        """剪贴板成功 → 不尝试 send_file；登记排除 + 刷新快照 + 写记忆。"""
+        """剪贴板成功 → 不尝试 send_file；写任务结果记忆。"""
         tasks = tempfile.mkdtemp(prefix="send_method_")
         try:
             self._make_task(tasks)
@@ -60,14 +59,12 @@ class TestSendMethodConverged(unittest.TestCase):
             self._poll(bot)
             bot._send_file_clipboard.assert_called_once()
             bot.wx.send_file.assert_not_called()
-            bot._register_sent_back.assert_called_once()
-            bot._refresh_file_snapshot.assert_called_once()
             bot._remember_task_result.assert_called_once()
         finally:
             shutil.rmtree(tasks, ignore_errors=True)
 
     def test_clipboard_fail_falls_back_to_send_file(self):
-        """剪贴板失败 → send_file 兜底；兜底成功同样登记排除。"""
+        """剪贴板失败 → send_file 兜底发送。"""
         tasks = tempfile.mkdtemp(prefix="send_method_")
         try:
             self._make_task(tasks)
@@ -75,12 +72,11 @@ class TestSendMethodConverged(unittest.TestCase):
             bot._send_file_clipboard.return_value = False
             self._poll(bot)
             bot.wx.send_file.assert_called_once()
-            bot._register_sent_back.assert_called_once()
         finally:
             shutil.rmtree(tasks, ignore_errors=True)
 
-    def test_both_fail_keeps_file_no_register(self):
-        """剪贴板 + send_file 均失败 → 不登记排除（文件保留）；记忆仍记录任务产出。"""
+    def test_both_fail_keeps_file_but_records_memory(self):
+        """剪贴板 + send_file 均失败 → 文件保留；记忆仍记录任务产出。"""
         tasks = tempfile.mkdtemp(prefix="send_method_")
         try:
             self._make_task(tasks)
@@ -88,8 +84,6 @@ class TestSendMethodConverged(unittest.TestCase):
             bot._send_file_clipboard.return_value = False
             bot.wx.send_file.return_value = False
             self._poll(bot)
-            bot._register_sent_back.assert_not_called()
-            bot._refresh_file_snapshot.assert_not_called()
             bot._remember_task_result.assert_called_once()
         finally:
             shutil.rmtree(tasks, ignore_errors=True)

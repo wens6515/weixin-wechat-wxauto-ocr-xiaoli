@@ -798,13 +798,15 @@ class TestImageCaptureBranches(unittest.TestCase):
         crop.assert_not_called()
 
     def test_min_top_passthrough_to_backend(self):
-        """min_top 阈值原样透传后端（media_screen_boxes(min_top=...)）。"""
+        """min_top 与 exclude_rows 原样透传后端（图标碎片过滤在视觉层执行）。"""
         from unittest import mock as _mock
         bot = self._bot()
         with _mock.patch("wechat_bot.pyautogui"), \
              _mock.patch("wechat_bot.find_window_by_title", return_value=None):
-            bot._capture_media_images("王文生", min_top=456)
-        bot.wx.media_screen_boxes.assert_called_once_with(min_top=456)
+            bot._capture_media_images("王文生", min_top=456,
+                                      exclude_rows=[(915, 985)])
+        bot.wx.media_screen_boxes.assert_called_once_with(
+            min_top=456, exclude_rows=[(915, 985)])
 
     def test_single_failure_skips_not_aborts(self):
         """单张失败（裁剪返回 None/异常）→ 跳过该张，其余照常捕获。"""
@@ -881,74 +883,65 @@ class TestFileDisplayNameAndSnapshot(unittest.TestCase):
                           content="名单.xlsx 说明.pdf W", type=MessageType.FILE)
         self.assertEqual(obj._extract_file_display_name(m), "名单.xlsx")
 
-    def test_snapshot_incremental_finds_new_download(self):
-        """快照增量：首次建基线返回 None；新文件（即使 mtime 是旧的——
-        微信保留源时间戳）被识别为增量并按重名编号取最新；重启后无新文件
-        返回 None。"""
-        obj = self._obj()
-        with tempfile.TemporaryDirectory() as tmp:
-            obj._file_snapshot_path = os.path.join(tmp, "snap.json")
-            obj._file_snapshot = {}
-            obj._sent_back_files = {}
-            obj._sent_back_stems = {}
-            d = os.path.join(tmp, "files")
-            os.makedirs(d)
-            old = os.path.join(d, "部门简介+纳新宣传(1).docx")
-            with open(old, "w") as f:
-                f.write("old")
-            t_past = time.time() - 86400
-            os.utime(old, (t_past, t_past))
-            # 首次：建基线，不返回（无从判断增量）
-            self.assertIsNone(obj._find_user_file(d))
-            # 新文件落盘：重名编号大（(5)），mtime 仍是旧源时间戳
-            newf = os.path.join(d, "部门简介+纳新宣传(5).docx")
-            with open(newf, "w") as f:
-                f.write("new")
-            os.utime(newf, (t_past, t_past))
-            got = obj._find_user_file(d)
-            self.assertEqual(os.path.basename(got), "部门简介+纳新宣传(5).docx")
-            # 重启模拟：重新加载快照，无新增 → None
-            obj._file_snapshot = obj._load_file_snapshot()
-            self.assertIsNone(obj._find_user_file(d))
-
-
-    def test_find_file_by_display_name_excludes_sent_back(self):
-        """成果副本（stem 匹配 + ctime 在发送时刻附近）在文件名锚定路径
-        也被排除——用户把成果转回时消息文件名与成果相同，不排除会误选。"""
+    def test_find_file_by_display_name_picks_largest_dup(self):
+        """同名文件重复落盘 → (N) 重名编号最大（最近下载）优先，ctime 平局。
+        快照/成果登记方案已删：显示名锚定查找不再排除任何候选。"""
         obj = self._obj()
         with tempfile.TemporaryDirectory() as tmp:
             obj.file_storage_path = tmp
-            obj._sent_back_stems = {}
-            f = os.path.join(tmp, "部门简介+纳新宣传(3).docx")
-            with open(f, "w") as fp:
-                fp.write("x")
-            # 未登记成果前：能按显示名定位
+            old = os.path.join(tmp, "h1_1_m_报告.txt")
+            with open(old, "w") as fp:
+                fp.write("first")
+            new = os.path.join(tmp, "h2_2_m_报告(1).txt")
+            with open(new, "w") as fp:
+                fp.write("second")
             self.assertEqual(
-                obj._find_file_by_display_name("部门简介+纳新宣传.docx"), f)
-            # 登记成果（发送时刻 = 现在；副本 ctime ≈ 现在，落在 ±300s 窗口）
-            obj._sent_back_stems["部门简介+纳新宣传"] = time.time()
-            self.assertIsNone(
-                obj._find_file_by_display_name("部门简介+纳新宣传.docx"))
+                obj._find_file_by_display_name("报告.txt"), new,
+                "(N) 编号大 = 最近下载，必须选中")
+            # 只有单候选时直接命中（含 hash 前缀的下载名）
+            self.assertEqual(
+                obj._find_file_by_display_name("报告.txt"), new)
+            # 无同名候选 → None（不乱选其他文件）
+            self.assertIsNone(obj._find_file_by_display_name("不存在.docx"))
 
-    def test_refresh_file_snapshot(self):
-        """任务回传后刷新快照：扫描目录固化已见集合；目录不可用静默跳过。"""
-        import json
+    def test_find_file_by_display_name_returns_bot_resent_file(self):
+        """用户把 bot 发过的文件发回来：回传下载（hash 前缀、ctime 更新）
+        必须命中——旧登记方案在发送后 300s 内会把回传误杀成「文件下载失败」，
+        已随快照/登记机制删除。"""
         obj = self._obj()
         with tempfile.TemporaryDirectory() as tmp:
             obj.file_storage_path = tmp
-            obj._file_snapshot = {}
-            obj._file_snapshot_path = os.path.join(tmp, "snap.json")
-            f = os.path.join(tmp, "成果.docx")
+            artifact = os.path.join(tmp, "小漓深海小剧场.html")  # bot 发送副本（干净原名）
+            with open(artifact, "w") as fp:
+                fp.write("bot sent")
+            t_past = time.time() - 3600
+            os.utime(artifact, (t_past, t_past))
+            returned = os.path.join(
+                tmp, "c4fc4da4edbb4f3b87cfbe02e564a2d3_1_m_小漓深海小剧场.html")
+            with open(returned, "w") as fp:
+                fp.write("returned")  # ctime = 现在（回传下载时刻）
+            got = obj._find_file_by_display_name("小漓深海小剧场.html")
+            self.assertEqual(got, returned, "回传文件必须被选中，不得被排除")
+
+    def test_find_file_by_display_name_ocr_separator_tolerant(self):
+        """OCR 漏读文件名分隔符仍能命中（真机事故：磁盘名「小漓_深海小剧场
+        .html」OCR 成「小漓深海小剧场.html」——下划线在基线上被 RapidOCR
+        漏掉，包含匹配被断开 → 误报「文件下载失败」）。匹配前剥掉两侧的
+        下划线/连字符/空白。"""
+        obj = self._obj()
+        with tempfile.TemporaryDirectory() as tmp:
+            obj.file_storage_path = tmp
+            f = os.path.join(tmp, "小漓_深海小剧场.html")
             with open(f, "w") as fp:
                 fp.write("x")
-            obj._refresh_file_snapshot(wait=0)
-            with open(obj._file_snapshot_path, encoding="utf-8") as fp:
-                snap = json.load(fp)
-            self.assertIn(f, snap)
-        # 目录不可用 → 不抛异常
-        obj2 = self._obj()
-        obj2.file_storage_path = None
-        obj2._refresh_file_snapshot(wait=0)
+            self.assertEqual(
+                obj._find_file_by_display_name("小漓深海小剧场.html"), f,
+                "OCR 丢下划线的显示名必须命中带下划线的磁盘文件")
+            # 反向：磁盘无分隔符、OCR 名带分隔符，同样命中
+            g = os.path.join(tmp, "报告终稿.docx")
+            with open(g, "w") as fp:
+                fp.write("y")
+            self.assertEqual(obj._find_file_by_display_name("报告-终稿.docx"), g)
 
 
 # ---- call_vision_api 单调用形态 + _send_text 占位计数 + vision 模型默认迁移 ----

@@ -112,20 +112,22 @@ class UsageStore:
     def _day_key(ts):
         return time.strftime("%Y-%m-%d", time.localtime(ts))
 
-    def summary(self, days=7):
+    def summary(self, days=7, records=None):
         """近 days 天聚合：total / today / by_day / by_model 四个视角。
 
         token 缺失（记录时无法估算）按 0 计，不影响调用数统计。缓存字段
         （cache_hit/cache_miss/reasoning/total）来自响应 usage 透传，旧记录
         按 0 读——命中率用 hit_ratio() 判「无数据」而非 0%。kind="reply"
         是端到端回复耗时记录（非 API 调用），不进调用/token 各桶，单独聚
-        合进 reply_by_model（{model: {count, latency_sum}}）。"""
+        合进 reply_by_model（{model: {count, latency_sum}}）。
+        records：外部已读入的记录列表（调用方一次加载多处复用，避免同一
+        份 usage.jsonl 反复全量读）；None=内部读取。"""
         start = time.time() - days * 86400
         total = _empty_bucket()
         by_day = {}
         by_model = {}
         reply_by_model = {}
-        for r in self._load():
+        for r in (records if records is not None else self._load()):
             ts = r.get("ts")
             if not isinstance(ts, (int, float)) or ts < start:
                 continue
