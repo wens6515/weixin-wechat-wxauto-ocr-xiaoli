@@ -539,9 +539,11 @@ def release_single_instance():
 
 def scan_task_status(tasks_dir):
     """扫描任务目录，返回 (entries, waiting, done, archived)。
-    entries: [(name, state, desc, mtime_str)]，state ∈ {"waiting", "done"}。
+    entries: [(name, state, desc, mtime_str)]，state ∈ {"waiting", "done",
+    "archived"}。waiting/done 来自顶层任务目录（有 task.json）；archived
+    来自 sent\\ 归档目录（任务 ID + 描述 + 归档时刻，供任务页列出与删除）。
     CLI task-status 命令与 GUI 任务页共用（历史缺陷：两处各扫一遍任务目录，
-    逻辑漂移）。sent 归档目录与无 task.json 的非任务目录不进入 entries。"""
+    逻辑漂移）。无 task.json 的非任务目录不进入 entries。"""
     waiting = done = 0
     entries = []
     if not os.path.isdir(tasks_dir):
@@ -570,7 +572,25 @@ def scan_task_status(tasks_dir):
     archived = 0
     sent_dir = os.path.join(tasks_dir, "sent")
     if os.path.isdir(sent_dir):
-        archived = len(os.listdir(sent_dir))
+        for name in sorted(os.listdir(sent_dir), reverse=True):
+            task_dir = os.path.join(sent_dir, name)
+            if not os.path.isdir(task_dir):
+                continue
+            desc = ""
+            tj = os.path.join(task_dir, "task.json")
+            if os.path.isfile(tj):
+                try:
+                    with open(tj, "r", encoding="utf-8") as f:
+                        desc = str(json.load(f).get("task", ""))[:50]
+                except Exception:
+                    pass
+            try:
+                mtime = time.strftime(
+                    "%m-%d %H:%M", time.localtime(os.path.getmtime(task_dir)))
+            except OSError:
+                mtime = ""
+            entries.append((name, "archived", desc, mtime))
+            archived += 1
     return entries, waiting, done, archived
 
 
@@ -1002,12 +1022,6 @@ class AgentBot(WeChatBot):
         self._pending_files = {}  # chat_name -> {sender} 群聊文件等待用户指令
         # 占位回复计数（_pending_placeholders）由基类 WeChatBot 提供（基类
         # __init__ 初始化；placeholder 发送 +1 / 实质回复归零，按 chat_name 隔离）
-        self._sent_back_files = {}  # 回传成果文件 绝对路径 -> mtime（目录扫描时排除，防误当用户发送的文件）
-        # 回传成果文件名主干 -> 发送时刻（排除微信写入接收目录的成果副本）。
-        # 持久化到 tasks_dir 下，bot 重启后仍生效（否则重启后历史成果副本会再次被误当用户文件）
-        self._sent_back_stems = {}
-        self._sent_back_stems_file = os.path.join(self.tasks_dir, "sent_back_stems.json")
-        self._load_sent_back_stems()
         # 失败退避：处理未产出回复（红圈滞留）的会话 8s 内不重复处理——
         # 防滞留红圈在 0.5s 快档下每轮都打一遍整条 OCR 管线，把单核打满
         self._chat_fail_at = {}
@@ -1028,18 +1042,6 @@ class AgentBot(WeChatBot):
         self._memory_compressor = MemoryCompressor(self, stop_event=stop_event)
         self._memory_compressor.start()
         logger.info(f"[AgentBot] tasks_dir={self.tasks_dir}, task_enabled={self.task_enabled}")
-
-    def _load_sent_back_stems(self):
-        """启动时加载成果登记（重启后排除仍生效）"""
-        try:
-            if os.path.isfile(self._sent_back_stems_file):
-                with open(self._sent_back_stems_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    self._sent_back_stems = {str(k): float(v) for k, v in data.items()}
-                logger.info(f"[任务桥] 已加载 {len(self._sent_back_stems)} 条成果登记")
-        except Exception as e:
-            logger.error(f"[任务桥] 加载成果登记失败: {e}")
 
     # ---------- 任务桥 ----------
 
@@ -1367,17 +1369,6 @@ class AgentBot(WeChatBot):
                                 logger.error(f"[回传] send_file 失败: {e}")
                         if not sent:
                             logger.error(f"[回传] 文件发送失败，保留在任务目录: {fname}")
-                        else:
-                            # 登记回传的成果文件（源路径 + 主干+发送时刻）：目录扫描时排除，
-                            # 防止把 bot 自己发出去的成果（含微信写入接收目录的副本）误当成"用户本次发送的文件"投递进下一轮任务附件
-                            self._register_sent_back(fpath)
-                            # 成果副本落盘后刷新快照：把发送产生的副本固化进已见集合，
-                            # 下次目录扫描不作为增量出现（与 stem 排除构成双保险）。
-                            # 基类快照能力（AgentBot 继承）；快照未启用/目录不可用时内部静默跳过。
-                            try:
-                                self._refresh_file_snapshot()
-                            except Exception as e:
-                                logger.warning(f"[回传] 快照刷新失败（不影响排除登记）: {e}")
                 # 无论发送成败，任务结果都写入对话记忆（记忆记录的是任务产出，不是发送状态）
                 self._remember_task_result(chat, result)
             finally:
@@ -1469,26 +1460,6 @@ class AgentBot(WeChatBot):
         final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
         self._send_text(final_reply, chat_name)
         return True
-
-    def _register_sent_back(self, fpath):
-        """登记一条已回传的成果文件，供目录扫描排除。
-        微信 PC 版会把 bot 发出的文件也写入接收目录（msg\\file 下，重名加 (1)(2) 后缀）——
-        仅登记源路径（sent 目录下）不够，接收目录里的副本路径永远匹配不上。
-        因此额外登记「文件名主干 → 发送时刻」，扫描时按主干匹配 + ctime 落在发送时刻附近排除副本。"""
-        try:
-            mtime = os.path.getmtime(fpath)
-        except OSError:
-            mtime = None
-        self._sent_back_files[fpath] = mtime
-        stem = re.sub(r"\(\d+\)$", "", os.path.splitext(os.path.basename(fpath))[0])
-        self._sent_back_stems[stem] = time.time()
-        # 持久化：bot 重启后排除仍生效（否则重启后历史成果副本会再次被误当用户文件）
-        try:
-            with open(self._sent_back_stems_file, "w", encoding="utf-8") as f:
-                json.dump(self._sent_back_stems, f, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"[回传] 持久化成果登记失败: {e}")
-
 
     def _drain_reminders(self):
         """消费到期定时触发器（kind=time）队列（主循环节点）。
@@ -1810,12 +1781,23 @@ class AgentBot(WeChatBot):
             # assume_switched：analyze_window 刚完成切换+读标题（同一处理
             # 事件），跳过重切与标题重读——事件热路径省一次点击两次 OCR
             msgs = self.wx.get_messages(chat_name, assume_switched=True)
+            bot_bottom = win.get("bot_bottom")
+            # 文件候选阈值用 other_first_top（bot_bottom 之下第一个对方头像
+            # 上边框）：占位挂起（skip_bot>0）时 bot_bottom 落在 bot 自己的
+            # 头像上，bot 最后回复若是文件卡片，其文本行会滑过裸阈值混进
+            # 候选（头像漏检误判 sender 时同理）；对方头像上边框才是对方
+            # 本轮新消息的真边界。bot_bottom 为 None = 无 bot 消息，窗口内
+            # 全部视为新，维持原语义。
+            file_floor = win.get("other_first_top")
+            if file_floor is None:
+                file_floor = bot_bottom
             return [
                 m for m in msgs
                 if m.sender not in (None, "self", self.nickname)
-                and (win.get("bot_bottom") is None
-                     or _looks_like_file_text(m.content)
-                     or (m.y is not None and m.y >= win.get("bot_bottom")))
+                and (bot_bottom is None
+                     or (m.y is not None
+                         and m.y >= (file_floor if _looks_like_file_text(m.content)
+                                     else bot_bottom)))
             ]
 
         # D/R: 截图 + 气泡/媒体分析（无 OCR）。skip_bot：跳过最近 N 条 bot
@@ -1902,16 +1884,34 @@ class AgentBot(WeChatBot):
         # ============ 分类分发 ============
         if file_text:
             # 文件（可能同时有图片）：对方本轮新图一并投递，不再被文件分支吞掉
-            # （min_top=bot_bottom 过滤：文件卡片自身也是 media 框，会一起被
-            # 捕获为卡片截图；bot 自己的历史文件卡片被阈值排除）
+            # （min_top=bot_bottom 排除 bot 自己的历史文件卡片/图标碎片）。
+            # exclude_rows：文件卡片的类型图标（W/PDF 彩色小方块）会从面板
+            # 跳出成独立小媒体框（面板本身判气泡），与文件名行同块垂直相交
+            # ——相交即排除；真实图片块与文件行分属不同消息块必不相交。
+            # 带宽 -20/+50：1x 文件名行高 ~35px，覆盖图标碎片与行的相交面
+            # （真机探针标定：行 y=935，图标 918~987）。
+            exclude_rows = [(m.y - 20, m.y + 50) for m in window_msgs
+                            if _looks_like_file_text(m.content)
+                            and m.y is not None]
             extra_attachments = []
             if has_media:
                 extra_attachments = self._capture_media_images(
-                    chat_name, min_top=win.get("bot_bottom"))
+                    chat_name, min_top=win.get("bot_bottom"),
+                    exclude_rows=exclude_rows)
             logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
-            return self._handle_file_message(
-                chat_name, sender, file_text, text_content,
-                extra_attachments=extra_attachments, multi_sender=multi_sender)
+            try:
+                return self._handle_file_message(
+                    chat_name, sender, file_text, text_content,
+                    extra_attachments=extra_attachments,
+                    multi_sender=multi_sender)
+            finally:
+                # 临时图片由本分支捕获：dispatch 同步复制进任务目录后原件即
+                # 无用，非任务/降级分支同样不留残留（与 _process_pure_image 对齐）
+                for p in extra_attachments:
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
         if has_media and text_content:
             # 图片 + 文字 → 全部新图 + 文字一次 vision 调用，任务投递（全图
             # 截图），非任务组装
@@ -1936,7 +1936,7 @@ class AgentBot(WeChatBot):
         return False
 
     def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None, multi_sender=False):
-        """文件消息处理：按显示名/快照增量定位 → 回复收到并询问。
+        """文件消息处理：按显示名定位（重名取 (N) 最大）→ 处理或回复收到并询问。
 
         文字提取延迟到真正需要时（非任务分支喂 AI）才做，任务分支只投
         文件本体——避免对任务文件做多余的 _extract_file_text。
@@ -1950,8 +1950,8 @@ class AgentBot(WeChatBot):
         clean_name = _extract_file_name_token(file_text) or file_text
         file_path = self._find_file_by_display_name(clean_name)
         if not file_path:
-            time.sleep(3)
-            file_path = self._find_user_file(file_dir)
+            time.sleep(3)  # 微信下载落盘有延迟，等一拍按同名再找一次
+            file_path = self._find_file_by_display_name(clean_name)
         if not file_path:
             self._send_text("文件下载失败，请重试～", chat_name)
             return True
@@ -1981,11 +1981,21 @@ class AgentBot(WeChatBot):
         """
         if self.task_enabled:
             img_paths = self._capture_media_images(chat_name, min_top=min_top)
-            resp = self._vision_route(
-                chat_name, sender, text_content, img_paths=img_paths,
-                msg_id=None, raw_message=text_content, multi_sender=multi_sender)
-            if resp is not None:
-                return True
+            try:
+                resp = self._vision_route(
+                    chat_name, sender, text_content, img_paths=img_paths,
+                    msg_id=None, raw_message=text_content,
+                    multi_sender=multi_sender)
+                if resp is not None:
+                    return True
+            finally:
+                # dispatch 同步复制附件进任务目录，路由返回后临时文件即无用；
+                # 文本/触发器/降级分支同样不留残留（与 _process_pure_image 对齐）
+                for p in (img_paths or []):
+                    try:
+                        os.unlink(p)
+                    except OSError:
+                        pass
         # 降级：vision 失败或任务桥关闭 → 回退纯文字处理
         return self._handle_text(
             chat_name, sender, text_content, None, multi_sender=multi_sender)
@@ -2029,9 +2039,10 @@ class TianshuController(Controller):
         if not os.path.isdir(self.bot.tasks_dir):
             print("任务目录不存在")
             return
+        tags = {"done": "✅ 天枢已完成", "waiting": "⏳ 天枢处理中",
+                "archived": "📦 已归档"}
         for name, state, desc, _mtime in entries:
-            tag = "✅ 天枢已完成" if state == "done" else "⏳ 天枢处理中"
-            print(f"  - {name} [{tag}] {desc}")
+            print(f"  - {name} [{tags.get(state, state)}] {desc}")
         if archived:
             print(f"已归档: {archived} 个任务")
         print(f"统计: {waiting} 等待中 / {done} 待回传")
@@ -2243,129 +2254,87 @@ def run_self_test():
         except Exception:
             pass
 
-        # ---- T12: 回传成果文件（含微信写入接收目录的副本）不被误当用户新发的文件 ----
-        # 上一轮成果：源文件在任务目录（不在接收目录），bot 发送时登记 stem+发送时刻
-        src_out = os.path.join(tmp, "成果报告.html")
-        with open(src_out, "w", encoding="utf-8") as f:
-            f.write("result")
-
+        # ---- T12: 按显示名定位（重名取 (N) 最大）：用户回传 bot 发过的文件、
+        # 同名文件连续接收，都不再被「成果排除登记」误杀（该机制已整体删除）----
         def make_bot(dirpath):
             b = AgentBot.__new__(AgentBot)
-            b._sent_back_files = {}
-            b._sent_back_stems = {}
-            b._sent_back_stems_file = None
-            b._file_snapshot = {"__baseline__": [0, 0]}  # 非空哨兵：模拟已有历史快照（空快照=首启，_find_user_file 只建基线返回 None）
             b.file_storage_path = dirpath
             b.nickname = "小漓"
             return b
 
-        # 场景 A：只有成果副本（目标文件未下载成功）→ 返回 None，不误选副本投递
+        # 场景 A：bot 发过 X.html（微信写入接收目录的发送副本是干净原名），
+        # 用户回传同名文件 → 下载副本带 hash 前缀且 ctime 更新 → 平局 ctime
+        # 新者优先选中回传文件（旧登记方案会把回传误杀成「文件下载失败」）
         dir_a = os.path.join(tmp, "recv_a")
         os.makedirs(dir_a)
         bot_a = make_bot(dir_a)
-        bot_a._register_sent_back(src_out)
-        time.sleep(0.1)  # 确保副本 ctime 晚于登记时刻（发送时刻）
-        shutil.copy2(src_out, os.path.join(dir_a, "成果报告.html"))
-        shutil.copy2(src_out, os.path.join(dir_a, "成果报告(1).html"))
-        got_a = bot_a._find_user_file(dir_a)
-        check("T12 仅成果副本时返回 None（不投递错文件）", got_a is None, str(got_a))
+        artifact = os.path.join(dir_a, "小漓深海小剧场.html")
+        with open(artifact, "w", encoding="utf-8") as f:
+            f.write("bot sent")
+        old = time.time() - 3600  # 发送副本 ctime = 1 小时前
+        os.utime(artifact, (old, old))
+        returned = os.path.join(
+            dir_a, "c4fc4da4edbb4f3b87cfbe02e564a2d3_3252231687582084619_m_小漓深海小剧场.html")
+        with open(returned, "w", encoding="utf-8") as f:
+            f.write("returned")  # ctime = 现在（回传下载时刻）
+        got_a = bot_a._find_file_by_display_name("小漓深海小剧场.html")
+        check("T12 回传 bot 发过的文件按显示名命中（不再被登记排除）",
+              got_a == returned, str(got_a))
 
-        # 场景 B：副本 + 目标文件，且副本 mtime 比目标文件新（真实时序：任务完成晚于用户发文件）
-        # → 登记排除副本后必须选中目标文件（修复生效的判定）
+        # 场景 B：同名文件连续接收 → (N) 编号最大 = 最近下载优先（ctime 平局）
         dir_b = os.path.join(tmp, "recv_b")
         os.makedirs(dir_b)
         bot_b = make_bot(dir_b)
-        bot_b._register_sent_back(src_out)
-        time.sleep(0.1)
-        copy_b = os.path.join(dir_b, "成果报告(1).html")
-        shutil.copy2(src_out, copy_b)
-        os.utime(copy_b, (time.time() + 10, time.time() + 10))  # 副本 mtime 最新（模拟任务完成时刻）
-        target_b = os.path.join(dir_b, "报名表.xlsx")
-        with open(target_b, "w", encoding="utf-8") as f:
-            f.write("target")
-        got_b = bot_b._find_user_file(dir_b)
-        check("T12 排除成果副本，选中用户目标文件", got_b == target_b, str(got_b))
+        first_b = os.path.join(dir_b, "h1_1_m_报告.txt")
+        with open(first_b, "w", encoding="utf-8") as f:
+            f.write("first")
+        second_b = os.path.join(dir_b, "h2_2_m_报告(1).txt")
+        with open(second_b, "w", encoding="utf-8") as f:
+            f.write("second")
+        got_b = bot_b._find_file_by_display_name("报告.txt")
+        check("T12 同名重收取 (N) 最大（最近下载）", got_b == second_b, str(got_b))
 
-        # 场景 C：对照——未登记 stem → 成果副本被误选（登记必要性的反证）。
-        # 先建 target 再写副本：副本 ctime 严格晚于 target（模拟微信把成果副本
-        # 写入接收目录在用户文件之后）+ 副本 mtime 最新（+10s）→ (dup, ctime, mtime)
-        # 排序下副本必胜。已登记时（场景 B）stem 排除救回 target。
+        # 场景 C：目录里没有显示名对应的文件 → 返回 None（上层回复失败，
+        # 不全目录乱选旧文件——旧行为已删）
         dir_c = os.path.join(tmp, "recv_c")
         os.makedirs(dir_c)
         bot_c = make_bot(dir_c)
-        target_c = os.path.join(dir_c, "报名表.xlsx")
-        with open(target_c, "w", encoding="utf-8") as f:
-            f.write("target")
-        shutil.copy2(src_out, os.path.join(dir_c, "成果报告.html"))
-        os.utime(os.path.join(dir_c, "成果报告.html"), (time.time() + 10, time.time() + 10))
-        got_c = bot_c._find_user_file(dir_c)
-        check("T12 对照：未登记时成果副本被误选（bug 复现）",
-              got_c == os.path.join(dir_c, "成果报告.html"), str(got_c))
+        with open(os.path.join(dir_c, "无关文件.txt"), "w", encoding="utf-8") as f:
+            f.write("x")
+        got_c = bot_c._find_file_by_display_name("报名表.xlsx")
+        check("T12 无同名候选返回 None（不乱选）", got_c is None, str(got_c))
 
-        # 场景 D：发送已久（>60s）后用户新下载的同名文件不被误杀（双向窗口边界）
+        # 场景 D：OCR 漏读文件名分隔符仍能命中（真机事故：磁盘名
+        # 「小漓_深海小剧场.html」OCR 成「小漓深海小剧场.html」——下划线
+        # 在基线上被 RapidOCR 漏掉，包含匹配被断开 → 误报「文件下载失败」）
         dir_d = os.path.join(tmp, "recv_d")
         os.makedirs(dir_d)
         bot_d = make_bot(dir_d)
-        bot_d._sent_back_stems["成果报告"] = time.time() - 3600  # 1 小时前发送过同名成果
-        late_d = os.path.join(dir_d, "成果报告(2).html")
-        with open(late_d, "w", encoding="utf-8") as f:
-            f.write("late")
-        got_d = bot_d._find_user_file(dir_d)
-        check("T12 发送已久后新下载的同名文件不被误杀", got_d == late_d, str(got_d))
+        underscore_d = os.path.join(dir_d, "小漓_深海小剧场.html")
+        with open(underscore_d, "w", encoding="utf-8") as f:
+            f.write("x")
+        got_d = bot_d._find_file_by_display_name("小漓深海小剧场.html")
+        check("T12 OCR 丢下划线的显示名命中带下划线的磁盘文件",
+              got_d == underscore_d, str(got_d))
 
-        # ---- T13: 按文件消息显示名精确定位（微信 4.0 目录命名 <hash>_<msgid>_m_<原名>）----
+        # ---- T13: 显示名提取（真实 content 格式：'文件\n<名>\n<大小>\n微信电脑版'）----
         dir_e = os.path.join(tmp, "recv_e")
         os.makedirs(dir_e)
         bot_e = make_bot(dir_e)
-        # 用户最新下载的文件：时间戳是旧的（微信保留源时间戳），目录名带 hash 前缀 + (4) 重名后缀
         user_file = os.path.join(
             dir_e,
             "c4fc4da4edbb4f3b87cfbe02e564a2d3_3252231687582084619_m_企业账户-投递人数2078758432532791296(4).txt")
         with open(user_file, "w", encoding="utf-8") as f:
             f.write("x")
-        old = time.time() - 7 * 86400  # 7 天前的时间戳
+        old = time.time() - 7 * 86400  # 7 天前的源时间戳（微信保留源时间戳）
         os.utime(user_file, (old, old))
-        # 上一轮成果副本：时间戳最新（今天），但文件名不同 → 不应命中
-        result_file = os.path.join(dir_e, "贪吃蛇.html")
-        with open(result_file, "w", encoding="utf-8") as f:
-            f.write("result")
-        # 提取显示名（真实 content 格式：'文件\n<名>\n<大小>\n微信电脑版'）
         from types import SimpleNamespace
         fake_msg = SimpleNamespace(content="文件\n企业账户-投递人数2078758432532791296.txt\n123KB\n微信电脑版",
                                    repattern=r"^文件\n([^\n]+)\n(\d+(\.\d+)?)(B|KB|MB|GB|TB)\n微信电脑版$")
         display = bot_e._extract_file_display_name(fake_msg)
         check("T13 从 content 提取显示名", display == "企业账户-投递人数2078758432532791296.txt", str(display))
         got_e = bot_e._find_file_by_display_name(display)
-        check("T13 按显示名定位用户文件（不中成果副本）", got_e == user_file, str(got_e))
-
-        # ---- T14: 成果登记持久化（重启后仍排除）+ 文件名前缀变体排除 ----
-        # 前缀变体：登记"成果报告"，目录里"成果报告-美化版"（ctime 在发送时刻附近）也应被排除
-        dir_h = os.path.join(tmp, "recv_h")
-        os.makedirs(dir_h)
-        bot_h = make_bot(dir_h)
-        src_h = os.path.join(tmp, "成果报告.html")
-        with open(src_h, "w", encoding="utf-8") as f:
-            f.write("r")
-        bot_h._register_sent_back(src_h)
-        time.sleep(0.1)
-        variant = os.path.join(dir_h, "成果报告-美化版.html")
-        shutil.copy2(src_h, variant)  # ctime = 现在 ≈ 发送时刻 → 前缀匹配 + 窗口内 → 排除
-        target_h = os.path.join(dir_h, "报名表.xlsx")
-        with open(target_h, "w", encoding="utf-8") as f:
-            f.write("t")
-        got_h = bot_h._find_user_file(dir_h)
-        check("T14 前缀变体被排除，选中目标文件", got_h == target_h, str(got_h))
-        # 持久化 round-trip：新实例从文件加载登记（模拟 bot 重启）→ 排除仍生效
-        stems_file = os.path.join(tmp, "stems.json")
-        bot_h._sent_back_stems_file = stems_file
-        bot_h._register_sent_back(src_h)  # 触发写盘
-        bot_h2 = make_bot(dir_h)
-        bot_h2._sent_back_stems_file = stems_file
-        bot_h2._load_sent_back_stems()
-        check("T14 重启后加载持久化登记", bot_h2._sent_back_stems.get("成果报告") is not None,
-              str(bot_h2._sent_back_stems))
-        got_h2 = bot_h2._find_user_file(dir_h)
-        check("T14 重启后前缀变体仍被排除", got_h2 == target_h, str(got_h2))
+        check("T13 按显示名定位 hash 前缀下载文件", got_e == user_file, str(got_e))
 
         # ---- T15: 任务结果回写对话记忆（deliver 闭包调用 _remember_task_result） ----
         def make_mem_bot(dirpath):

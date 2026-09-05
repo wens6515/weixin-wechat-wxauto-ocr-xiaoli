@@ -191,25 +191,30 @@ def fit_messages_in_budget(messages, budget=100000, reserve=2000):
     return out
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.log")
+# 前端视图日志（INFO 及以上）：GUI 日志页/首页运行日志区只读这个文件，
+# 事件流干净；排障看 bot.log 全量（含 DEBUG）。
+RUN_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "bot_run.log")
 
-# 日志轮转：单文件超 2MB 轮转为 bot.log.1（保留 2 份历史）。
-# 历史缺陷：模块级 import 时即清空 bot.log——每次启动丢日志（排障无法
-# 追溯），且 GUI/CLI 并发 import 互清。轮转后 LogPage 的 size<offset 检测
-# 会自动重置增量读取位置，无需改动。
+# 日志双轨轮转：bot.log 全量 DEBUG、bot_run.log 前端 INFO，各 2MB 轮转
+# 保留 2 份历史。历史缺陷：模块级 import 时即清空 bot.log——每次启动丢
+# 日志（排障无法追溯），且 GUI/CLI 并发 import 互清。轮转后 LogPage 的
+# size<offset 检测会自动重置增量读取位置，无需改动。
 from logging.handlers import RotatingFileHandler
 
+_file_handler = RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024,
+                                    backupCount=2, encoding="utf-8")
+_run_handler = RotatingFileHandler(RUN_LOG_FILE, maxBytes=2 * 1024 * 1024,
+                                   backupCount=2, encoding="utf-8")
+_run_handler.setLevel(logging.INFO)
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[
-        RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024,
-                            backupCount=2, encoding="utf-8"),
-        logging.StreamHandler()
-    ],
+    handlers=[_file_handler, _run_handler, logging.StreamHandler()],
     force=True
 )
-# 终端只显示 INFO 及以上，日志文件保留 DEBUG
-logging.getLogger().handlers[1].setLevel(logging.INFO)
+# 终端只显示 INFO 及以上（handlers[2] = StreamHandler），bot.log 保留 DEBUG
+logging.getLogger().handlers[2].setLevel(logging.INFO)
 logger = logging.getLogger("xiaoli")
 
 
@@ -447,6 +452,66 @@ def _extract_file_name_token(text):
     return toks[0] if toks else None
 
 
+# OCR 对文件名里的分隔符常漏读（真机事故：磁盘名「小漓_深海小剧场.html」
+# OCR 成「小漓深海小剧场.html」——下划线在基线上，是 RapidOCR 的经典漏读
+# 字符）——按名查找前把两侧的分隔符剥掉再比，容忍 OCR 丢字。
+_NAME_SEP_RE = re.compile(r"[ \t\u3000_＿\-－]+")
+
+
+def _norm_file_stem(stem):
+    """文件名主干匹配归一化：剥掉 OCR 易漏读的分隔符（下划线/连字符/空白）。"""
+    return _NAME_SEP_RE.sub("", stem or "")
+
+
+def _find_file_by_display_name_impl(file_dir, display_name):
+    """按消息中的显示文件名在接收目录定位对方发来的文件（模块级，单测直测）。
+
+    微信 4.x 下载命名 '<hash>_<msgid>_m_<原名>'，目录文件名包含原名
+    （分隔符归一化后包含匹配）。同名文件重复落盘时微信追加 (N) 重名后缀
+    且编号单调递增——取 (N) 最大 = 最近下载的那个，平局 ctime 新者优先。
+
+    不做 bot 发送副本排除（旧快照/成果登记方案已删）：名字锚定查找下，
+    bot 的发送副本只在同名时进候选，且其编号必然小于其后用户下载产生的
+    副本，(N) 最大语义天然选中用户文件——用户把 bot 发的文件发回来不再
+    被误排除（真机缺陷：回传落在发送后 300s 内被「成果副本」规则拦下；
+    后续又发现 OCR 漏读文件名下划线导致匹配失败，加分隔符归一化根治）。
+    返回路径或 None"""
+    if not display_name:
+        return None
+    if not file_dir or not os.path.isdir(file_dir):
+        return None
+    dstem = _norm_file_stem(
+        re.sub(r"\(\d+\)$", "", os.path.splitext(display_name)[0]))
+    if not dstem:
+        return None
+    best = None
+    best_key = (-1, -1)  # (微信重名编号 N, ctime)：N 最大 = 最近下载
+    try:
+        for root, dirs, files in os.walk(file_dir):
+            for fname in files:
+                fstem_full = os.path.splitext(fname)[0]
+                fstem = _norm_file_stem(re.sub(r"\(\d+\)$", "", fstem_full))
+                if dstem not in fstem:
+                    continue
+                full = os.path.join(root, fname)
+                try:
+                    ts = os.path.getctime(full)
+                except OSError:
+                    continue
+                m_dup = re.search(r"\((\d+)\)$", fstem_full)
+                dup = int(m_dup.group(1)) if m_dup else 0
+                key = (dup, ts)
+                if key > best_key:
+                    best_key = key
+                    best = full
+    except Exception as e:
+        logger.error(f"[文件] 按文件名定位失败: {e}")
+        return None
+    if best:
+        logger.info(f"[文件] 按消息文件名定位: {os.path.basename(best)}")
+    return best
+
+
 # 模型偶发复读进回复的开头标记：历史注入的 [time] 前缀、私聊/群聊装饰
 # 「私聊 - sender」「群聊 - 群名」。剥除后再记录历史 + 发送，避免污染记忆
 # 并防止后续回复继续复读。
@@ -548,16 +613,6 @@ class WeChatBot:
         self.file_max_tokens = cfg.get("file_max_tokens", 10000)
         self.file_prompt = cfg.get("file_prompt", self.system_prompt)
         self.file_storage_path = cfg.get("file_storage_path", "")
-        # 成果排除登记表（_find_user_file 目录扫描时排除 bot 回传的成果文件）：
-        # 基础 bot 默认空表（不过滤）；AgentBot（任务桥）在 __init__ 中初始化并维护
-        self._sent_back_files = {}
-        self._sent_back_stems = {}
-        # 目录快照（_find_user_file 兜底用）：微信下载保留源文件时间戳，
-        # 按 mtime/ctime 猜「最新」会选到旧文件——持久化已见文件集合，
-        # 增量 = 用户新下载。快照文件放运行目录（与 processed_ids 同处）。
-        self._file_snapshot_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "file_snapshot.json")
-        self._file_snapshot = self._load_file_snapshot()
         # 图片消息点击偏移校准（竖图点击偏位时手动校正，格式 [dx, dy]，存 config.json）
         self.image_click_offset = cfg.get("image_click_offset", [0, 0])
         # 占位消息计数（"收到任务啦，正在处理中"等）：按 chat_name 隔离，
@@ -1561,12 +1616,15 @@ class WeChatBot:
                 logger.error(f"[处理] 退回保存也失败: {e2}")
         return os.path.getsize(path) if os.path.isfile(path) else 0
 
-    def _capture_media_images(self, chat_name, min_top=None):
+    def _capture_media_images(self, chat_name, min_top=None, exclude_rows=None):
         """捕获消息区对方本轮全部新媒体，返回临时文件路径列表（时间正序）。
 
         min_top：消息区 1x 下沿阈值（上层传 analyze_window 的 bot_bottom）
         ——只捕获 top ≥ 阈值的媒体框，排除 bot 自己的文件卡片与历史媒体；
         None = 不过滤（全量）。
+        exclude_rows：消息区 1x 坐标 y 区间 [(top, bottom), ...]（上层传文件
+        名 OCR 行区间）——与文件行垂直相交的媒体框剔除（文件卡片的类型
+        图标会从面板跳出成独立小媒体框，面板本身判气泡）。
 
         每张独立走「点击 → 查看器判定分支」——微信 PC 每条消息各带一个
         头像，多张图片是多个独立媒体框（连通域按背景缝隙切分，不会被粘连）：
@@ -1582,7 +1640,8 @@ class WeChatBot:
         微信 RWTemp 临时文件生命周期不受控，复制一份到自己的临时文件再返回。
         """
         boxes_fn = getattr(self.wx, "media_screen_boxes", None)
-        rects = boxes_fn(min_top=min_top) if boxes_fn is not None else []
+        rects = (boxes_fn(min_top=min_top, exclude_rows=exclude_rows)
+                 if boxes_fn is not None else [])
         paths = []
         for (ml, mt, mr, mb) in rects:
             try:
@@ -1872,131 +1931,6 @@ class WeChatBot:
         self._send_text(final_reply, chat_name)
         return True
 
-    def _load_file_snapshot(self):
-        """加载目录快照（{path: [size, mtime]}）；无文件/坏值返回 {}。"""
-        try:
-            with open(self._file_snapshot_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except Exception:
-            pass
-        return {}
-
-    def _save_file_snapshot(self, snap):
-        """持久化目录快照（bot 重启后增量识别仍生效）。"""
-        try:
-            with open(self._file_snapshot_path, "w", encoding="utf-8") as f:
-                json.dump(snap, f, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"[文件] 快照保存失败: {e}")
-
-    def _refresh_file_snapshot(self, wait=2.0):
-        """扫描接收目录并刷新快照（任务回传成果落盘后调用：把 bot 发送
-        产生的副本固化进已见集合，下次 _find_user_file 不作为增量出现）。
-
-        wait：成果副本经微信复制进接收目录有延迟，先等再扫；即使等待后
-        副本仍未落盘（网络慢/异常），下次扫描它仍是增量——但会被
-        _sent_back_stems 排除逻辑挡掉（双保险，不依赖本刷新）。
-        """
-        file_dir = self.file_storage_path
-        if not file_dir or not os.path.isdir(file_dir):
-            return
-        if wait > 0:
-            time.sleep(wait)
-        try:
-            current, _ = self._snapshot_dir(file_dir)
-            if self._file_snapshot != current:
-                self._file_snapshot = current
-                self._save_file_snapshot(current)
-                logger.info(f"[文件] 任务回传后快照已刷新（{len(current)} 个文件）")
-        except Exception as e:
-            logger.error(f"[文件] 快照刷新失败: {e}")
-
-    def _snapshot_dir(self, directory):
-        """扫描目录：返回 (当前全量 {path: [size, mtime]}, 相对上次快照的新增列表)。
-
-        微信下载保留源文件时间戳（ctime/mtime 均为发送方源时间戳），按
-        mtime/ctime 猜「最新」不可靠——用已见文件集合识别增量，新增文件名
-        一定是用户新下载的（微信重名加 (1)(2) 编号保证文件名唯一）。
-        """
-        current = {}
-        new_files = []
-        skip_patterns = ('.tmp', '.crdownload', '~$')
-        try:
-            for root, dirs, files in os.walk(directory):
-                for fname in files:
-                    if any(fname.startswith(p) or fname.endswith(p) for p in skip_patterns):
-                        continue
-                    full = os.path.join(root, fname)
-                    try:
-                        mtime = os.path.getmtime(full)
-                        size = os.path.getsize(full)
-                    except OSError:
-                        continue
-                    current[full] = [size, mtime]
-                    if self._file_snapshot.get(full) != [size, mtime]:
-                        new_files.append(full)
-        except Exception as e:
-            logger.error(f"[文件] 遍历目录失败: {e}")
-        return current, new_files
-
-    def _find_user_file(self, directory):
-        """目录扫描找用户最新下载的文件（显示名定位失败的兜底）。
-
-        快照增量（上次扫描后新增/变化的文件）才是用户新下载的；增量内按
-        微信重名编号 (N) 最大优先（接收端编号单调递增 = 最近下载），其次
-        ctime。同时排除 bot 自己回传的成果文件：
-        - _sent_back_files（路径 + mtime 匹配即跳过）
-        - _sent_back_stems（文件名主干前缀匹配 + ctime 落在发送时刻附近，
-          覆盖微信写入接收目录的成果副本，如 '(1)' 重名变体、'-美化版' 扩展变体）
-        快照文件不存在（首次启动）→ 本次只建立基线不返回：无法判断哪些
-        是新增，宁可取不到（上层回复失败），也不误选旧文件当用户附件。
-        """
-        first_run = not self._file_snapshot  # 启动时快照为空 = 首次（无历史基线）
-        current, new_files = self._snapshot_dir(directory)
-        if self._file_snapshot != current:
-            self._file_snapshot = current
-            self._save_file_snapshot(current)
-        if first_run:
-            return None  # 首次基线，无增量可判（本次只建快照）
-        if not new_files:
-            return None
-        best = None
-        best_key = (-1, -1, -1)  # (重名编号, ctime, mtime)
-        for full in new_files:
-            fname = os.path.basename(full)
-            try:
-                mtime = os.path.getmtime(full)
-            except OSError:
-                continue
-            try:
-                ctime = os.path.getctime(full)
-            except OSError:
-                ctime = 0
-            # 排除回传成果：同一路径且 mtime 未变 → 是 bot 自己发出去的
-            if full in self._sent_back_files and self._sent_back_files[full] == mtime:
-                continue
-            # 排除微信写入接收目录的成果副本（主干前缀匹配 + 发送时刻附近）
-            fstem = re.sub(r"\(\d+\)$", "", os.path.splitext(fname)[0])
-            hit_stem = None
-            for s in self._sent_back_stems:
-                if fstem.startswith(s) or s in fstem:
-                    hit_stem = s
-                    break
-            if hit_stem and abs(ctime - self._sent_back_stems[hit_stem]) <= 300:
-                logger.debug(f"[文件] 排除成果副本: {fname} (stem={hit_stem})")
-                continue
-            m_dup = re.search(r"\((\d+)\)$", os.path.splitext(fname)[0])
-            dup = int(m_dup.group(1)) if m_dup else 0
-            key = (dup, ctime, mtime)
-            if key > best_key:
-                best_key = key
-                best = full
-        if best:
-            logger.info(f"[文件] 快照增量定位: {os.path.basename(best)}")
-        return best
-
     def _extract_file_display_name(self, msg):
         """从 FileMessage 提取显示文件名。
         wxauto4 的 content 格式：'文件\\n<文件名>\\n[<大小>\\n]微信电脑版'
@@ -2028,52 +1962,12 @@ class WeChatBot:
         return None
 
     def _find_file_by_display_name(self, display_name):
-        """按消息中的显示文件名在接收目录精确定位（微信 4.0 下载命名
-        '<hash>_<msgid>_m_<原名>'，目录文件名包含原名；bot 回传的成果副本
-        是干净原名，不同名时天然不命中）。多个候选（重名 (1)(2)…）取时间戳最新。
-        排除 bot 自己发送产生的成果副本（stem + 发送时刻窗口）——用户把
-        成果转回给 bot 时，消息文件名与成果相同，不排除会误把成果当用户文件。
-        返回路径或 None"""
-        if not display_name:
-            return None
-        file_dir = self.file_storage_path
-        if not file_dir or not os.path.isdir(file_dir):
-            return None
-        dstem = re.sub(r"\(\d+\)$", "", os.path.splitext(display_name)[0])
-        best = None
-        best_key = (-1, -1)  # (ctime, 微信重名编号)：ctime 相同（微信保留源时间戳）时取编号最大 = 最近下载
-        try:
-            for root, dirs, files in os.walk(file_dir):
-                for fname in files:
-                    fstem = re.sub(r"\(\d+\)$", "", os.path.splitext(fname)[0])
-                    if dstem not in fstem:
-                        continue
-                    full = os.path.join(root, fname)
-                    try:
-                        ts = os.path.getctime(full)
-                    except OSError:
-                        continue
-                    # 排除 bot 发送产生的成果副本（stem 匹配 + ctime 在发送时刻附近）
-                    hit_stem = None
-                    for s in self._sent_back_stems:
-                        if fstem.startswith(s) or s in fstem:
-                            hit_stem = s
-                            break
-                    if hit_stem and abs(ts - self._sent_back_stems[hit_stem]) <= 300:
-                        logger.debug(f"[文件] 排除成果副本: {fname} (stem={hit_stem})")
-                        continue
-                    m_dup = re.search(r"\((\d+)\)$", os.path.splitext(fname)[0])
-                    dup = int(m_dup.group(1)) if m_dup else 0
-                    key = (ts, dup)
-                    if key > best_key:
-                        best_key = key
-                        best = full
-        except Exception as e:
-            logger.error(f"[文件] 按文件名定位失败: {e}")
-            return None
-        if best:
-            logger.info(f"[文件] 按消息文件名定位: {os.path.basename(best)}")
-        return best
+        """按消息中的显示文件名在接收目录定位对方发来的文件。
+
+        实现在模块级 _find_file_by_display_name_impl（纯函数，单测直测）：
+        分隔符归一化包含匹配 + (N) 重名编号最大优先 + ctime 平局。"""
+        return _find_file_by_display_name_impl(self.file_storage_path,
+                                               display_name)
 
     def _process_file(self, chat_name, sender, msg_obj):
         """处理文件消息：按消息显示名在微信接收目录定位（wxauto4 download() 不可用）
