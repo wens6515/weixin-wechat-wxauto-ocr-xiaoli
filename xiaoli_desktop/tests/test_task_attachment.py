@@ -194,7 +194,7 @@ class TestImageMediaDrive(unittest.TestCase):
         bot._tick_poll_outbox = lambda: None
         processed = []
 
-        def _describe(chat):
+        def _describe(chat, min_top=None):
             processed.append(chat)
             return True
 
@@ -210,7 +210,7 @@ class TestImageMediaDrive(unittest.TestCase):
         bot.wx = _FakeWx([_text_msg("self", "bot回复", "m1")], has_media=False)
         bot._tick_poll_outbox = lambda: None
         processed = []
-        bot._process_pure_image = lambda chat: processed.append(1) or True
+        bot._process_pure_image = lambda chat, min_top=None: processed.append(1) or True
         bot._send_text = lambda *a, **k: None
         bot.process_new_messages()
         self.assertFalse(processed)
@@ -405,7 +405,7 @@ class TestVisionRoute(unittest.TestCase):
         got = []
         bot.call_vision_api = lambda content, chat_id=None, related_memory=None: got.append(content) or {
             "kind": "text", "content": "看到了"}
-        bot._capture_latest_image = lambda chat: tmp.name
+        bot._capture_media_images = lambda chat, min_top=None: [tmp.name]
         try:
             bot._handle_image_with_text("小明", "王", "这是什么")
         finally:
@@ -420,11 +420,50 @@ class TestVisionRoute(unittest.TestCase):
         self.assertEqual(_b64.b64decode(url.split(",", 1)[1]),
                          b"fake-jpeg-bytes")
 
+    def test_multi_image_all_sent_in_one_call(self):
+        """多张图：全部 image_url 块按捕获顺序进同一次 vision 调用（不再只取
+        最新一张），与文字一次发送。"""
+        bot = self._bot()
+        tmps = []
+        for i in range(2):
+            t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+            t.write(f"fake-jpeg-{i}".encode())
+            t.close()
+            tmps.append(t.name)
+        got = []
+
+        def fake_capture(chat, min_top=None):
+            # 捕获顺序即时间正序：调用方应原样透传给 content 块
+            return list(tmps)
+
+        got_seq = []
+
+        def fake_vision(content, chat_id=None, related_memory=None):
+            got_seq.append(content)
+            return {"kind": "text", "content": "都看到了"}
+
+        bot.call_vision_api = fake_vision
+        bot._capture_media_images = fake_capture
+        try:
+            bot._handle_image_with_text("小明", "王", "看这几张图")
+        finally:
+            for p in tmps:
+                os.unlink(p)
+        self.assertEqual(len(got_seq), 1)
+        content = got_seq[0]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(len(content), 3, "两张图必须都进 content（text + 2×image_url）")
+        for i, block in enumerate(content[1:], 0):
+            self.assertEqual(block["type"], "image_url")
+            import base64 as _b64
+            self.assertEqual(_b64.b64decode(block["image_url"]["url"].split(",", 1)[1]),
+                             f"fake-jpeg-{i}".encode(), "图片必须按捕获顺序排列")
+
     def test_image_text_none_falls_back_to_text(self):
         """图片+文字 vision 失败（None）→ 降级回退纯文字处理（保持现状）。"""
         bot = self._bot()
         bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
-        bot._capture_latest_image = lambda chat: None
+        bot._capture_media_images = lambda chat, min_top=None: []
         handled = []
         bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
             handled.append(content)
@@ -477,10 +516,10 @@ class TestSkipBotPassing(unittest.TestCase):
 
 
 class TestRouteVisionResultHook(unittest.TestCase):
-    """AgentBot 覆写 _route_vision_result：纯图路径（_process_image 系列）vision
-    单调用结果分流——tool_call → 投递天枢（带图附件）；text → 直接回复；None →
-    降级。复用 _vision_route 分流核心（提取公共方法），hook 签名逐字对齐
-    (self, chat_name, sender, result, img_path=None)。"""
+    """AgentBot 覆写 _route_vision_result：纯图路径（_process_pure_image）vision
+    单调用结果分流——tool_call → 投递天枢（带全部图附件，任务桥逐张复制）；
+    text → 直接回复；None → 降级。复用 _vision_route 分流核心（提取公共方法），
+    hook 签名逐字对齐 (self, chat_name, sender, result, img_paths=None)。"""
 
     def _bot(self):
         bot = _make_bot()
@@ -489,7 +528,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
         return bot
 
     def test_tool_call_dispatches_with_img_attachment(self):
-        """tool_call + dispatch_task → 投递天枢（attachment_paths=[img_path]），
+        """tool_call + dispatch_task → 投递天枢（attachment_paths=全部图），
         不发送任何回复文本。"""
         bot = self._bot()
         dispatched, sent = [], []
@@ -499,7 +538,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
             "小明", "王",
             {"kind": "tool_call", "name": "dispatch_task",
              "arguments": '{"task": "根据这张图做网站"}'},
-            img_path=r"D:\tmp\shot.jpg")
+            img_paths=[r"D:\tmp\shot.jpg"])
         self.assertTrue(ret)
         self.assertEqual(len(dispatched), 1)
         a, k = dispatched[0]
@@ -509,7 +548,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
         self.assertEqual(sent, [], "tool_call 分支不发送任何回复文本")
 
     def test_tool_call_no_img_no_attachment(self):
-        """tool_call 但无 img_path → attachment_paths=None（不产生假附件）。"""
+        """tool_call 但无 img_paths → attachment_paths=None（不产生假附件）。"""
         bot = self._bot()
         dispatched = []
         bot._dispatch_and_notify = lambda *a, **k: dispatched.append((a, k))
@@ -517,7 +556,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
             "小明", "王",
             {"kind": "tool_call", "name": "dispatch_task",
              "arguments": '{"task": "做PPT"}'},
-            img_path=None)
+            img_paths=None)
         self.assertTrue(ret)
         self.assertIsNone(dispatched[0][1]["attachment_paths"])
 
@@ -530,7 +569,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
             "小明", "王",
             {"kind": "tool_call", "name": "dispatch_task",
              "arguments": "不是json"},
-            img_path=None)
+            img_paths=None)
         self.assertTrue(ret)
         self.assertEqual(dispatched[0][0][2], "不是json")
 
@@ -542,7 +581,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
         ret = bot._route_vision_result(
             "小明", "王",
             {"kind": "tool_call", "name": "other_tool", "arguments": "{}"},
-            img_path="x.jpg")
+            img_paths=["x.jpg"])
         self.assertIsNone(ret)
         self.assertEqual(dispatched, [], "未知工具不得投递")
 
@@ -573,7 +612,7 @@ class TestRouteVisionResultHook(unittest.TestCase):
         bot.call_vision_api = lambda content, chat_id=None, related_memory=None: result
         bot._vision_route("小明", "王", "做PPT")
         n_via_route = len(dispatched)
-        bot._route_vision_result("小明", "王", result, img_path=None)
+        bot._route_vision_result("小明", "王", result, img_paths=None)
         self.assertEqual(len(dispatched), n_via_route + 1,
                          "hook 应复用与 _vision_route 相同的投递路径")
 

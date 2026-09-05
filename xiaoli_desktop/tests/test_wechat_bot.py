@@ -713,10 +713,12 @@ class TestGroupMultiSenderText(unittest.TestCase):
 
 
 class TestImageCaptureBranches(unittest.TestCase):
-    """图片/表情统一走 Ctrl+C 路径（_process_image 已删）。点击媒体后以
-    「图片和视频」查看器是否打开为分界——开了=真图片（Ctrl+C 原图，ESC
-    关查看器，全库唯一 ESC 点）；没开=表情包（绝不碰 ESC/Ctrl+C，裁剪
-    媒体矩形送视觉模型）。剪贴板为空也落表情路线（先关查看器防遮挡）。"""
+    """图片/表情统一走 Ctrl+C 路径（_process_image 已删），多张媒体逐张捕获
+    （_capture_media_images 返回列表，时间正序）。点击媒体后以「图片和视频」
+    查看器是否打开为分界——开了=真图片（Ctrl+C 原图，ESC 关查看器，全库
+    唯一 ESC 点）；没开=表情包（绝不碰 ESC/Ctrl+C，裁剪媒体矩形送视觉模型）。
+    剪贴板为空也落表情路线（先关查看器防遮挡）。min_top 阈值透传后端过滤
+    对方本轮新图（排除 bot 文件卡片/历史媒体）。"""
 
     @staticmethod
     def _bot():
@@ -736,8 +738,8 @@ class TestImageCaptureBranches(unittest.TestCase):
              _mock.patch.object(bot, "_copy_image_from_viewer",
                                 return_value="/tmp/orig.jpg") as copy, \
              _mock.patch.object(bot, "_crop_media_region") as crop:
-            out = bot._capture_latest_image("王文生")
-        self.assertEqual(out, "/tmp/orig.jpg")
+            out = bot._capture_media_images("王文生")
+        self.assertEqual(out, ["/tmp/orig.jpg"])
         pg.click.assert_called_once_with(160, 260)  # 媒体矩形中心
         fw.assert_called_with("图片和视频")
         copy.assert_called_once()
@@ -754,8 +756,8 @@ class TestImageCaptureBranches(unittest.TestCase):
              _mock.patch.object(bot, "_copy_image_from_viewer") as copy, \
              _mock.patch.object(bot, "_crop_media_region",
                                 return_value="/tmp/sticker.jpg") as crop:
-            out = bot._capture_latest_image("王文生")
-        self.assertEqual(out, "/tmp/sticker.jpg")
+            out = bot._capture_media_images("王文生")
+        self.assertEqual(out, ["/tmp/sticker.jpg"])
         pg.hotkey.assert_not_called()   # 表情路线绝不 Ctrl+C
         pg.press.assert_not_called()    # 绝不 ESC——否则关掉微信主窗口
         copy.assert_not_called()
@@ -772,10 +774,52 @@ class TestImageCaptureBranches(unittest.TestCase):
                                 return_value=None), \
              _mock.patch.object(bot, "_crop_media_region",
                                 return_value="/tmp/f.jpg") as crop:
-            out = bot._capture_latest_image("王文生")
-        self.assertEqual(out, "/tmp/f.jpg")
+            out = bot._capture_media_images("王文生")
+        self.assertEqual(out, ["/tmp/f.jpg"])
         pg.press.assert_called_once_with("esc")
         crop.assert_called_once_with(100, 200, 220, 320)
+
+    def test_multi_media_captured_in_order(self):
+        """多张媒体 → 逐张走查看器分支，按框序（时间正序）返回列表。"""
+        from unittest import mock as _mock
+        bot = self._bot()
+        bot.wx.media_screen_boxes.return_value = [(100, 200, 220, 320),
+                                                  (100, 400, 220, 520)]
+        with _mock.patch("wechat_bot.pyautogui") as pg, \
+             _mock.patch("wechat_bot.find_window_by_title",
+                         return_value=object()), \
+             _mock.patch.object(bot, "_copy_image_from_viewer",
+                                side_effect=["/tmp/a.jpg", "/tmp/b.jpg"]), \
+             _mock.patch.object(bot, "_crop_media_region") as crop:
+            out = bot._capture_media_images("王文生")
+        self.assertEqual(out, ["/tmp/a.jpg", "/tmp/b.jpg"])
+        pg.click.assert_any_call(160, 260)  # 第一张中心
+        pg.click.assert_any_call(160, 460)  # 第二张中心
+        crop.assert_not_called()
+
+    def test_min_top_passthrough_to_backend(self):
+        """min_top 阈值原样透传后端（media_screen_boxes(min_top=...)）。"""
+        from unittest import mock as _mock
+        bot = self._bot()
+        with _mock.patch("wechat_bot.pyautogui"), \
+             _mock.patch("wechat_bot.find_window_by_title", return_value=None):
+            bot._capture_media_images("王文生", min_top=456)
+        bot.wx.media_screen_boxes.assert_called_once_with(min_top=456)
+
+    def test_single_failure_skips_not_aborts(self):
+        """单张失败（裁剪返回 None/异常）→ 跳过该张，其余照常捕获。"""
+        from unittest import mock as _mock
+        bot = self._bot()
+        bot.wx.media_screen_boxes.return_value = [(100, 200, 220, 320),
+                                                  (100, 400, 220, 520)]
+        with _mock.patch("wechat_bot.pyautogui"), \
+             _mock.patch("wechat_bot.find_window_by_title", return_value=None), \
+             _mock.patch.object(bot, "_copy_image_from_viewer"), \
+             _mock.patch.object(bot, "_crop_media_region",
+                                side_effect=[None, "/tmp/b.jpg"]) as crop:
+            out = bot._capture_media_images("王文生")
+        self.assertEqual(out, ["/tmp/b.jpg"])
+        self.assertEqual(crop.call_count, 2)
 
     def test_crop_media_region_translates_screen_to_window(self):
         """表情裁剪：屏幕矩形平移到主窗口图内坐标（窗口 (1000,500) 起）。"""
@@ -1426,7 +1470,7 @@ class TestVisionResultRouting(unittest.TestCase):
             "群", "小明", {"kind": "text", "content": "描述"}))
         self.assertIsNone(bot._route_vision_result(
             "群", "小明", {"kind": "tool_call", "name": "x", "arguments": "{}"},
-            img_path="/tmp/x.jpg"))
+            img_paths=["/tmp/x.jpg"]))
 
     def test_reply_with_vision_removed(self):
         """两段式残留 _reply_with_vision 必须删除（基类无此方法）。"""
@@ -1451,8 +1495,8 @@ class TestVisionResultRouting(unittest.TestCase):
             img_path = tf.name
             tf.write(b"fake-image-bytes")
         try:
-            with _mock.patch.object(bot, "_capture_latest_image",
-                                    return_value=img_path), \
+            with _mock.patch.object(bot, "_capture_media_images",
+                                    return_value=[img_path]), \
                  _mock.patch.object(bot, "call_vision_api",
                                     return_value=tool_call), \
                  _mock.patch.object(bot, "_route_vision_result",
@@ -1463,6 +1507,8 @@ class TestVisionResultRouting(unittest.TestCase):
                 _args, _kwargs = route.call_args
                 self.assertEqual(_args[2], tool_call,
                                  "tool_call dict 必须原样路由，不压文本")
+                self.assertEqual(_kwargs.get("img_paths"), [img_path],
+                                 "捕获列表必须经 img_paths 传给路由 hook")
         finally:
             if os.path.exists(img_path):
                 os.unlink(img_path)

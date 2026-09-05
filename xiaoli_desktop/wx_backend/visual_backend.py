@@ -1832,14 +1832,18 @@ class VisualBackend:
             pass
         return None
 
-    def media_screen_boxes(self) -> list[tuple[int, int, int, int]]:
+    def media_screen_boxes(self, min_top: int | None = None) -> list[tuple[int, int, int, int]]:
         """检测消息区媒体内容（图片/视频/表情）的屏幕矩形，供点击与裁剪。
 
         截图消息区 → 探测气泡色 → find_media_boxes 检测「非背景非气泡」的
         大块媒体矩形 → 换算屏幕物理坐标（DPI 已 per-monitor aware，窗口
-        rect 与截图同坐标系）。返回 [(l, t, r, b), ...] 屏幕坐标（矩形四
-        边——点击取中心、表情路线裁剪取矩形，调用方各取所需），检测不到
-        返回空。
+        rect 与截图同坐标系）。返回 [(l, t, r, b), ...] 屏幕坐标，按上→下
+        （时间正序）排列；检测不到返回空。
+
+        min_top：消息区 1x 坐标下沿阈值——只保留 top ≥ min_top 的框。上层
+        传 analyze_window 的 bot_bottom（bot 最后回复之后第一条消息的上边
+        框），即可只取对方本轮新媒体，排除 bot 自己的文件卡片与历史媒体
+        （文件卡片在视觉层同为 media 框，多图捕获必须滤掉）。
         """
         if self._hwnd is None:
             return []
@@ -1855,6 +1859,8 @@ class VisualBackend:
         if not (colors.get("self") or colors.get("other")):
             return []
         boxes = find_media_boxes(region, colors)
+        if min_top is not None:
+            boxes = [(t, b, l, r) for (t, b, l, r) in boxes if t >= min_top]
         if not boxes:
             return []
         rect = wt.RECT()
