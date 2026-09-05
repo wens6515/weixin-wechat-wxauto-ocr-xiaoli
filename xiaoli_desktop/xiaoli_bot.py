@@ -1111,14 +1111,17 @@ class AgentBot(WeChatBot):
         # 单模型化后任务判断统一用 chat_model（无独立 classify_model）
         return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
-    def _vision_route(self, chat_name, sender, text, img_path=None, msg_id=None,
+    def _vision_route(self, chat_name, sender, text, img_paths=None, msg_id=None,
                       raw_message=None, attachments=None, is_group=None,
                       multi_sender=False):
         """vision-exp 单调用分流：任务判断 + 回复一次完成（替代两段式）。
 
+        img_paths：图片临时文件路径列表（可空）——全部按发送顺序作为
+        image_url 块放进同一条 user 消息，与文字一次发给 API。
+
         契约（基类 call_vision_api 由并行维度实现）：
           content 块 = [{"type": "text", "text": ...},
-                        {"type": "image_url", "image_url": {"url": "data:image/..."}}]
+                        {"type": "image_url", ...}, ...]
           call_vision_api(content) 返回 dict 或 None：
             {"kind": "tool_call", "name": "dispatch_task",
              "arguments": '{"task": "..."}'} → 投递天枢（task 从 arguments JSON 解析）
@@ -1150,16 +1153,16 @@ class AgentBot(WeChatBot):
         # 关键词记忆索引：用原始用户消息（非装饰串）匹配，命中的相关记忆
         # 由 call_vision_api 注入到历史之后
         related = self._match_related_memory(chat_name, text)
-        if img_path:
+        for p in (img_paths or []):
             try:
-                with open(img_path, "rb") as f:
+                with open(p, "rb") as f:
                     img_b64 = base64.b64encode(f.read()).decode()
                 content.append({
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
                 })
             except OSError as e:
-                logger.error(f"[vision] 图片读取失败，忽略图片: {e}")
+                logger.error(f"[vision] 图片读取失败，忽略该图: {e}")
         try:
             resp = self.call_vision_api(content, chat_id=chat_name,
                                         related_memory=related)
@@ -1167,10 +1170,10 @@ class AgentBot(WeChatBot):
             logger.error(f"[vision] 调用异常: {e}")
             return None
         return self._apply_vision_result(
-            chat_name, sender, resp, img_path=img_path, msg_id=msg_id,
+            chat_name, sender, resp, img_paths=img_paths, msg_id=msg_id,
             raw_message=raw_message, attachments=attachments, user_text=decorated)
 
-    def _apply_vision_result(self, chat_name, sender, result, img_path=None,
+    def _apply_vision_result(self, chat_name, sender, result, img_paths=None,
                              msg_id=None, raw_message=None, attachments=None,
                              user_text=None):
         """vision 单调用结果分流核心（_vision_route 与 _route_vision_result 共用）。
@@ -1178,6 +1181,7 @@ class AgentBot(WeChatBot):
         result: call_vision_api 的 dict 返回（{'kind':'tool_call'|'text',...}）
         或 None；user_text 为用户消息原文（tool_call JSON 解析失败降级用、
         text 分支记历史用；纯图路径为 None 时降级用 arguments 原文）。
+        img_paths 为图片临时文件路径列表（attachments 缺省时全部作为任务附件）。
         返回 True = 已处理；None = 调用失败/未识别，交调用方降级。
         """
         if not result:
@@ -1202,7 +1206,7 @@ class AgentBot(WeChatBot):
             logger.info(f"[任务桥] vision 判定为任务: {task_desc[:60]}")
             self._add_history(chat_name, "assistant", "[任务已投递天枢处理]")
             atts = attachments if attachments is not None \
-                else ([img_path] if img_path else None)
+                else (list(img_paths) if img_paths else None)
             self._dispatch_and_notify(
                 chat_name, sender, task_desc,
                 attachment_paths=atts,
@@ -1223,17 +1227,17 @@ class AgentBot(WeChatBot):
         logger.warning(f"[vision] 未知响应 kind={kind!r}，降级")
         return None
 
-    def _route_vision_result(self, chat_name, sender, result, img_path=None):
+    def _route_vision_result(self, chat_name, sender, result, img_paths=None):
         """纯图路径 hook 覆写：复用 _apply_vision_result 分流核心。
 
-        纯图路径（_process_pure_image：捕获媒体 → vision 单调用 → 本 hook）
-        的 vision 单
-        调用结果分流：tool_call → 投递天枢（attachment_paths=[img_path]）；
-        text → 直接回复（实质回复 → 占位归零）；None → 返回 None，调用方降级。
+        纯图路径（_process_pure_image：捕获全部新媒体 → vision 单调用 →
+        本 hook）的结果分流：tool_call → 投递天枢（attachment_paths=全部
+        图片，任务桥逐张复制进任务目录 attachments\）；text → 直接回复
+        （实质回复 → 占位归零）；None → 返回 None，调用方降级。
         无用户文字，JSON 解析失败降级用 arguments 原文。
         """
         return self._apply_vision_result(
-            chat_name, sender, result, img_path=img_path)
+            chat_name, sender, result, img_paths=img_paths)
 
     def _dispatch_and_notify(self, chat_name, sender, task_desc, attachment_paths=None, extra=None):
         """投递任务 → 微信告知"处理中" → 唤起天枢窗口。返回是否投递成功"""
@@ -1514,7 +1518,7 @@ class AgentBot(WeChatBot):
                            f"请按人设自然地主动回复。")
                 reply = self.call_chat_ai(chat, trigger)
                 self._send_trigger_reply(reply, chat)
-                logger.info(f"[定时] 已触发 -> {chat}: {content[:40]}")
+                logger.info(f"[定时] 已触发 -> {chat}: {reply[:40]}")
             except Exception as e:
                 logger.error(f"[定时] 触发失败 {rid}: {e}")
             finally:
@@ -1897,25 +1901,29 @@ class AgentBot(WeChatBot):
                 pending["filename"], text_content, multi_sender=multi_sender)
         # ============ 分类分发 ============
         if file_text:
-            # 文件（可能同时有图片）：有图片则截图一并投递，不再被文件分支吞掉
+            # 文件（可能同时有图片）：对方本轮新图一并投递，不再被文件分支吞掉
+            # （min_top=bot_bottom 过滤：文件卡片自身也是 media 框，会一起被
+            # 捕获为卡片截图；bot 自己的历史文件卡片被阈值排除）
             extra_attachments = []
             if has_media:
-                img_path = self._capture_latest_image(chat_name)
-                if img_path:
-                    extra_attachments.append(img_path)
+                extra_attachments = self._capture_media_images(
+                    chat_name, min_top=win.get("bot_bottom"))
             logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
             return self._handle_file_message(
                 chat_name, sender, file_text, text_content,
                 extra_attachments=extra_attachments, multi_sender=multi_sender)
         if has_media and text_content:
-            # 图片 + 文字 → 文字 LLM 判任务，任务投递（图截图），非任务组装
+            # 图片 + 文字 → 全部新图 + 文字一次 vision 调用，任务投递（全图
+            # 截图），非任务组装
             logger.info(f"🖼💬 判断为图片+文字消息：{chat_name}")
             return self._handle_image_with_text(
-                chat_name, sender, text_content, multi_sender=multi_sender)
+                chat_name, sender, text_content, multi_sender=multi_sender,
+                min_top=win.get("bot_bottom"))
         if has_media and not text_content:
-            # 无文字 + 有媒体（图片/视频/表情统一当图片）→ Ctrl+C 图片路径
+            # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 逐张 Ctrl+C/裁剪
             logger.info(f"🖼 判断为图片消息：{chat_name}")
-            if self._process_pure_image(chat_name):
+            if self._process_pure_image(chat_name,
+                                        min_top=win.get("bot_bottom")):
                 return True
             # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
             self._send_text("图片识别失败了，可能是什么地方出了问题呀～", chat_name)
@@ -1962,17 +1970,19 @@ class AgentBot(WeChatBot):
         self._send_text("文件已收到～请告诉我需要怎么处理呢？", chat_name)
         return True
 
-    def _handle_image_with_text(self, chat_name, sender, text_content, multi_sender=False):
-        """图片 + 文字：vision-exp 单调用（图 + 文字一次判断 + 回复）。
+    def _handle_image_with_text(self, chat_name, sender, text_content,
+                                multi_sender=False, min_top=None):
+        """图片 + 文字：vision-exp 单调用（全部新图 + 文字一次判断 + 回复）。
 
-        任务 → 图截图 + 文字投递（tool_call 不发送回复文本）；非任务 → 直接
-        回复（不再两段式：GLM-4V 描述转述 + 主模型二次回复）。vision 调用
-        失败（None）→ 降级回退纯文字处理（保持现状）。
+        min_top：消息区 1x 下沿阈值（analyze_window 的 bot_bottom），只捕获
+        对方本轮新图。任务 → 全部图 + 文字投递（tool_call 不发送回复文本）；
+        非任务 → 直接回复（不再两段式：GLM-4V 描述转述 + 主模型二次回复）。
+        vision 调用失败（None）→ 降级回退纯文字处理（保持现状）。
         """
         if self.task_enabled:
-            img_path = self._capture_latest_image(chat_name)
+            img_paths = self._capture_media_images(chat_name, min_top=min_top)
             resp = self._vision_route(
-                chat_name, sender, text_content, img_path=img_path,
+                chat_name, sender, text_content, img_paths=img_paths,
                 msg_id=None, raw_message=text_content, multi_sender=multi_sender)
             if resp is not None:
                 return True

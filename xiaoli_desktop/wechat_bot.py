@@ -255,11 +255,11 @@ FRIENDLY_API_ERROR_REPLIES = (
 # 曾用旧两段式时代的 vision_prompt（「专业图像描述AI，客观复述图片」），把
 # 复述文本当角色回复原样发出——已废弃统一到角色化链路。
 VISION_IMAGE_PROMPT = (
-    "请严格遵守以上人设（包括不用 emoji、改用颜文字）。用户发来了一张图片"
-    "（没有附带文字）。请看图后直接以你的身份回复用户（可以评价、接梗、"
-    "回答图里的问题）；如果图片明显是任务材料（如文档截图、带指令的截图、"
-    "需要处理的内容），调用 dispatch_task 工具投递任务，任务描述写在工具"
-    "参数里。"
+    "请严格遵守以上人设（包括不用 emoji、改用颜文字）。用户发来了一张或多张图片"
+    "（没有附带文字；多张时按发送顺序给出，可能相互关联，请结合起来看）。"
+    "请看图后直接以你的身份回复用户（可以评价、接梗、回答图里的问题）；"
+    "如果图片明显是任务材料（如文档截图、带指令的截图、需要处理的内容），"
+    "调用 dispatch_task 工具投递任务，任务描述写在工具参数里。"
 )
 
 
@@ -1526,14 +1526,14 @@ class WeChatBot:
             logger.error(f"视觉模型调用失败: {e}")
             return None
 
-    def _route_vision_result(self, chat_name, sender, result, img_path=None):
+    def _route_vision_result(self, chat_name, sender, result, img_paths=None):
         """vision 单调用结果分流 hook（可覆写）。
 
         result 为 call_vision_api 的 dict 返回（{'kind':'tool_call',
         'name','arguments'} | {'kind':'text','content'}）或 None；基类默认
         返回 None（未处理），由 AgentBot（xiaoli_bot）覆写：tool_call →
-        任务投递，text → 直接回复。img_path 为截图临时文件路径（调用方
-        finally 负责清理，覆写方需在返回前同步消费）。"""
+        任务投递，text → 直接回复。img_paths 为截图临时文件路径列表（调用
+        方 finally 负责清理，覆写方需在返回前同步消费）。"""
         return None
 
     # 视觉模型输入最长边上限：屏幕截图（可能 4K 全窗口）base64 直发体积过大
@@ -1561,37 +1561,49 @@ class WeChatBot:
                 logger.error(f"[处理] 退回保存也失败: {e2}")
         return os.path.getsize(path) if os.path.isfile(path) else 0
 
-    def _capture_latest_image(self, chat_name):
-        """点击最新媒体 → 查看器判定分支 → 返回图片/表情的临时文件路径。
+    def _capture_media_images(self, chat_name, min_top=None):
+        """捕获消息区对方本轮全部新媒体，返回临时文件路径列表（时间正序）。
 
-        微信 PC 点击表情包无任何反应——「图片和视频」查看器是否打开即
-        图片/表情的分界信号：
-        - 打开（真图片）：Ctrl+C 复制原图进剪贴板（CF_HDROP 原始分辨率，
-          替代旧预览窗截屏——截屏受窗口尺寸/DPI 限制且被遮挡会截到遮挡物）
-          → ESC 关查看器。ESC 只在确认查看器存在时才按（表情路径按 ESC
-          会关掉微信主窗口，真机事故）。剪贴板为空（复制失败）→ 落表情
-          路线兜底（先关查看器，避免遮挡裁剪区）
+        min_top：消息区 1x 下沿阈值（上层传 analyze_window 的 bot_bottom）
+        ——只捕获 top ≥ 阈值的媒体框，排除 bot 自己的文件卡片与历史媒体；
+        None = 不过滤（全量）。
+
+        每张独立走「点击 → 查看器判定分支」——微信 PC 每条消息各带一个
+        头像，多张图片是多个独立媒体框（连通域按背景缝隙切分，不会被粘连）：
+        - 真图片：点击打开「图片和视频」查看器 → Ctrl+C 复制原图进剪贴板
+          （CF_HDROP 原始分辨率，替代旧预览窗截屏——截屏受窗口尺寸/DPI
+          限制且被遮挡会截到遮挡物）→ ESC 关查看器。ESC 只在确认查看器
+          存在时才按（表情路径按 ESC 会关掉微信主窗口，真机事故）。剪贴板
+          为空（复制失败）→ 落表情路线兜底（先关查看器，避免遮挡裁剪区）
         - 没开（表情包）：全程不碰 ESC/Ctrl+C，截微信主窗口按媒体矩形
           裁剪表情本体送视觉模型（动图取当前帧）
+        单张失败（复制为空/裁剪越界/异常）跳过该张，不拖垮整批。
 
         微信 RWTemp 临时文件生命周期不受控，复制一份到自己的临时文件再返回。
         """
-        rects = getattr(self.wx, 'media_screen_boxes', lambda: [])()
-        if not rects:
-            return None
-        ml, mt, mr, mb = rects[-1]  # 最新一张媒体
-        pyautogui.click((ml + mr) // 2, (mt + mb) // 2)
-        time.sleep(1.0)  # 等预览窗打开
-        viewer_open = find_window_by_title("图片和视频") is not None
-        copied = self._copy_image_from_viewer() if viewer_open else None
-        if viewer_open:
-            pyautogui.press('esc')  # 关查看器（确认存在才按，全库唯一 ESC 点）
-            time.sleep(0.3)
-        if copied:
-            return copied
-        if viewer_open:
-            logger.warning("[图片复制] 剪贴板复制失败，落表情路线兜底")
-        return self._crop_media_region(ml, mt, mr, mb)
+        boxes_fn = getattr(self.wx, "media_screen_boxes", None)
+        rects = boxes_fn(min_top=min_top) if boxes_fn is not None else []
+        paths = []
+        for (ml, mt, mr, mb) in rects:
+            try:
+                pyautogui.click((ml + mr) // 2, (mt + mb) // 2)
+                time.sleep(1.0)  # 等预览窗打开
+                viewer_open = find_window_by_title("图片和视频") is not None
+                copied = self._copy_image_from_viewer() if viewer_open else None
+                if viewer_open:
+                    pyautogui.press('esc')  # 关查看器（确认存在才按，全库唯一 ESC 点）
+                    time.sleep(0.3)
+                if copied:
+                    paths.append(copied)
+                    continue
+                if viewer_open:
+                    logger.warning("[图片复制] 剪贴板复制失败，落表情路线兜底")
+                p = self._crop_media_region(ml, mt, mr, mb)
+                if p:
+                    paths.append(p)
+            except Exception as e:
+                logger.error(f"[图片捕获] 单张失败，跳过: {e}")
+        return paths
 
     def _copy_image_from_viewer(self):
         """查看器已打开时：Ctrl+C 复制原图 → 读剪贴板 → 返回临时文件路径。
@@ -1666,35 +1678,40 @@ class WeChatBot:
             logger.error(f"[表情] 裁剪异常: {e}")
             return None
 
-    def _process_pure_image(self, chat_name):
-        """纯图/表情消息处理：捕获媒体 → vision 单调用（人设 + 历史 + 看图
-        角色化回复/任务判定）→ dict 原样路由给 _route_vision_result（不压
-        文本；img_path 由调用方 finally 清理，覆写方需在返回前同步消费）。
-        sender 无独立来源，以 chat_name 兜底。与图+文路径（_vision_route）
-        同一链路语义：角色化回复而非旧两段式的客观图片复述。"""
-        tmp_path = self._capture_latest_image(chat_name)
-        if not tmp_path:
+    def _process_pure_image(self, chat_name, min_top=None):
+        """纯图/表情消息处理：捕获对方本轮全部新媒体 → vision 单调用（全部
+        图 + 人设 + 历史，一次看图角色化回复/任务判定）→ dict 原样路由给
+        _route_vision_result（不压文本；img_paths 由调用方 finally 清理，
+        覆写方需在返回前同步消费）。sender 无独立来源，以 chat_name 兜底。
+        与图+文路径（_vision_route）同一链路语义：角色化回复而非旧两段式
+        的客观图片复述。"""
+        tmp_paths = self._capture_media_images(chat_name, min_top=min_top)
+        if not tmp_paths:
             return None
+        content = [{"type": "text", "text": VISION_IMAGE_PROMPT}]
         try:
-            with open(tmp_path, 'rb') as f:
-                img_bytes = f.read()
-            result = self.call_vision_api([
-                {"type": "text", "text": VISION_IMAGE_PROMPT},
-                {"type": "image_url", "image_url": {
-                    "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
-            ], chat_id=chat_name)
+            for p in tmp_paths:
+                with open(p, 'rb') as f:
+                    img_bytes = f.read()
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
+                )
+            result = self.call_vision_api(content, chat_id=chat_name)
             if result:
                 return self._route_vision_result(chat_name, chat_name, result,
-                                                 img_path=tmp_path)
+                                                 img_paths=tmp_paths)
             return None
         except Exception as e:
             logger.error(f"[图片处理] 异常: {e}")
             return None
         finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+            for p in tmp_paths:
+                try:
+                    os.unlink(p)
+                except Exception:
+                    pass
 
     def _extract_file_text(self, filepath):
         """从文件中提取文本内容，支持纯文本、docx/doc（Office COM）、xlsx/xls。

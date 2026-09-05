@@ -158,6 +158,8 @@ AI_DEFAULTS = {
 
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。
 # 模型 id 沿用"厂商:模型"前缀格式（与用户既有 config 一致，引擎直接透传）。
+# 预设模型与 xiaoli_app/pricing.py 价目表对齐（各平台当前在售主推，均有
+# 现行价目——用户用快捷添加选模型后估算消费不会落进「无价目未计入」）。
 PRESET_PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek 深度求索",
      "base_url": "https://api.deepseek.com/v1/chat/completions",
@@ -165,21 +167,20 @@ PRESET_PROVIDERS = [
                 "deepseek:deepseek-v4-flash-vision-exp"]},
     {"id": "zhipu", "name": "智谱 GLM",
      "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-     "models": ["zhipu:glm-5.2", "zhipu:glm-5v-turbo", "zhipu:glm-4.6v", "zhipu:glm-4v-flash"]},
+     "models": ["zhipu:glm-5.3", "zhipu:glm-5.3-flash"]},
     {"id": "qwen", "name": "通义千问",
      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-     "models": ["qwen:qwen-plus", "qwen:qwen-vl-plus"]},
+     "models": ["qwen:qwen3.8-max", "qwen:qwen3.8-flash"]},
     {"id": "kimi", "name": "月之暗面 Kimi",
      "base_url": "https://api.moonshot.cn/v1/chat/completions",
-     "models": ["kimi:kimi-k2"]},
+     "models": ["kimi:kimi-k3"]},
     {"id": "doubao", "name": "豆包（火山引擎）",
      "base_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-     "models": ["doubao:doubao-seed-1.6"]},
+     "models": ["doubao:doubao-seed-evolving", "doubao:doubao-seed-2.0-mini"]},
     {"id": "siliconflow", "name": "硅基流动 SiliconFlow",
      "base_url": "https://api.siliconflow.cn/v1/chat/completions",
-     "models": ["siliconflow:deepseek-ai/DeepSeek-V3",
-                "siliconflow:Qwen/Qwen2.5-72B-Instruct",
-                "siliconflow:Qwen/Qwen2-VL-72B-Instruct"]},
+     "models": ["siliconflow:deepseek-ai/deepseek-v4-flash-0731",
+                "siliconflow:deepseek-ai/deepseek-v4-pro"]},
 ]
 
 
