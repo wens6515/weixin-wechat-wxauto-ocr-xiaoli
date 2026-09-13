@@ -1377,8 +1377,8 @@ class VisualBackend:
 
         消息块判定：时间戳行（如 '昨天 18:45'、'20:14'）作为块分隔符；块内
         多行合并为一条消息。sender 按 x 坐标与消息区中线比较——右侧=自己
-        （sender="self"，上层跳过），左侧=对方（私聊时 sender=会话名，
-        即发送人；群聊发送者名读取待真机样本增强）。
+        （sender="self"，上层跳过），左侧=对方（私聊 sender=会话名；群聊
+        发送者名由气泡上方短文本行的 pending_name 机制读取）。
 
         assume_switched：同一处理事件里 analyze_window 刚完成「切换 + 读
         标题」时置 True——跳过重切与标题重读（省一次点击、两次 OCR，是

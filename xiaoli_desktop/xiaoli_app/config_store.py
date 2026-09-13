@@ -21,7 +21,10 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
+
+from xiaoli_app.memory_store import memory_key
 
 logger = logging.getLogger("xiaoli")
 
@@ -445,9 +448,47 @@ def project_config(cfg, card):
 
 def save_config(cfg, path="config.json"):
     """写回 config.json（API key 落盘加密：providers[].api_key + 投影 key 字段）。
-    内存态 cfg 保持明文（引擎/UI 使用）；加密只发生在落盘副本上。"""
+    内存态 cfg 保持明文（引擎/UI 使用）；加密只发生在落盘副本上。
+    chat_card_params 是 load_config_store 的派生投影（事实源 =
+    chat_card_bindings + cards/），落盘前剥离避免与卡内容脱同步。"""
+    out = dict(cfg)
+    out.pop("chat_card_params", None)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(_encrypt_cfg_keys(cfg), f, ensure_ascii=False, indent=4)
+        json.dump(_encrypt_cfg_keys(out), f, ensure_ascii=False, indent=4)
+
+
+def _project_chat_bindings(cfg, cards_dir):
+    """per-chat 角色卡绑定（chat_card_bindings: {聊天名: 卡id}）→ 运行时参数表。
+
+    键做 memory 口径归一化（memory_key：剥引号变体与空白——OCR 差异不分裂
+    绑定）；卡缺失/读失败跳过该绑定（该聊天运行时回落全局活跃卡），不报错
+    不写半残条目。返回 {归一化聊天名: {system_prompt, chat_model,
+    ai_api_url, ai_api_key, temperature, top_p, max_history}}。
+    """
+    bindings = cfg.get("chat_card_bindings") or {}
+    if not isinstance(bindings, dict) or not bindings:
+        return {}
+    params = {}
+    for chat, cid in bindings.items():
+        cid = str(cid or "").strip()
+        key = memory_key(chat)
+        if not cid or not key:
+            continue
+        card = _read_card(cards_dir, cid)
+        if card is None:
+            continue
+        p = _provider(cfg, card.get("chat_provider") or "deepseek") \
+            or _fallback_provider(cfg) or {}
+        params[key] = {
+            "system_prompt": str(card.get("system_prompt", "") or ""),
+            "chat_model": str(card.get("chat_model", "") or ""),
+            "ai_api_url": str(p.get("base_url", "") or ""),
+            "ai_api_key": str(p.get("api_key", "") or ""),
+            "temperature": card.get("temperature"),
+            "top_p": card.get("top_p"),
+            "max_history": card.get("max_history"),
+        }
+    return params
 
 
 def load_config_store(path="config.json", cards_dir="cards"):
@@ -482,6 +523,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
         "theme": "abyss",  # 界面主题（默认「深海小漓」套，壁纸配套见 wallpaper_path）
+        "chat_card_bindings": {},  # per-chat 角色卡绑定 {聊天名: 卡id}；空 = 全部跟随全局活跃卡
         "card_opacity": 0.5,  # 卡片不透明度 0~1.0（设置页滑块调节毛玻璃强度，默认 50%）
         "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
         "font_scale": "small",  # 全局字号档位：small/medium/large（用户指定：启动默认小字号）
@@ -520,6 +562,8 @@ def load_config_store(path="config.json", cards_dir="cards"):
         except Exception as e:
             logger.error(f"[配置] 默认卡补建失败（回退模板投影）: {e}")
     cfg = project_config(cfg, card)
+    # per-chat 绑定参数投影（派生数据：内存可用、save_config 落盘时剥离）
+    cfg["chat_card_params"] = _project_chat_bindings(cfg, cards_dir)
 
     try:
         save_config(cfg, path)
