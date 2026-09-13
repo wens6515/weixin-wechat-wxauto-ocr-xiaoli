@@ -169,6 +169,55 @@ class TestImageCompress(unittest.TestCase):
                 self.assertEqual(f.read(), b"png-fallback")
 
 
+def _make_min_pdf(path, text):
+    """构造最小单页 PDF（Helvetica 标准字体 + 一行 Tj 文本，手工拼 xref）。"""
+    stream = f"BT /F1 14 Tf 72 720 Td ({text}) Tj ET".encode("ascii")
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n"
+        + stream + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_pos = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n".encode() + b"0000000000 65535 f \n"
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += (f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_pos}\n%%EOF").encode()
+    with open(path, "wb") as f:
+        f.write(bytes(out))
+
+
+class TestExtractFileText(unittest.TestCase):
+    def _make(self):
+        return WeChatBot.__new__(WeChatBot)
+
+    def test_pdf_text_layer_extracted(self):
+        bot = self._make()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.pdf")
+            _make_min_pdf(p, "Hello from xiaoli pdf")
+            text = bot._extract_file_text(p)
+            self.assertIsNotNone(text, "带文字层的 PDF 应提取出文本")
+            self.assertIn("Hello from xiaoli pdf", text)
+
+    def test_pdf_without_text_layer_returns_none(self):
+        bot = self._make()
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "bad.pdf")
+            with open(p, "wb") as f:
+                f.write(b"this is not a pdf at all")
+            self.assertIsNone(bot._extract_file_text(p))
+
+
 class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
     """process_new_messages 的会话获取分支：visual 后端走 iter_unread_sessions
     （红圈驱动），旧后端降级走 iter_sessions（行为不变）。"""
@@ -1699,6 +1748,95 @@ class TestVisionRoutePersona(unittest.TestCase):
                       user_text, "多发送者只包群名前缀")
         self.assertNotIn("王文生：王文生", user_text,
                          "不重包 sender（防双层嵌套）")
+
+
+class TestChatCardOverrides(unittest.TestCase):
+    """per-chat 角色卡绑定：覆盖解析 + call_chat_ai 实际以绑定卡为准。"""
+
+    def _bot(self):
+        bot = WeChatBot.__new__(WeChatBot)
+        bot.chat_card_params = {
+            "王文生": {"system_prompt": "SP", "chat_model": "p1:m1",
+                     "ai_api_url": "https://x/v1/chat/completions",
+                     "ai_api_key": "K", "temperature": 0.1, "top_p": 0.2,
+                     "max_history": 55}}
+        bot.system_prompt = "GLOBAL"
+        bot.api_url = "https://g/v1/chat/completions"
+        bot.api_key = "G"
+        bot.vision_api_url = bot.api_url
+        bot.vision_api_key = bot.api_key
+        bot.chat_model = "m"   # __init__ 已 strip 前缀，全局模型为纯名
+        bot.chat_temperature = 0.7
+        bot.chat_top_p = 0.9
+        bot.max_history = 1000
+        bot.memory_keep_recent = 30
+        return bot
+
+    def test_override_lookup_and_miss(self):
+        bot = self._bot()
+        self.assertEqual(bot._chat_overrides("王文生")["system_prompt"], "SP")
+        self.assertEqual(bot._chat_overrides("路人"), {})
+        self.assertEqual(bot._chat_overrides(None), {})
+
+    def test_recent_cap_per_chat(self):
+        bot = self._bot()
+        self.assertEqual(bot._recent_cap("王文生"), 30)   # min(keep=30, 卡55)
+        bot.memory_keep_recent = 100
+        self.assertEqual(bot._recent_cap("王文生"), 55)   # 卡 max_history 覆盖
+        self.assertEqual(bot._recent_cap("路人"), 100)    # 未绑定走全局
+
+    def _ready_for_call(self, bot, d):
+        bot.memory_file = os.path.join(d, "mem.json")
+        bot.memory_db = {}
+        bot._memory_lock = threading.RLock()
+        bot._model_lock = threading.RLock()
+        bot._deep_count = {}
+        bot.memory_deep_enabled = False
+        bot.memory_compress_enabled = False
+        bot.api_timeout = 30
+
+    def test_call_chat_ai_uses_bound_card(self):
+        bot = self._bot()
+        with tempfile.TemporaryDirectory() as d:
+            self._ready_for_call(bot, d)
+            captured = {}
+
+            def fake_post(url, headers, payload, timeout, label="api", meta=None):
+                captured["url"] = url
+                captured["auth"] = headers.get("Authorization")
+                captured["model"] = payload["model"]
+                captured["temp"] = payload["temperature"]
+                captured["system"] = payload["messages"][0]["content"]
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+            bot._post_chat_completions = fake_post
+            reply = bot.call_chat_ai("王文生", "hi", sender_name="王")
+            self.assertEqual(reply, "ok")
+            self.assertEqual(captured["url"], "https://x/v1/chat/completions")
+            self.assertEqual(captured["auth"], "Bearer K")
+            self.assertEqual(captured["model"], "m1")
+            self.assertEqual(captured["temp"], 0.1)
+            self.assertEqual(captured["system"], "SP")
+
+    def test_unbound_chat_uses_global(self):
+        bot = self._bot()
+        with tempfile.TemporaryDirectory() as d:
+            self._ready_for_call(bot, d)
+            captured = {}
+
+            def fake_post(url, headers, payload, timeout, label="api", meta=None):
+                captured["url"] = url
+                captured["auth"] = headers.get("Authorization")
+                captured["model"] = payload["model"]
+                captured["system"] = payload["messages"][0]["content"]
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+            bot._post_chat_completions = fake_post
+            bot.call_chat_ai("路人", "hi")
+            self.assertEqual(captured["url"], "https://g/v1/chat/completions")
+            self.assertEqual(captured["auth"], "Bearer G")
+            self.assertEqual(captured["model"], "m")   # strip 前缀后
+            self.assertEqual(captured["system"], "GLOBAL")
 
 
 if __name__ == "__main__":

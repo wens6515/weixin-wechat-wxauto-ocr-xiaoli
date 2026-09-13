@@ -761,5 +761,67 @@ class TestLoadCompleteness(unittest.TestCase):
         self.assertTrue(str(cfg["system_prompt"] or "").strip())
 
 
+class TestChatCardBindings(unittest.TestCase):
+    """per-chat 角色卡绑定：绑定 → 运行时参数投影 + 派生数据落盘剥离。"""
+
+    def _write_card(self, cards_dir, card):
+        os.makedirs(cards_dir, exist_ok=True)
+        with open(os.path.join(cards_dir, card["id"] + ".json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(card, f, ensure_ascii=False)
+
+    def _cfg(self):
+        return {"providers": [{"id": "p1", "name": "P1",
+                               "base_url": "https://x/v1/chat/completions",
+                               "api_key": "K", "models": ["p1:m1"]}],
+                "chat_card_bindings": {}}
+
+    def test_project_bindings_resolves_card_params(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self._write_card(tmp, {"id": "assist", "name": "助手", "system_prompt": "SP",
+                               "chat_provider": "p1", "chat_model": "p1:m1",
+                               "temperature": 0.5, "top_p": 0.6,
+                               "max_history": 55})
+        cfg = self._cfg()
+        cfg["chat_card_bindings"] = {"王文生": "assist"}
+        p = config_store._project_chat_bindings(cfg, tmp)["王文生"]
+        self.assertEqual(p["system_prompt"], "SP")
+        self.assertEqual(p["chat_model"], "p1:m1")
+        self.assertEqual(p["ai_api_url"], "https://x/v1/chat/completions")
+        self.assertEqual(p["ai_api_key"], "K")
+        self.assertEqual(p["temperature"], 0.5)
+        self.assertEqual(p["max_history"], 55)
+
+    def test_missing_card_skipped(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        cfg = self._cfg()
+        cfg["chat_card_bindings"] = {"路人": "nope"}
+        self.assertEqual(config_store._project_chat_bindings(cfg, tmp), {})
+
+    def test_key_normalized(self):
+        """绑定键做 memory 口径归一化：引号/空格差异不分裂同一会话。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self._write_card(tmp, {"id": "assist", "name": "助手",
+                               "system_prompt": "SP"})
+        cfg = self._cfg()
+        cfg["chat_card_bindings"] = {'" 强盗 " 集团': "assist"}
+        params = config_store._project_chat_bindings(cfg, tmp)
+        self.assertEqual(list(params.keys()), ["强盗集团"])
+        self.assertEqual(params["强盗集团"]["system_prompt"], "SP")
+
+    def test_save_config_strips_derived_params(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "config.json")
+        config_store.save_config(
+            {"providers": [], "chat_card_params": {"a": {}}}, path)
+        with open(path, "r", encoding="utf-8") as f:
+            disk = json.load(f)
+        self.assertNotIn("chat_card_params", disk)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
