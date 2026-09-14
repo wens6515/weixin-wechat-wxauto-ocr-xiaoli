@@ -2,15 +2,15 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v2.8.0「OCR 提速与任务进度」** · 适配微信 PC **4.x** · 识别引擎升级 PP-OCRv5（更准、事件路径快约 40%）· 长任务阶段进度回传 · 联网搜索可配代理
+> **v2.8.1「窗口复用与日志瘦身」** · 适配微信 PC **4.x** · 任务桥稳定复用同一个天枢窗口（不再重复新开）· 界面日志只留摘要（细节进 bot.log）· 用量页精简
 
 ---
 
 ## ⬇️ 下载安装（桌面版）
 
-**v2.8.0 完整桌面版安装包**（PySide6 图形界面 + 19 套主题 + 壁纸库 + 托盘常驻）：
+**v2.8.1 完整桌面版安装包**（PySide6 图形界面 + 19 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v2.8.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.8.0/xiaoli-setup-v2.8.0.exe)
+👉 [点击下载 `xiaoli-setup-v2.8.1.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.8.1/xiaoli-setup-v2.8.1.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -196,6 +196,7 @@ tools/                       # 配套标定/调试工具
 
 ## 更新记录
 
+- [v2.8.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.1.md)（任务桥窗口复用修复/界面日志瘦身/首页与用量页版面调整）
 - [v2.8.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.0.md)（OCR 引擎升级提速/天枢 CLI 窗口识别修复/任务进度回传/联网搜索代理）
 - [v2.7.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.7.0.md)（按聊天绑定角色卡/首页更新检查/PDF 直读/文件目录热生效）
 - [v2.6.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.6.2.md)（文件定位重构/回传识别/前端日志双轨/任务桥归档管理）
