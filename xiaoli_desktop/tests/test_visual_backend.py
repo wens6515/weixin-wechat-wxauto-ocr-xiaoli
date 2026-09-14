@@ -117,13 +117,24 @@ class TestOcrImageMocked(unittest.TestCase):
 
     @mock.patch("wx_backend.visual_backend._get_ocr_engine")
     def test_rapidocr_maps_to_dict_contract(self, _m):
-        """RapidOCR 返回 [box, text, score] → ocr_image 输出 {text,x,y,w,h}。"""
+        """RapidOCROutput（.txts/.scores/.boxes）→ ocr_image 输出 {text,x,y,w,h}。
+
+        boxes 用 numpy 数组模拟真实返回——numpy 禁真值判断（`or` 会 raise），
+        适配层必须逐字段 None 检查后 zip。"""
+        import numpy as np
+
+        class _FakeOut:
+            txts = ("王文生", "[图片]")
+            scores = (0.99, 0.95)
+            boxes = np.array([
+                [[10, 20], [100, 20], [100, 50], [10, 50]],
+                [[5, 80], [60, 80], [60, 100], [5, 100]],
+            ])
+
         class _FakeEngine:
             def __call__(self, img):
-                return [
-                    ([[10, 20], [100, 20], [100, 50], [10, 50]], "王文生", 0.99),
-                    ([[5, 80], [60, 80], [60, 100], [5, 100]], "[图片]", 0.95),
-                ], [0.1, 0.1, 0.1]
+                return _FakeOut()
+
         _m.return_value = _FakeEngine()
         img = _solid((200, 200), (255, 255, 255))
         items = ocr_image(img)
@@ -132,17 +143,25 @@ class TestOcrImageMocked(unittest.TestCase):
             {"text": "[图片]", "x": 5, "y": 80, "w": 55, "h": 20},
         ])
 
-    def test_engine_construction_limits_threads(self):
-        """契约：引擎构造必须限制 ONNX Runtime 线程数（CPU 治理），防回退。"""
+    def test_engine_construction_locks_model_and_threads(self):
+        """契约：引擎构造必须限线程（CPU 治理）并锁 PP-OCRv5 mobile 模型，防回退。"""
         from wx_backend import visual_backend as vb
 
         old = vb._OCR_ENGINE
         vb._OCR_ENGINE = None
         try:
-            with mock.patch("rapidocr_onnxruntime.RapidOCR") as m_cls:
+            with mock.patch("rapidocr.RapidOCR") as m_cls:
                 m_cls.return_value = object()
                 vb._get_ocr_engine()
-                m_cls.assert_called_once_with(intra_op_num_threads=2)
+                _args, kwargs = m_cls.call_args
+                params = kwargs["params"]
+                self.assertEqual(
+                    params["EngineConfig.onnxruntime.intra_op_num_threads"], 2)
+                self.assertEqual(params["Det.ocr_version"].name, "PPOCRV5")
+                self.assertEqual(params["Det.model_type"].name, "MOBILE")
+                self.assertEqual(params["Rec.ocr_version"].name, "PPOCRV5")
+                self.assertEqual(params["Rec.model_type"].name, "MOBILE")
+                self.assertEqual(params["Det.limit_side_len"], 224)
         finally:
             vb._OCR_ENGINE = old
 
@@ -388,13 +407,13 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
-                    # 同一气泡多行（行距 44px，2x 后微信气泡内换行）→ 应合并为一条
+                    # 同一气泡多行（行距 22px，微信气泡内换行）→ 应合并为一条
                     {"text": "@小漓 测试，生成10秒视频：镜头1：缓慢推镜，昏暗",
-                     "x": 100, "y": 100, "w": 300, "h": 22},
+                     "x": 50, "y": 50, "w": 150, "h": 11},
                     {"text": "镜头2：微微特写少年侧脸，眼神平静",
-                     "x": 100, "y": 144, "w": 260, "h": 22},
+                     "x": 50, "y": 72, "w": 130, "h": 11},
                     {"text": "镜头3：镜头缓缓拉远，整个安静的房间",
-                     "x": 100, "y": 188, "w": 280, "h": 22},
+                     "x": 50, "y": 94, "w": 140, "h": 11},
                 ])
     def test_get_messages_merges_multiline_bubble(self, _ocr, _cap, _find,
                                                  _switch):
@@ -431,12 +450,12 @@ class TestVisualBackend(unittest.TestCase):
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
         with mock.patch.object(b, "read_title", return_value="王文生"):
-            # OCR 文字（2x 坐标）：对方气泡 2x [80,60,480,220]、
-            # 自己气泡 2x [320,300,720,420]
+            # OCR 文字（1x 坐标）：对方气泡 1x [40,30,240,110]、
+            # 自己气泡 1x [160,150,360,210]
             _ocr.return_value = [
-                {"text": "镜头1：缓慢推镜", "x": 100, "y": 80, "w": 200, "h": 30},
-                {"text": "镜头2：特写侧脸", "x": 100, "y": 140, "w": 200, "h": 30},
-                {"text": "收到任务啦", "x": 340, "y": 320, "w": 200, "h": 30},
+                {"text": "镜头1：缓慢推镜", "x": 50, "y": 40, "w": 100, "h": 15},
+                {"text": "镜头2：特写侧脸", "x": 50, "y": 70, "w": 100, "h": 15},
+                {"text": "收到任务啦", "x": 170, "y": 160, "w": 100, "h": 15},
             ]
             msgs = b.get_messages("王文生")
         self.assertEqual(len(msgs), 2, "应分组成 2 条（对方气泡 + 自己气泡）")
@@ -462,10 +481,10 @@ class TestVisualBackend(unittest.TestCase):
              mock.patch("wx_backend.visual_backend.detect_avatar_tops",
                         return_value=[150]):
             _ocr.return_value = [
-                # 气泡内容（对方气泡 2x [80,60,480,220] 内）
-                {"text": "镜头1：缓慢推镜", "x": 100, "y": 80, "w": 200, "h": 30},
-                # 头像文字（落在自己头像矩形 (700,300,80,80) 内）
-                {"text": "蓝色大肥鱼", "x": 710, "y": 310, "w": 60, "h": 20},
+                # 气泡内容（对方气泡 1x [40,30,240,110] 内）
+                {"text": "镜头1：缓慢推镜", "x": 50, "y": 40, "w": 100, "h": 15},
+                # 头像文字（落在自己头像矩形 (336,150,64,40) 内）
+                {"text": "蓝色大肥鱼", "x": 355, "y": 155, "w": 30, "h": 10},
             ]
             msgs = b.get_messages("王文生")
         self.assertEqual(len(msgs), 1, "头像文字应被排除，只剩气泡内容")
@@ -577,11 +596,11 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
-                    # 群聊发送者名：短文本独立行，紧贴内容上方（y 差 ~100）
-                    {"text": "哆拉A萝", "x": 100, "y": 100, "w": 80, "h": 24},
+                    # 群聊发送者名：短文本独立行，紧贴内容上方（y 差 ~53）
+                    {"text": "哆拉A萝", "x": 50, "y": 50, "w": 40, "h": 12},
                     # 消息内容
-                    {"text": "豆包有学生优惠了", "x": 140, "y": 206,
-                     "w": 150, "h": 24},
+                    {"text": "豆包有学生优惠了", "x": 70, "y": 103,
+                     "w": 75, "h": 12},
                 ])
     def test_get_messages_group_chat_sender_is_author(self, _ocr, _cap,
                                                       _find, _switch):
@@ -836,10 +855,11 @@ class TestVisualBackend(unittest.TestCase):
             return [0, 90] if side == "right" else [110]
 
         _dav.side_effect = fake_avatar_tops
-        # 文件名行（2x）：cx=110 < 中线 200、落在气泡 2x 框 (180,220,80,280)
-        # 内；cy=185 离头像中心 220 差 35（_is_self 阈值 <35 不命中）→ 判对方。
+        # 文件名行（1x）：cx=55 < 中线 100、落在气泡 1x 框 (90,110,40,140)
+        # 内；气泡 top=90 对齐右侧头像 top=90 → 头像几何判 self（修复前
+        # 因非绿气泡 + x 靠左被判对方）。
         _ocr.return_value = [
-            {"text": "index.html", "x": 90, "y": 175, "w": 40, "h": 20},
+            {"text": "index.html", "x": 45, "y": 88, "w": 20, "h": 10},
         ]
         b.connect()
         msgs = b.get_messages("王文生")
@@ -1574,14 +1594,14 @@ class TestGetMessagesInMedia(unittest.TestCase):
                                                   _cap, _find, _switch):
         """1x 坐标：左头像 top=100、右头像 top=30；media 框 (150,250,40,160)
         顶部 150 落入左头像 100 的区间 → 对方媒体框。
-        发送者名 '王文生'（2x y=280）紧贴 media 框顶（2x y=300）→ 被吞掉。
-        media 框内 '我不是'/'大肥鱼'（2x y=320/360）→ 剔除不产消息。"""
+        发送者名 '王文生'（y=140）紧贴 media 框顶（y=150）→ 被吞掉。
+        media 框内 '我不是'/'大肥鱼'（y=160/180）→ 剔除不产消息。"""
         _tops.side_effect = lambda img, bg, side: [100] if side == "left" else [30]
         _media.return_value = [(150, 250, 40, 160)]
         _ocr.return_value = [
-            {"text": "王文生", "x": 50, "y": 280, "w": 50, "h": 20},
-            {"text": "我不是", "x": 100, "y": 320, "w": 60, "h": 20},
-            {"text": "大肥鱼", "x": 100, "y": 360, "w": 60, "h": 20},
+            {"text": "王文生", "x": 25, "y": 140, "w": 25, "h": 10},
+            {"text": "我不是", "x": 50, "y": 160, "w": 30, "h": 10},
+            {"text": "大肥鱼", "x": 50, "y": 180, "w": 30, "h": 10},
         ]
         b = self._backend()
         with mock.patch.object(b, "read_title", return_value="王文生"):
@@ -1605,12 +1625,12 @@ class TestGetMessagesInMedia(unittest.TestCase):
         _tops.side_effect = lambda img, bg, side: [100] if side == "left" else [30]
         _media.return_value = [(150, 250, 40, 160)]
         _ocr.return_value = [
-            # 正常文字（2x y=210，1x=105 落入左头像 100 区间 → 对方消息；
+            # 正常文字（y=105 落入左头像 100 区间 → 对方消息；
             # 长度 >8 字符避免触发发送者名候选逻辑——真实短消息在气泡框内）
-            {"text": "这是一条正常的文字消息", "x": 100, "y": 210,
-             "w": 200, "h": 20},
-            # media 框 2x (300,500,80,320) 内文字 → 剔除
-            {"text": "我不是", "x": 100, "y": 320, "w": 60, "h": 20},
+            {"text": "这是一条正常的文字消息", "x": 50, "y": 105,
+             "w": 100, "h": 10},
+            # media 框 (150,250,40,160) 内文字 → 剔除
+            {"text": "我不是", "x": 50, "y": 160, "w": 30, "h": 10},
         ]
         b = self._backend()
         with mock.patch.object(b, "read_title", return_value="王文生"):

@@ -2,7 +2,7 @@
 """引擎线程 clear_memory：清空运行中 bot 的记忆（内存 memory_db + 落盘）。
 
 历史缺陷：GUI「清空全部记忆」按钮只写空文件、不动 bot 内存 memory_db，
-bot 节流写盘（_schedule_save_memory/_flush_memory）把旧记忆覆盖回磁盘。
+bot 节流写盘（MemoryStore.schedule_save）把旧记忆覆盖回磁盘。
 修复：按钮改走 engine.clear_memory() → bot.clear_history()（清内存 + 落盘），
 bot 未就绪/清空失败时回退直接清文件。
 """

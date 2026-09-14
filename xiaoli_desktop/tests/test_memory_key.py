@@ -33,7 +33,6 @@ class TestMemoryKey(unittest.TestCase):
         bot._memory_lock = threading.RLock()
         bot._deep_count = {}
         bot._deep_dir = ""
-        bot._schedule_save_memory = lambda: None
         # 各种 OCR 变体读写的应是同一份历史
         bot._add_history("“强盗”集团", "user", "在吗")
         self.assertEqual(len(bot._get_history("强盗”集团")), 1)   # 丢前引号

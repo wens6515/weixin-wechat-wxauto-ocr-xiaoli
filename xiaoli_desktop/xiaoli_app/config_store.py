@@ -107,8 +107,7 @@ def _decrypt_cfg_keys(cfg):
 
 DEFAULT_CARD_ID = "xiaoli"
 
-# AI 参数默认（与 wechat_bot.load_config 的 default_cfg 对齐——改一边须同步另一边）。
-# config_store 是配置统一事实源（GUI/CLI 都从这里取 cfg），而 WeChatBot.__init__
+# AI 参数默认（配置统一事实源：GUI/CLI 都从这里取 cfg）。WeChatBot.__init__
 # 对其中部分键是裸索引（cfg[k] 非 cfg.get）：cooldown / api_retry /
 # api_timeout 不参与投影重建（project_config 只重建 provider 相关键），缺失即
 # KeyError → 初始化失败（历史缺陷：全新安装 / 新结构 config 初始化报 'vision_prompt'，
@@ -528,6 +527,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
         "font_scale": "small",  # 全局字号档位：small/medium/large（用户指定：启动默认小字号）
         "wallpaper_path": "小漓主题.jpg",  # 背景壁纸（裸文件名 → 启动时按壁纸库解析绝对路径；配套 abyss 主题）
+        "web_proxy": "",  # 联网搜索/网页抓取代理（http/https/socks5；空 = 直连；不影响模型 API）
     }.items():
         if k not in cfg:
             cfg[k] = v

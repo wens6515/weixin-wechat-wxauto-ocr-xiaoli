@@ -35,10 +35,6 @@ def default_reminders_path():
     return os.path.join(default_data_dir(), "reminders.json")
 
 
-def _empty():
-    return []
-
-
 class RemindersStore:
     """reminders.json 读写 + 到期/错过分类。所有实例按路径共享一把锁。"""
 

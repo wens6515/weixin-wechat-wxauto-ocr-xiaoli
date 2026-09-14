@@ -29,11 +29,14 @@ SLA——搜索引擎改版或反爬升级会失效，靠多源 + 调用方失�
 """
 import base64
 import html as _html
+import logging
 import re
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
+
+logger = logging.getLogger("xiaoli")
 
 # 并发主链（按优先级排序：合并结果按此顺序拼接）+ 兜底链（主链全空才试）。
 # 搜狗第一：真机高频实测唯一定期供给的源（百度 302 图形验证码、必应逢
@@ -48,6 +51,29 @@ SNIPPET_MAX_CHARS = 200      # 单条摘要截断（控制 tool 消息体积）
 _BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 _HEADERS = {"User-Agent": _BROWSER_UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
+
+# ---------- 代理（config.web_proxy，设置页配置） ----------
+# 只作用于本模块的搜索与网页抓取（含 ConditionWatcher 经 web_fetch 的轮询），
+# 不影响模型 API 调用与平台余额查询。GUI/CLI 启动时从 config 注入，设置页
+# 保存即时生效。无效前缀的值拒绝注入（fail-closed 保持上一次状态）。
+_PROXY_URL = ""
+
+
+def set_proxy(url):
+    """设置搜索/抓取代理（空串 = 直连）。仅接受 http/https/socks5 前缀。"""
+    global _PROXY_URL
+    u = str(url or "").strip()
+    if u and not u.lower().startswith(("http://", "https://", "socks5://")):
+        logger.warning(f"[代理] 忽略不支持的代理地址: {u[:60]!r}（仅支持 http/https/socks5）")
+        return
+    _PROXY_URL = u
+
+
+def _proxies():
+    """requests proxies 参数：未配置返回 None（requests 默认直连）。"""
+    if not _PROXY_URL:
+        return None
+    return {"http": _PROXY_URL, "https": _PROXY_URL}
 
 
 class WebSearchError(Exception):
@@ -135,7 +161,8 @@ def _extract_h3_results(page, base_url, count):
 def _search_baidu(query, count):
     resp = requests.get("https://www.baidu.com/s",
                         params={"wd": query, "rn": 10},
-                        headers=_HEADERS, timeout=SEARCH_TIMEOUT)
+                        headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                        proxies=_proxies())
     resp.raise_for_status()
     # 高频自动化访问会拿到「安全验证」页（200 + 无 h3 结果块）——
     # 解析为空结果即自然降级，由其余引擎补位
@@ -144,7 +171,8 @@ def _search_baidu(query, count):
 
 def _search_sogou(query, count):
     resp = requests.get("https://www.sogou.com/web", params={"query": query},
-                        headers=_HEADERS, timeout=SEARCH_TIMEOUT)
+                        headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                        proxies=_proxies())
     resp.raise_for_status()
     return _extract_h3_results(resp.text, "https://www.sogou.com", count)
 
@@ -200,7 +228,8 @@ def _extract_bing_title_link(block):
 
 def _search_bing(query, count):
     resp = requests.get("https://cn.bing.com/search", params={"q": query},
-                        headers=_HEADERS, timeout=SEARCH_TIMEOUT)
+                        headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                        proxies=_proxies())
     resp.raise_for_status()
     results = []
     for block in resp.text.split('<li class="b_algo')[1:]:
@@ -241,7 +270,8 @@ def _decode_ddg_url(url):
 
 def _search_duckduckgo(query, count):
     resp = requests.get("https://html.duckduckgo.com/html/", params={"q": query},
-                        headers=_HEADERS, timeout=SEARCH_TIMEOUT)
+                        headers=_HEADERS, timeout=SEARCH_TIMEOUT,
+                        proxies=_proxies())
     resp.raise_for_status()
     results = []
     for block in resp.text.split('<h2 class="result__title">')[1:]:
@@ -398,7 +428,8 @@ def web_fetch(url, max_chars=FETCH_MAX_CHARS):
     text = ""
     for hop in range(FETCH_MAX_HOPS):
         try:
-            resp = requests.get(u, headers=_HEADERS, timeout=FETCH_TIMEOUT)
+            resp = requests.get(u, headers=_HEADERS, timeout=FETCH_TIMEOUT,
+                                proxies=_proxies())
             resp.raise_for_status()
         except requests.exceptions.RequestException as e:
             raise WebFetchError(f"请求失败: {e}") from e
@@ -433,7 +464,8 @@ def resolve_redirect(url, timeout=FETCH_TIMEOUT):
     u = str(url or "").strip()
     for _hop in range(2):
         try:
-            resp = requests.get(u, headers=_HEADERS, timeout=timeout)
+            resp = requests.get(u, headers=_HEADERS, timeout=timeout,
+                                proxies=_proxies())
         except requests.exceptions.RequestException:
             return u
         final = str(getattr(resp, "url", "") or u)

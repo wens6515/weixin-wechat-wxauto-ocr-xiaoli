@@ -12,12 +12,12 @@ import time
 import uuid
 
 # 卡允许的字段白名单（校验时未知字段静默丢弃）。vision_temp/vision_max_tokens
-# 已随单模型化+图片复述路径废弃移出白名单（旧卡残留字段保存时被丢弃）
+# 已随单模型化+图片复述路径废弃移出白名单；vision_provider/vision_model/
+# classify_provider/classify_model 同批废弃（单模型化：视觉/分类统一走
+# chat provider 端点与 chat_model）——旧卡残留字段保存时被静默丢弃
 CARD_FIELDS = {
     "id", "name", "emoji", "system_prompt", "nickname",
     "chat_provider", "chat_model",
-    "vision_provider", "vision_model",
-    "classify_provider", "classify_model",
     "temperature", "top_p", "max_history",
 }
 # 必填字段

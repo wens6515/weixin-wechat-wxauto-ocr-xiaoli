@@ -4,7 +4,7 @@
 通道背景（见 docs\\微信通道验证结论.md，2026-08 实测）：
 - 新版微信 4.1.12.51 的 UIA 控件树 / CDP / 窗口消息 / 本地数据通道全部关闭
 - PrintWindow + PW_RENDERFULLCONTENT 截图是唯一已验证可行的读取通道
-- 文本识别用 Windows 自带 OCR（winsdk，zh-Hans-CN，毫秒级，零多模态 API）
+- 文本识别用本地 RapidOCR（PP-OCRv5 mobile 模型，onnxruntime 后端，零多模态 API）
 - 变化检测先行：无像素变化直接跳过，避免每轮 OCR 成本
 
 效率设计（用户诉求"像 wxauto4 那样高效"）：
@@ -302,30 +302,52 @@ def capture_window(hwnd) -> Image.Image | None:
         u32.ReleaseDC(hwnd, hdc_win)
 
 
-# ---------- OCR（RapidOCR / PaddleOCR onnxruntime） ----------
+# ---------- OCR（RapidOCR：PP-OCRv5 mobile 模型，onnxruntime 后端） ----------
 
 _OCR_ENGINE = None
 
 
 def _get_ocr_engine():
-    """懒加载 RapidOCR 引擎（PaddleOCR onnxruntime 轻量版）。不可用返回 None。
+    """懒加载 RapidOCR 引擎（rapidocr 3.x + PP-OCRv5 mobile，onnxruntime 后端）。
+    不可用返回 None。
 
-    替换原 winsdk Windows OCR：实测 Windows OCR 对微信 UI 噪声致命且随内容
-    漂移（王文生→干立牛、[图片]→隆片]、王美晨→艹王美晨），RapidOCR 同一张
-    整窗截图全部读对（会话名置信度 1.00）。首次加载约 2s（模型初始化），
-    单例缓存避免每轮重建。
+    引擎选型（真机 + 合成双验证，见 docs/OCR引擎升级评估.md）：
+    - 模型锁 PP-OCRv5 mobile：热路径耗时与旧 PP-OCRv4 持平（消息区联合 OCR
+      627ms vs 601ms），小字/生僻字/符号精度更高（下划线文件名、弯引号、
+      群成员生僻字读对，头像幻影行消失）；默认的 PP-OCRv6 small 慢
+      52%~3 倍，不用
+    - rapidocr 3.x 构造参数是枚举（传字符串会被参数校验拒绝）；模型文件由
+      打包预置进 rapidocr/models/（源码运行缺模型时按 registry 自动下载）
+    - 替换更早的 winsdk Windows OCR：对微信 UI 噪声致命且随内容漂移
+      （王文生→干立牛、[图片]→隆片]），RapidOCR 同一张整窗截图全部读对
     """
     global _OCR_ENGINE
     if _OCR_ENGINE is not None:
         return _OCR_ENGINE
     try:
-        from rapidocr_onnxruntime import RapidOCR
+        from rapidocr import RapidOCR
+        from rapidocr.utils.typings import ModelType, OCRVersion
 
         # intra_op_num_threads=2：限制 ONNX Runtime 推理线程数，避免 OCR
         # 全核打满（真机实测：小漓.exe 发现新消息时 CPU 100% 根因即此）。
-        # 单次推理耗时 +5.6%（2954ms→3120ms，tools/ocr_benchmark.py 真机
-        # 实测），文本匹配率 100%，CPU 占用从全核降到 2 核。
-        _OCR_ENGINE = RapidOCR(intra_op_num_threads=2)
+        # rapidocr 3.x 默认 -1 吃满核，必须显式限 2；单次推理耗时 +5.6%
+        # 换 CPU 从全核降到 2 核（tools/ocr_benchmark.py 真机实测）。
+        #
+        # Det.limit_side_len=224：v5 det 对默认「短边放大到 736」的预处理
+        # 敏感——标题区裁剪（517x70）被放大 10.5 倍后整块检不出文本（真机
+        # 复现，v4/v6 无此问题）。224 把放大倍率上限压到 ~3 倍：标题区
+        # conf 1.0 恢复读取，条带主名行合并更完整；消息区/整窗（min 边
+        # ≥736）本就不放大，参数对热路径零影响（分区实测见评估文档）。
+        _OCR_ENGINE = RapidOCR(params={
+            "Det.ocr_version": OCRVersion.PPOCRV5,
+            "Det.model_type": ModelType.MOBILE,
+            "Rec.ocr_version": OCRVersion.PPOCRV5,
+            "Rec.model_type": ModelType.MOBILE,
+            "Det.limit_side_len": 224,
+            "Det.limit_type": "min",
+            "EngineConfig.onnxruntime.intra_op_num_threads": 2,
+            "EngineConfig.onnxruntime.inter_op_num_threads": 1,
+        })
         return _OCR_ENGINE
     except Exception as e:
         logger.warning(f"RapidOCR 不可用: {e}")
@@ -359,14 +381,15 @@ def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
         img = img.resize((max_w, int(img.height * ratio)), Image.LANCZOS)
     import numpy as np
     try:
-        result, _elapse = engine(np.array(img.convert("RGB")))
-    except Exception as e:
-        logger.warning(f"OCR 识别失败: {e}")
-        return []
-    items = []
-    if result:
-        for box, text, _score in result:
-            text = _norm_cjk((text or "").strip())
+        out = engine(np.array(img.convert("RGB")))
+        # rapidocr 3.x 返回 RapidOCROutput（.txts/.scores/.boxes）；boxes 是
+        # numpy 数组，禁真值判断（`or` 会 raise），逐字段 None 检查。
+        txts = out.txts if out.txts is not None else []
+        scores = out.scores if out.scores is not None else []
+        boxes = out.boxes if out.boxes is not None else []
+        items = []
+        for box, text, _score in zip(boxes, txts, scores):
+            text = _norm_cjk(str(text).strip())
             if not text:
                 continue
             xs = [p[0] for p in box]
@@ -378,7 +401,10 @@ def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
                 "x": int(x), "y": int(y),
                 "w": int(x2 - x), "h": int(y2 - y),
             })
-    return items
+        return items
+    except Exception as e:
+        logger.warning(f"OCR 识别失败: {e}")
+        return []
 
 
 
@@ -761,10 +787,11 @@ def _color_close(a: tuple, b: tuple, tol: int = _ROW_COLOR_TOL) -> bool:
 # 不同会导致错位，普通用户分发需引导框选或自适应检测。
 _SESSION_REGION_RATIO = (0.09, 0.0878, 0.418, 0.9895)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.4165, 0.1288, 0.9913, 0.8337)
-# 同一气泡内换行 vs 气泡间距的 y 差阈值（2x 坐标）。真机标定：气泡内换行
-# 行距 ~40-50px，群聊名字-内容 106px、内容块间最小 186px——取 70 夹中间，
-# 让换行合并、气泡分开。旧值 18 小于换行距，多行长消息被逐行拆散。
-_BUBBLE_LINE_GAP = 70
+# 同一气泡内换行 vs 气泡间距的 y 差阈值（1x 坐标）。真机标定：气泡内换行
+# 行距 ~20-25px，群聊名字-内容 53px、内容块间最小 93px——取 35 夹中间，
+# 让换行合并、气泡分开。（2x 坐标口径时期为 70，去 2x 后线性减半行为不变；
+# 更早的 18 小于换行距，多行长消息被逐行拆散。）
+_BUBBLE_LINE_GAP = 35
 # 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
 _TITLE_REGION_RATIO = (0.4151, 0.0386, 0.8128, 0.082)
 
@@ -1008,7 +1035,8 @@ class VisualBackend:
             int(w * self._title_region[0]), int(h * self._title_region[1]),
             int(w * self._title_region[2]), int(h * self._title_region[3]),
         ))
-        region = region.resize((region.width * 2, region.height * 2), Image.LANCZOS)
+        # 1x 原生 OCR（去 2x）：新引擎小字 1x 精度与 2x 持平（真机 conf 1.0），
+        # 省一次 LANCZOS 放大和一半 OCR 耗时（820ms → ~110ms）
         items = ocr_image(region)
         # 标题可能被 OCR 拆成多段（真机：'"强盗"' + '集团(5)' 两个独立项），
         # 按 x 排序拼接，而非只取最长单行——否则群聊标题缺左半
@@ -1410,7 +1438,7 @@ class VisualBackend:
                 self._current_is_group = is_group
         region = None
         items = []
-        bubble_boxes: list[tuple] = []  # 2x 坐标气泡框 [(t,b,l,r,is_self)]
+        bubble_boxes: list[tuple] = []  # 1x 坐标气泡框 [(t,b,l,r,is_self)]
         for attempt in range(2):
             shot = self._refresh(force=True)
             if shot is None:
@@ -1421,26 +1449,28 @@ class VisualBackend:
                 int(w * self._message_region[0]), int(h * self._message_region[1]),
                 int(w * self._message_region[2]), int(h * self._message_region[3]),
             ))
-            region = region_1x.resize((region_1x.width * 2, region_1x.height * 2), Image.LANCZOS)
+            # 1x 原生 OCR（去 2x）：新引擎小字 1x 精度与 2x 持平（真机逐行
+            # 对比无内容丢失，省略号/头像噪声反而更好），消息区联合 OCR
+            # 1579ms → 631ms。坐标口径全线 1x，几何阈值线性减半行为不变。
+            region = region_1x
             if assume_switched and self._current_chat == chat:
                 # ---- 联合裁剪 OCR（用户定案：事件内 OCR 两次封顶）----
                 # 标题带 + 消息区一次读：联合区 = 标题区 ∪ 消息区，下边框
                 # 钉在标定消息区下沿（输入框永不入镜）。标题行 = 联合区内
-                # 消息区上沿以上（2x 坐标）；消息行平移回消息区 2x 坐标系，
+                # 消息区上沿以上（1x 坐标）；消息行平移回消息区 1x 坐标系，
                 # 下游气泡/头像/合并逻辑与旧路径完全共用。
                 u_l = int(w * min(self._title_region[0], self._message_region[0]))
                 u_t = int(h * min(self._title_region[1], self._message_region[1]))
                 u_r = int(w * max(self._title_region[2], self._message_region[2]))
                 u_b = int(h * max(self._title_region[3], self._message_region[3]))
                 union = shot.crop((u_l, u_t, u_r, u_b))
-                union2x = union.resize((union.width * 2, union.height * 2), Image.LANCZOS)
-                all_items = ocr_image(union2x)
+                all_items = ocr_image(union)
                 # 标题带钉在标定标题区内（center-y < 标题区下沿）——标题区
                 # 下沿与消息区上沿之间夹缝的内容（真机实测：群聊首行
                 # 「何镇鸿:[图片]」会混进标题串）不得污染标题，全部归消息带
-                t_bot_2x = (int(h * self._title_region[3]) - u_t) * 2
+                t_bot = int(h * self._title_region[3]) - u_t
                 title_items = [it for it in all_items
-                               if (it["y"] + it["h"] // 2) < t_bot_2x]
+                               if (it["y"] + it["h"] // 2) < t_bot]
                 title = "".join(it["text"] for it in
                                 sorted(title_items, key=lambda i: i["x"])).strip()
                 # 空标题防线（自 analyze_window 迁入）：标题区读空多为
@@ -1453,12 +1483,12 @@ class VisualBackend:
                     name, is_group, _ = parse_title(title)
                     self._current_title = name or chat
                     self._current_is_group = is_group
-                # 消息行平移回消息区 2x 坐标系（几何检测沿用消息区子图）；
+                # 消息行平移回消息区 1x 坐标系（几何检测沿用消息区子图）；
                 # 标题区下沿与消息区上沿夹缝的内容一并归消息带
-                dx2x = (int(w * self._message_region[0]) - u_l) * 2
-                dy2x = (int(h * self._message_region[1]) - u_t) * 2
-                items = [dict(it, x=it["x"] - dx2x, y=it["y"] - dy2x)
-                         for it in all_items if (it["y"] + it["h"] // 2) >= t_bot_2x]
+                dx = int(w * self._message_region[0]) - u_l
+                dy = int(h * self._message_region[1]) - u_t
+                items = [dict(it, x=it["x"] - dx, y=it["y"] - dy)
+                         for it in all_items if (it["y"] + it["h"] // 2) >= t_bot]
             else:
                 # 单片 OCR（v2.1.3 废弃分片）：分片左右切边界会把整字切成两半
                 # 误识（真机：「排」被切左半成「非」，产碎片「非序错乱」；探针
@@ -1468,13 +1498,11 @@ class VisualBackend:
                 items = ocr_image(region)
             if items:
                 # 连通域分气泡：自动探测主题气泡色/背景色，找气泡边界框，
-                # 换算到 2x 与 OCR 坐标对齐。探测失败（纯色/mock 截图）时
-                # bubble_boxes 留空 → 下行合并回退 y 阈值逻辑。
+                # 与 OCR 坐标同在 1x 口径直接对齐。探测失败（纯色/mock 截图）
+                # 时 bubble_boxes 留空 → 下行合并回退 y 阈值逻辑。
                 colors = detect_bubble_colors(region_1x)
                 if colors.get("self") or colors.get("other"):
-                    boxes_1x = find_bubble_boxes(region_1x, colors)
-                    bubble_boxes = [(t * 2, b * 2, l * 2, r * 2, is_self)
-                                    for (t, b, l, r, is_self) in boxes_1x]
+                    bubble_boxes = find_bubble_boxes(region_1x, colors)
                 break
             # 消息区空白：可能 toggle 取消选中了（微信再点一次恢复选中）
             if attempt == 0:
@@ -1512,14 +1540,14 @@ class VisualBackend:
         # 哪个区间 → 归属该头像（x 侧：右=自己/左=对方）。替代旧 tol=40
         # 对齐——区间归属无需魔法数容差。
         all_avatar_tops_1x = sorted(set(right_tops_1x) | set(other_tops_1x))
-        media_self_boxes = []   # 2x 坐标，归 bot 的 media 框
-        media_other_boxes = []  # 2x 坐标，归对方的 media 框
+        media_self_boxes = []   # 1x 坐标，归 bot 的 media 框
+        media_other_boxes = []  # 1x 坐标，归对方的 media 框
         for (mt, mb, ml, mr) in media_1x:
             hit = _bucket_avatar(mt, all_avatar_tops_1x)
             if hit is not None and hit in right_tops_1x:
-                media_self_boxes.append((mt * 2, mb * 2, ml * 2, mr * 2))
+                media_self_boxes.append((mt, mb, ml, mr))
             elif hit is not None:
-                media_other_boxes.append((mt * 2, mb * 2, ml * 2, mr * 2))
+                media_other_boxes.append((mt, mb, ml, mr))
         for it in items:
             cy = it["y"] + it["h"] // 2
             cx = it["x"] + it["w"] // 2
@@ -1539,12 +1567,11 @@ class VisualBackend:
                         # （既有验收 test_get_messages_bot_file_card_sender_self）。
                         it["_in_media"] = True
                         break
-        avatar_h_1x = max(40, region_1x.height // 18)
-        avatar_x_2x = int(region_1x.width * 0.84) * 2
-        avatar_w_2x = region.width - avatar_x_2x
-        avatar_h_2x = avatar_h_1x * 2
+        avatar_h = max(40, region_1x.height // 18)
+        avatar_x = int(region_1x.width * 0.84)
+        avatar_w = region_1x.width - avatar_x
         self_avatar_boxes = [
-            (avatar_x_2x, top * 2, avatar_w_2x, avatar_h_2x)  # (x, y, w, h)
+            (avatar_x, top, avatar_w, avatar_h)  # (x, y, w, h)，1x 坐标
             for top in right_tops_1x
         ]
         # 对方头像只在消息区左侧（对方消息/头像在左）：只取 left<中线 的
@@ -1553,7 +1580,7 @@ class VisualBackend:
         # other_avatar_x_max 被污染成右侧值，消息区所有行 cx<该值 被误判
         # 头像区丢弃，全部消息读空（get_messages 读 0 条的真机根因）。
         other_lefts = [l for (t, b, l, r, is_self) in bubble_boxes
-                       if not is_self and l < region.width // 2]
+                       if not is_self and l < region_1x.width // 2]
         other_avatar_x_max = min(other_lefts) if other_lefts else None
         for it in items:
             cx = it["x"] + it["w"] // 2
@@ -1566,13 +1593,13 @@ class VisualBackend:
             if not it["_in_avatar"] and other_avatar_x_max is not None \
                     and cx < other_avatar_x_max:
                 it["_in_avatar"] = True
-        midline_x = region.width // 2  # 消息区中线：右侧=自己发的
+        midline_x = region_1x.width // 2  # 消息区中线：右侧=自己发的
         # 头像锚定：右侧头像中心 y（几何窄带），优先于 x 坐标
-        avatar_ys = [top * 2 + avatar_h_1x for top in right_tops_1x]  # 2x 头像中心 y
+        avatar_ys = [top + avatar_h // 2 for top in right_tops_1x]  # 1x 头像中心 y
 
         def _is_self(first_x: int, first_y: int) -> bool:
             for ay in avatar_ys:
-                if abs(first_y - ay) < 35:  # 消息 y 与头像 y 对齐 → self
+                if abs(first_y - ay) < 18:  # 消息 y 与头像 y 对齐 → self（2x 口径 35 线性减半）
                     return True
             return first_x > midline_x  # 降级：x 中线
 
@@ -1581,7 +1608,7 @@ class VisualBackend:
         cur_y: list[int] = []
         seq = 0
         # 群聊发送者名识别：气泡上方短文本行（如 '哆拉A萝'）紧贴内容上方。
-        # pending_name = (文本, y)：候选发送者名；被后续内容行消费（y 差<150）
+        # pending_name = (文本, y)：候选发送者名；被后续内容行消费（y 差<75）
         # → 成为该块 sender；悬空（后面没紧跟内容）→ 它本身是一条独立短消息。
         pending_name: tuple[str, int] | None = None
         block_sender: str | None = None
@@ -1622,8 +1649,8 @@ class VisualBackend:
                     # 输入框按钮噪声：微信输入框"发送"按钮固定在消息区右下角，
                     # OCR 会把它读成消息且 x 靠右判 self——顶掉真实最新消息导致
                     # 上层跳过整会话（真机日志：latest sender='self' content='发送'）。
-                    is_send_button = (text == "发送" and first_x > 0.85 * region.width
-                                      and first_y > 0.8 * region.height)
+                    is_send_button = (text == "发送" and first_x > 0.85 * region_1x.width
+                                      and first_y > 0.8 * region_1x.height)
                     if not is_send_button:
                         # 群聊：气泡上方发送者名（pending_name 被内容行消费时
                         # 设置 block_sender）；私聊退回会话名。
@@ -1638,9 +1665,9 @@ class VisualBackend:
                         # 左=对方）。群聊对方消息 sender 用 block_sender
                         # （发送者名），不得被 x 中线/气泡色取代——名字是
                         # 用户硬性要求保留的信息。
-                        first_y_1x = first_y // 2
+                        first_y_1x = first_y
                         if cur_lines[0].get("_bubble") is not None:
-                            first_y_1x = cur_lines[0]["_bubble"][0] // 2
+                            first_y_1x = cur_lines[0]["_bubble"][0]
                         bucket_hit = _bucket_avatar(first_y_1x,
                                                     all_avatar_tops_1x)
                         if bucket_hit is not None \
@@ -1662,7 +1689,7 @@ class VisualBackend:
                             sender=sender,
                             content=text,
                             type=MessageType.TEXT,
-                            y=first_y // 2,
+                            y=first_y,
                         ))
                 cur_lines.clear()
                 cur_y.clear()
@@ -1675,7 +1702,7 @@ class VisualBackend:
                 msgs.append(WeChatMessage(
                     id=f"visual_{seq}", chat=chat, sender=chat,
                     content=name, type=MessageType.TEXT,
-                    y=pname_y // 2,
+                    y=pname_y,
                 ))
 
         for it in items:
@@ -1698,7 +1725,7 @@ class VisualBackend:
             # 名（pending_name）是媒体消息的发送者，一并吞掉不产独立消息。
             if it.get("_in_media"):
                 if pending_name is not None \
-                        and abs(it["y"] - pending_name[1]) < 150:
+                        and abs(it["y"] - pending_name[1]) < 75:
                     pending_name = None
                 continue
             # 气泡归并：连通域气泡框优先——同一气泡框的行合并、不同气泡框
@@ -1725,9 +1752,10 @@ class VisualBackend:
                     cur_lines.append(it)
                     cur_y.append(it["y"])
                     continue
-                # 2. 候选发送者名已存在且本行紧贴（y 差 <150——真机名字-内容
-                #    106px、内容块间最小 186px）→ 消费：本行是内容，候选是发送者
-                if pending_name is not None and abs(first_y0 - pending_name[1]) < 150:
+                # 2. 候选发送者名已存在且本行紧贴（y 差 <75（1x）——真机名字-内容
+                #    53px、内容块间最小 93px；2x 口径时期为 150）→ 消费：本行是
+                #    内容，候选是发送者
+                if pending_name is not None and abs(first_y0 - pending_name[1]) < 75:
                     block_sender = pending_name[0]
                     pending_name = None
                     cur_lines.append(it)
@@ -2013,12 +2041,6 @@ class VisualBackend:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""
         logger.warning("visual 后端 send_file 暂未实现")
         return False
-
-    # ---- 协议：定位 ----
-
-    def locate_message(self, message: WeChatMessage) -> Any:
-        """视觉方案下消息定位 = 无（返回 None，上层退回截图处理）。"""
-        return None
 
     # ---- 协议：关闭 ----
 

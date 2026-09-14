@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""wechat_bot 基础能力测试：群聊判定集中点、去重集合限界、微信连接重试可停止、
+"""wechat_bot 基础能力测试：群聊判定名称启发式、去重集合限界、微信连接重试可停止、
 模型端点拼接、图片发送前压缩。"""
 import os
 import sys
@@ -25,19 +25,6 @@ class TestIsGroupChat(unittest.TestCase):
     def test_edge_inputs(self):
         self.assertFalse(is_group_chat(""))
         self.assertFalse(is_group_chat(None))
-
-    def test_group_by_title_with_member_count(self):
-        """标题带括号人数 = 群聊（视觉后端权威信号，替代名称启发式）。
-
-        普通群名（如'哆菈A夢'）不含'群/集团'字，名称启发式会漏判；
-        title 参数来自右侧会话标题（'强盗"集团(5)'），可靠。
-        """
-        self.assertTrue(is_group_chat("任意名", '强盗"集团(5)'))
-        self.assertFalse(is_group_chat("任意名", "王文生"))
-        self.assertFalse(is_group_chat("任意名", ""))
-        # title 缺省时回退名称启发式（兼容旧路径/单测）
-        self.assertTrue(is_group_chat("产品讨论群"))
-        self.assertFalse(is_group_chat("小明"))
 
 
 class TestConnectWx(unittest.TestCase):
@@ -220,13 +207,32 @@ class TestExtractFileText(unittest.TestCase):
 
 class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
     """process_new_messages 的会话获取分支：visual 后端走 iter_unread_sessions
-    （红圈驱动），旧后端降级走 iter_sessions（行为不变）。"""
+    （红圈驱动），后端无该能力时降级走 iter_sessions（行为不变）。
+    主循环实现在 AgentBot（xiaoli_bot.py），故构造 AgentBot 桩。"""
 
     def _make(self, wx):
-        bot = WeChatBot.__new__(WeChatBot)
+        from xiaoli_bot import AgentBot
+        bot = AgentBot.__new__(AgentBot)
+        bot.memory_file = os.path.join(tempfile.gettempdir(),
+                                       "xiaoli_test_mem.json")
         bot.paused = False
+        bot._sending_lock = False
+        bot._reminder_queue = None
+        bot._condition_queue = None
+        bot.task_enabled = False
+        bot._last_poll_time = 0.0
+        bot.tianshu_poll_interval = 5
+        bot.tasks_dir = os.path.join(tempfile.gettempdir(),
+                                     "xiaoli_nonexistent_tasks_dir")
+        bot._progress_state = {}
+        bot._task_was_active = False
+        bot._task_end_time = None
+        bot._listen_hold_seconds = 2
         bot.last_reply_time = 0.0
         bot.cooldown = 0.0
+        bot._chat_fail_at = {}
+        bot._fail_backoff = 8.0
+        bot._pending_placeholders = {}
         bot.wx = wx
         bot.nickname = "小漓"
         return bot
@@ -953,6 +959,36 @@ class TestFileDisplayNameAndSnapshot(unittest.TestCase):
             # 无同名候选 → None（不乱选其他文件）
             self.assertIsNone(obj._find_file_by_display_name("不存在.docx"))
 
+    def test_find_file_by_display_name_prefers_matching_extension(self):
+        """同主干不同后缀：后缀必须参与匹配（真机事故——目录里同名 .7z 自己
+        攒出 (2) 编号，跨类型压倒刚收的 .pdf，bot 把 PDF 任务导向了压缩包）。
+        同后缀组内仍按 (N) 最大 + ctime；同后缀候选为空时回退全部主干命中
+        （OCR 误读后缀的容错保留，不回归成 None）。"""
+        obj = self._obj()
+        with tempfile.TemporaryDirectory() as tmp:
+            obj.file_storage_path = tmp
+            for name in ("纳新宣传海报.7z", "纳新宣传海报(1).7z",
+                         "纳新宣传海报(2).7z", "纳新宣传海报.pdf"):
+                with open(os.path.join(tmp, name), "w") as fp:
+                    fp.write("x")
+            got = obj._find_file_by_display_name("纳新宣传海报.pdf")
+            self.assertEqual(
+                got, os.path.join(tmp, "纳新宣传海报.pdf"),
+                "后缀不一致的 (2).7z 不得压倒同后缀的 .pdf")
+            # 同后缀组内仍 (N) 最大优先
+            dup_pdf = os.path.join(tmp, "纳新宣传海报(1).pdf")
+            with open(dup_pdf, "w") as fp:
+                fp.write("x")
+            self.assertEqual(
+                obj._find_file_by_display_name("纳新宣传海报.pdf"), dup_pdf)
+            # 回退：同后缀候选全删 → 主干命中的 (2).7z 兜底（不得返回 None）
+            os.remove(dup_pdf)
+            os.remove(os.path.join(tmp, "纳新宣传海报.pdf"))
+            self.assertEqual(
+                obj._find_file_by_display_name("纳新宣传海报.pdf"),
+                os.path.join(tmp, "纳新宣传海报(2).7z"),
+                "同后缀为空时回退主干命中，保持既有容错")
+
     def test_find_file_by_display_name_returns_bot_resent_file(self):
         """用户把 bot 发过的文件发回来：回传下载（hash 前缀、ctime 更新）
         必须命中——旧登记方案在发送后 300s 内会把回传误杀成「文件下载失败」，
@@ -1554,35 +1590,6 @@ class TestVisionResultRouting(unittest.TestCase):
         finally:
             if os.path.exists(img_path):
                 os.unlink(img_path)
-
-
-class TestVisionModelDefault(unittest.TestCase):
-    """单模型化：视觉统一走 chat_model，load_config 不再补/迁移独立 vision_model
-    默认值（default_cfg 已删该键）；chat_model 缺键用默认补齐，已有配置不被覆盖。"""
-
-    def test_config_missing_key_filled_with_default(self):
-        import json
-        import wechat_bot
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "config.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"bot_nickname": "小漓"}, f)
-            cfg = wechat_bot.load_config(path)
-            self.assertEqual(cfg["chat_model"], "deepseek:deepseek-v4-flash",
-                             "缺键时应补默认 chat_model")
-            self.assertNotIn("vision_model", cfg,
-                             "单模型化：load_config 不再补独立 vision_model 键（视觉走 chat_model）")
-
-    def test_existing_config_not_overwritten(self):
-        import json
-        import wechat_bot
-        with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "config.json")
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"chat_model": "zhipu:glm-4v-flash"}, f)
-            cfg = wechat_bot.load_config(path)
-            self.assertEqual(cfg["chat_model"], "zhipu:glm-4v-flash",
-                             "用户已有配置不应被默认值覆盖")
 
 
 class TestVisionRouteImmersion(unittest.TestCase):

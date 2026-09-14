@@ -17,8 +17,7 @@ import pyautogui
 # CLI）承担，不依赖此保护，故关闭。
 pyautogui.FAILSAFE = False
 import tempfile
-from wx_backend import create_backend, BackendUnavailableError
-from wx_backend.models import MessageType
+from wx_backend import create_backend
 from wx_backend.visual_backend import (
     ensure_window_visible,
     find_window_by_title,
@@ -42,17 +41,14 @@ def models_endpoint(chat_url):
     return chat_url.rsplit("/chat/completions", 1)[0] + "/models"
 
 
-def is_group_chat(chat_name, title=None):
-    """群聊判定（集中判定点）。
+def is_group_chat(chat_name):
+    """群聊判定的名称启发式兜底（含「群/集团」字）。
 
-    title 优先：右侧会话标题形如 '强盗"集团(5)'（括号内人数，真机标定）——
-    含括号人数 = 群聊。这是权威信号，普通群名（如'哆菈A夢'）不含'群/集团'
-    字，名称启发式会漏判。
-    title 缺省（无视觉后端/旧路径/单测）回退名称启发式：含「群」或「集团」。
+    权威判定在视觉链路：标题区括号人数（visual_backend.parse_title）解析出
+    _current_is_group，处理事件内随联合 OCR 刷新；本函数只在读不到标题时
+    兜底。已知边界：普通群名（如'哆菈A夢'）不含「群/集团」字会漏判
+    （README 技术说明有记）。
     """
-    if title is not None:
-        t = (title or "").strip()
-        return bool(re.match(r"^.+?\(\d+\)\s*$", t))
     name = chat_name or ""
     return "群" in name or "集团" in name
 
@@ -153,47 +149,6 @@ from xiaoli_app.memory_store import (
 )
 
 
-def load_config(path="config.json"):
-    default_cfg = {
-        "bot_nickname": "小漓",
-        "ai_api_url": "https://api.deepseek.com/v1/chat/completions",
-        "ai_api_key": "",
-        "chat_model": "deepseek:deepseek-v4-flash",
-        "chat_temperature": 0.7,
-        "chat_top_p": 0.9,
-        "system_prompt": AI_DEFAULTS["system_prompt"],
-        "max_history": 1000,
-        "cooldown": 3,
-        "api_retry": 2,
-        "api_timeout": 60,
-        "api_wall_budget": API_WALL_BUDGET_DEFAULT,
-        "wechat_window_rect": None,
-        "start_paused": True,
-        "memory_file": "memory.json"
-    }
-    if not os.path.exists(path):
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default_cfg, f, indent=4, ensure_ascii=False)
-        return default_cfg
-    with open(path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    changed = False
-    for k, v in default_cfg.items():
-        if k not in cfg:
-            cfg[k] = v
-            changed = True
-    if changed:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, indent=4, ensure_ascii=False)
-    return cfg
-
-
-CONFIG = None  # 延迟加载：仅 wechat_bot 独立运行模式使用（见 __main__）
-# 历史缺陷：模块级 CONFIG = load_config() 在 import 时即读写 config.json——
-# 任何 import（含测试、GUI）都触发磁盘 IO；GUI 模式实际用 config_store 的
-# cfg（两套加载并存）。改为 __main__ 内加载，import 零副作用。
-
-
 _FILE_TOKEN_RE = re.compile(
     r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]*?"
     r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)",
@@ -230,6 +185,12 @@ def _find_file_by_display_name_impl(file_dir, display_name):
     （分隔符归一化后包含匹配）。同名文件重复落盘时微信追加 (N) 重名后缀
     且编号单调递增——取 (N) 最大 = 最近下载的那个，平局 ctime 新者优先。
 
+    后缀参与匹配：主干命中后优先取后缀与显示名一致的候选。（真机事故：
+    同名 .7z 自己攒出 (2) 编号，跨类型压倒刚收的 .pdf——(N) 最大语义只在
+    同类型重收序列里成立，后缀不一致的候选不得参战；OCR 正确读出后缀，
+    扔掉它是白白浪费判别信息。）同后缀候选为空（OCR 误读后缀/显示名无
+    后缀）时回退全部主干命中，保持既有容错不回归。
+
     不做 bot 发送副本排除（旧快照/成果登记方案已删）：名字锚定查找下，
     bot 的发送副本只在同名时进候选，且其编号必然小于其后用户下载产生的
     副本，(N) 最大语义天然选中用户文件——用户把 bot 发的文件发回来不再
@@ -240,18 +201,24 @@ def _find_file_by_display_name_impl(file_dir, display_name):
         return None
     if not file_dir or not os.path.isdir(file_dir):
         return None
-    dstem = _norm_file_stem(
-        re.sub(r"\(\d+\)$", "", os.path.splitext(display_name)[0]))
+    dsplit = os.path.splitext(display_name)
+    dstem = _norm_file_stem(re.sub(r"\(\d+\)$", "", dsplit[0]))
+    dext = dsplit[1].lower()
     if not dstem:
         return None
     best = None
+    best_ext = False  # 当前 best 是否与显示名同后缀（True 后异后缀不再参战）
     best_key = (-1, -1)  # (微信重名编号 N, ctime)：N 最大 = 最近下载
     try:
         for root, dirs, files in os.walk(file_dir):
             for fname in files:
-                fstem_full = os.path.splitext(fname)[0]
+                fsplit = os.path.splitext(fname)
+                fstem_full = fsplit[0]
                 fstem = _norm_file_stem(re.sub(r"\(\d+\)$", "", fstem_full))
                 if dstem not in fstem:
+                    continue
+                ext_match = bool(dext) and fsplit[1].lower() == dext
+                if best_ext and not ext_match:
                     continue
                 full = os.path.join(root, fname)
                 try:
@@ -261,9 +228,11 @@ def _find_file_by_display_name_impl(file_dir, display_name):
                 m_dup = re.search(r"\((\d+)\)$", fstem_full)
                 dup = int(m_dup.group(1)) if m_dup else 0
                 key = (dup, ts)
-                if key > best_key:
+                if best is None or (ext_match and not best_ext) \
+                        or key > best_key:
                     best_key = key
                     best = full
+                    best_ext = ext_match
     except Exception as e:
         logger.error(f"[文件] 按文件名定位失败: {e}")
         return None
@@ -630,9 +599,6 @@ class WeChatBot:
     def _read_deep_range(self, chat_id, start, count):
         return self._mem.read_deep_range(chat_id, start, count)
 
-    def _clear_deep(self, chat_id=None):
-        self._mem.clear_deep(chat_id)
-
     def _recall_memory(self, chat_id, query):
         if not getattr(self, "memory_deep_enabled", False):
             return "深层记忆未启用，无法检索历史"
@@ -674,9 +640,6 @@ class WeChatBot:
 
     def clear_history(self, chat_id=None):
         self._mem.clear_history(chat_id)
-
-    def _schedule_save_memory(self):
-        self._mem.schedule_save()
 
     def _flush_memory_if_due(self):
         self._mem.flush_if_due()
@@ -1386,22 +1349,6 @@ class WeChatBot:
 
         return None
 
-    def _reply_with_file(self, chat_name, sender, file_text, filename):
-        """根据文件内容生成回复并发送"""
-        logger.debug(f"[文件处理] 内容前100字符: {file_text[:100]}...")
-        self._add_history(chat_name, "assistant",
-                          f"[文件内容: {filename}] {file_text}")
-        refine_prompt = (
-            f"用户发来一个文件（{filename}），内容如下：\n\n"
-            f"{file_text}\n\n"
-            f"请根据这个文件内容，以{self.nickname}的身份回复用户。"
-        )
-        is_group = is_group_chat(chat_name)
-        final_reply = self.call_chat_ai(chat_name, refine_prompt,
-                                        sender_name=sender, is_group=is_group)
-        self._send_text(final_reply, chat_name)
-        return True
-
     def _extract_file_display_name(self, msg):
         """从 FileMessage 提取显示文件名。
         wxauto4 的 content 格式：'文件\\n<文件名>\\n[<大小>\\n]微信电脑版'
@@ -1439,39 +1386,6 @@ class WeChatBot:
         分隔符归一化包含匹配 + (N) 重名编号最大优先 + ctime 平局。"""
         return _find_file_by_display_name_impl(self.file_storage_path,
                                                display_name)
-
-    def _process_file(self, chat_name, sender, msg_obj):
-        """处理文件消息：按消息显示名在微信接收目录定位（wxauto4 download() 不可用）
-        -> 提取文字 -> 发送给 AI"""
-        logger.info(f"📁 收到 {sender} 的文件，开始处理...")
-
-        try:
-            # 1. 从消息提取显示文件名并定位接收目录中的文件
-            display_name = self._extract_file_display_name(msg_obj)
-            file_path = self._find_file_by_display_name(display_name) if display_name else None
-            if not file_path:
-                logger.error(f"[文件] 未在接收目录定位到文件: {display_name!r}")
-                self._send_text("文件下载失败，请重试～", chat_name)
-                return False
-
-            filename = os.path.basename(file_path)
-            file_size = os.path.getsize(file_path)
-            logger.info(f"📁 文件已定位: {filename} ({file_size} bytes)")
-
-            # 2. 提取文本
-            text_content = self._extract_file_text(file_path)
-            if text_content is None:
-                logger.warning(f"[文件] 无法提取文本（格式不支持或内容为空）")
-                self._send_text(f"收到文件「{filename}」，但这个格式我看不懂呢～", chat_name)
-                return False
-
-            logger.info(f"📁 文件「{filename}」提取了 {len(text_content)} 字符，发送给 AI...")
-            return self._reply_with_file(chat_name, sender, text_content, filename)
-
-        except Exception as e:
-            logger.error(f"[文件] ❌ 异常: {e}", exc_info=True)
-            self._send_text("文件处理出错，请重试～", chat_name)
-            return False
 
     def _extract_office_com_text(self, filepath, app_name):
         """通过 Office COM 自动化提取旧格式（.doc/.ppt/.xls）文本，失败则二进制兜底"""
@@ -1688,97 +1602,6 @@ class WeChatBot:
         except Exception as e:
             logger.error(f"请求模型列表异常: {e}")
             return None
-
-    def process_new_messages(self):
-        self._flush_memory_if_due()
-        if self.paused:
-            return
-        if time.time() - self.last_reply_time < self.cooldown:
-            return
-        try:
-            # 红圈驱动（visual 后端）；降级（wxauto 等）走全量会话遍历
-            if hasattr(self.wx, "iter_unread_sessions"):
-                sessions = list(self.wx.iter_unread_sessions())
-            else:
-                sessions = list(self.wx.iter_sessions())
-            if not sessions:
-                return
-            file_re = re.compile(
-                r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)\b",
-                re.I)
-            for chat_name in sessions:
-                if not chat_name:
-                    continue
-                # 窗口边界：定位 bot 最后回复之后的对方消息（visual 后端）
-                analyze = getattr(self.wx, "analyze_window", None)
-                win = analyze(chat_name) if analyze else None
-                bot_bottom = win.get("bot_bottom") if win else None
-                if win is not None:
-                    if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
-                        continue
-                    if win.get("has_media"):
-                        time.sleep(10)  # 防对方话没说完
-                        win = analyze(chat_name)
-                        if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
-                            continue
-                        bot_bottom = win.get("bot_bottom")
-                msgs = self.wx.get_messages(chat_name, assume_switched=True)
-                window_msgs = [
-                    m for m in msgs
-                    if m.sender not in (None, "self", self.nickname)
-                    and (bot_bottom is None or (m.y is not None and m.y >= bot_bottom))
-                ]
-                file_text = next(
-                    (m.content.strip() for m in window_msgs if file_re.search(m.content or "")),
-                    None)
-                text_candidates = [
-                    m for m in window_msgs
-                    if m.content.strip() and not file_re.search(m.content or "")
-                ]
-                if len(text_candidates) > 1:
-                    # 多发送者合并：每条带各自发送者名（不整批只带最后一条）
-                    multi_sender = True
-                    text_parts = [
-                        f"{m.sender or chat_name}：{m.content.strip()}"
-                        for m in text_candidates
-                    ]
-                else:
-                    multi_sender = False
-                    text_parts = [m.content.strip() for m in text_candidates]
-                text_content = "\n".join(text_parts)
-                has_media = bool(win.get("has_media")) if win else False
-                sender = window_msgs[-1].sender if window_msgs else chat_name
-                # 分发
-                if file_text:
-                    logger.info(f"📁 判断为文件消息：{chat_name}")
-                    self._process_file(chat_name, sender, window_msgs[-1])
-                    self.last_reply_time = time.time()
-                    return
-                if has_media and not text_content:
-                    logger.info(f"🖼 判断为图片消息：{chat_name}")
-                    if not self._process_pure_image(chat_name):
-                        # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
-                        self._send_text("图片识别失败了，可能是什么地方出了问题呀～",
-                                        chat_name)
-                    self.last_reply_time = time.time()
-                    return
-                if text_content:
-                    is_group = is_group_chat(chat_name)
-                    question = text_content
-                    if is_group:
-                        at_tag = f"@{self.nickname}"
-                        if at_tag not in question:
-                            continue
-                        question = question.replace(at_tag, "").strip()
-                        if not question:
-                            question = "你好呀～"
-                    logger.info(f"💬 [{chat_name}] {sender}: {question[:80]}")
-                    reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
-                    self._send_text(reply, chat_name)
-                    self.last_reply_time = time.time()
-                    return
-        except Exception as e:
-            logger.error(f"处理消息异常: {e}\n{traceback.format_exc()}")
 
     def run(self, stop_event=None, poll_interval=0.5):
         state = "暂停中，输入 resume 开始回复" if self.paused else "运行中"
@@ -2066,10 +1889,3 @@ class Controller:
         self.bot.paused = was_paused
         if not self.bot.paused:
             logger.info("▶️  已自动恢复回复")
-
-
-if __name__ == "__main__":
-    bot = WeChatBot(load_config())
-    controller = Controller(bot)
-    controller.start()
-    bot.run(stop_event=controller.stop_event)

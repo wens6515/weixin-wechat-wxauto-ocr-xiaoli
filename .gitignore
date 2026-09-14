@@ -48,3 +48,10 @@ tools/ocr_benchmark_result.json
 # 桌面端前端界面（PySide6 界面层，仅本地参与打包，不入开源仓库）
 xiaoli_desktop/xiaoli_gui.py
 xiaoli_desktop/xiaoli_app/ui/
+
+# OCR 打包资产（rapidocr PP-OCRv5 mobile 模型，见 docs/OCR引擎升级评估.md）
+tools/ocr_models/
+
+# 本地调研探针产物（截图含真实聊天内容，禁止入库）
+.probe_ocr/
+.probe_ocr_venv/
