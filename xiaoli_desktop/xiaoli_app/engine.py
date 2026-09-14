@@ -16,8 +16,6 @@ import threading
 import time
 import traceback
 
-BUS_MSG = "message"      # 收到消息
-BUS_TASK = "task"        # 任务状态变化
 BUS_STATUS = "status"    # 引擎状态（idle/initializing/initialized/running/paused/error/stopped）
 BUS_ERROR = "error"      # 引擎异常
 
@@ -169,8 +167,8 @@ class EngineThread(threading.Thread):
 
         bot 未就绪（未初始化）或清空失败时返回 False，调用方据此回退到
         直接清文件。历史缺陷：GUI 只写空文件、不动 bot 内存 memory_db，
-        bot 节流写盘（_schedule_save_memory/_flush_memory）会把旧记忆覆盖
-        回磁盘，导致「清空全部记忆」按钮失效。
+        bot 节流写盘（MemoryStore.schedule_save）会把旧记忆覆盖回磁盘，
+        导致「清空全部记忆」按钮失效。
         """
         with self._lock:
             bot = self.bot
@@ -181,6 +179,3 @@ class EngineThread(threading.Thread):
                 except Exception:
                     return False
         return False
-
-    def is_running(self):
-        return self.state == "running"

@@ -48,9 +48,6 @@ class _OkBackend:
     def send_file(self, chat, file_path):
         return True
 
-    def locate_message(self, message):
-        return None
-
     def close(self):
         self.closed = True
 
@@ -151,9 +148,6 @@ class TestProtocol(unittest.TestCase):
             def send_file(self, chat, file_path):
                 return True
 
-            def locate_message(self, message):
-                return None
-
         self.assertNotIsInstance(_NoClose(), WeChatBackend)
 
     def test_missing_name_attribute_fails(self):
@@ -174,9 +168,6 @@ class TestProtocol(unittest.TestCase):
 
             def send_file(self, chat, file_path):
                 return True
-
-            def locate_message(self, message):
-                return None
 
             def close(self):
                 return None

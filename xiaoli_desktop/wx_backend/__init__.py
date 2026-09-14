@@ -84,12 +84,6 @@ class WeChatBackend(Protocol):
         """向会话 chat 发送文件（本地绝对路径）。成功返回 True。"""
         ...
 
-    def locate_message(self, message: WeChatMessage) -> Any:
-        """定位消息在界面上的位置（如控件矩形/屏幕坐标），供点击等操作。
-
-        无法定位返回 None；返回结构由实现定义（视觉方案为坐标区域）。"""
-        ...
-
     def close(self) -> None:
         """释放后端资源（窗口句柄/进程/连接）。可重复调用。"""
         ...

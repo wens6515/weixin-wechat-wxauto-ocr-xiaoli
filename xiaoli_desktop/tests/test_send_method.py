@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""回传发送分支行为锚定：剪贴板优先 + send_file 兜底。
+"""回传发送分支行为锚定：剪贴板 CF_HDROP 是唯一发送方式。
 
-wxauto 后端移除后，成果文件发送恒走剪贴板（_send_file_clipboard）优先，
-失败才兜底协议 send_file（visual 后端未实现，返回 False）。
+wxauto 后端移除后，成果文件发送恒走剪贴板（_send_file_clipboard）；
+visual 后端未实现协议 send_file，无兜底分支（旧协议兜底已随死代码清理摘除）。
 本测试锚定该语义，防止后续改动破坏「剪贴板主用」路径。
 （成果登记/快照刷新随显示名锚定找文件重构删除，不再有发送后登记动作。）
 """
@@ -63,27 +63,15 @@ class TestSendMethodConverged(unittest.TestCase):
         finally:
             shutil.rmtree(tasks, ignore_errors=True)
 
-    def test_clipboard_fail_falls_back_to_send_file(self):
-        """剪贴板失败 → send_file 兜底发送。"""
+    def test_clipboard_fail_keeps_file_but_records_memory(self):
+        """剪贴板失败 → 文件保留；记忆仍记录任务产出（无 send_file 兜底）。"""
         tasks = tempfile.mkdtemp(prefix="send_method_")
         try:
             self._make_task(tasks)
             bot = self._make_bot(tasks)
             bot._send_file_clipboard.return_value = False
             self._poll(bot)
-            bot.wx.send_file.assert_called_once()
-        finally:
-            shutil.rmtree(tasks, ignore_errors=True)
-
-    def test_both_fail_keeps_file_but_records_memory(self):
-        """剪贴板 + send_file 均失败 → 文件保留；记忆仍记录任务产出。"""
-        tasks = tempfile.mkdtemp(prefix="send_method_")
-        try:
-            self._make_task(tasks)
-            bot = self._make_bot(tasks)
-            bot._send_file_clipboard.return_value = False
-            bot.wx.send_file.return_value = False
-            self._poll(bot)
+            bot.wx.send_file.assert_not_called()
             bot._remember_task_result.assert_called_once()
         finally:
             shutil.rmtree(tasks, ignore_errors=True)

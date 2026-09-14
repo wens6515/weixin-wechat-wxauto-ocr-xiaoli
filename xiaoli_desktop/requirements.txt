@@ -9,8 +9,10 @@ requests==2.34.2
 pillow==12.3.0
 numpy==2.5.2
 
-# --- OCR（视觉通道文本识别，懒加载）---
-rapidocr_onnxruntime==1.4.4
+# --- OCR（视觉通道文本识别，懒加载；PP-OCRv5 mobile 模型 + onnxruntime 后端）---
+# rapidocr 3.x 支持多推理后端，不再硬依赖 onnxruntime——必须显式钉版本
+rapidocr==3.9.2
+onnxruntime==1.30.0
 
 # --- 微信窗口交互（点击/输入/置前）---
 PyAutoGUI==0.9.54

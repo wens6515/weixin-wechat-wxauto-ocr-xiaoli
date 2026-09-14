@@ -4,6 +4,7 @@
 面向小白用户：软件内检测依赖 → 缺失时一键下载安装（进度可视化）。
 """
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -11,6 +12,8 @@ import time
 import zipfile
 
 import requests
+
+logger = logging.getLogger("xiaoli")
 
 DEFAULT_TIANSHU_URL = "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main"
 TIANSHU_EXE = "tianshu-desktop.exe"
@@ -26,7 +29,8 @@ FIRST_PROMPT_DEFAULT = """你是天枢，正在为微信 AI 助手「小漓」�
 2. 扫描 {tasks_dir}\\ 下各任务目录，找有 task.json 且没有 result.json 的目录（已有 result.json 的跳过）；
 3. 按 task.json 里的 task 描述、attachments\\ 附件、file_text 内容执行任务；
 4. 完成后在同一任务目录写 result.json（{{"status":"success","reply_text":"...","files":["成果文件..."]}}），成果文件也放该目录；
-5. 不要写 result.json 以外的状态文件——小漓检测到 result.json 就会把成果发回微信并把目录归档。
+5. 处理时间较长的任务，在关键节点覆写任务目录下的 progress.json（{{"stage":"一句通俗中文，说明现在在做什么"}}）——开始动手、大的阶段切换、卡住或需要长时间等待时各写一次；不要写百分比，不要每个工具调用都写（小漓按固定节流转发，写太勤也不会都转发）；
+6. 不要写 result.json / progress.json 以外的状态文件——小漓检测到 result.json 就会把成果发回微信并把目录归档。
 
 全程无人值守：不要进入 Plan Mode（/plan-mode 保持关闭）、不要提交计划等待审批、不要向用户请求任何确认或补充信息——遇到歧义按最合理的方式执行并在 reply_text 里说明。所有工具调用已在 YOLO 模式下自动放行，直接执行即可。
 
@@ -52,6 +56,16 @@ BRIDGE_README = """# 微信任务桥协议（小漓 ↔ 天枢）
 
 - reply_text 用通俗友好的中文（用户可能不懂技术细节）
 - 成果文件放在该任务目录下，文件名写入 files 数组
+
+## 进度回传（可选）
+
+处理时间较长的任务，可在任务目录写 progress.json 汇报当前阶段：
+
+{"stage": "一句话说明现在在做什么"}
+
+- 只在关键节点覆写：开始动手、大的阶段切换、卡住或需要长时间等待；
+- stage 用一句通俗中文（微信用户直接可读），不要写百分比；
+- 不要每个工具调用都写——小漓按固定节流转发，写太勤也不会都转发。
 
 ## 归档
 
@@ -107,62 +121,154 @@ def _console_windows():
         return None
 
 
-def _process_has_rivet(pid):
-    """全局验证：系统里是否存在命令行含 rivet 的进程（CLI 在跑）。
+def _decode_process_bytes(raw):
+    """进程表输出的字节流 → 行列表（utf-8 → gbk → cp936 → replace 逐级解码）。
 
-    不做窗口进程树关联——WT 标签场景下窗口 PID（WindowsTerminal.exe）与
-    CLI 进程（cmd/node）无父子关系（标签进程不挂在 WT 窗口进程下，且
-    cmd 可能孤儿化），从窗口 PID 向下查必然为空（用户实测 17:16 日志
-    「未定位到 CLI 窗口」的根因）。CLI 是 cmd /k ... rivet 启动的，进程
-    表里必有 rivet 命令行；用户自己开的 PowerShell 系统里无 rivet 进程
-    → 不会误认（fail-open 反例）。失败（PowerShell 不可用等）返回 False
-    = 不认作 CLI（宁缺毋滥）。
+    PowerShell 重定向输出用 ANSI 代码页（中文 Windows = GBK）——历史缺陷：
+    text=True 默认按 UTF-8 解码 → UnicodeDecodeError 被吞 → 恒返回空 →
+    CLI 进程证据函数永远为 False（兜底形同虚设）。
     """
+    raw = raw or b""
+    for enc in ("utf-8", "gbk", "cp936"):
+        try:
+            return raw.decode(enc).splitlines()
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace").splitlines()
+
+
+def _cli_process_cmdlines():
+    """读全系统进程命令行（PID|PPID|命令行 三列文本），失败返回 None。"""
     try:
         import subprocess
-        # 一次拉全进程表（PID|PPID|CommandLine），扫描含 rivet 的行。
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process | "
              "ForEach-Object { \"$($_.ProcessId)|$($_.ParentProcessId)|$($_.CommandLine)\" }"],
-            capture_output=True, text=True, timeout=8,
-            # CREATE_NO_WINDOW：小漓是 windowed GUI（无控制台），子进程
-            # 不隐藏会闪黑窗（用户实测 /yes 后闪过黑窗——每次弱特征验证
-            # 都闪一次）。capture_output 只重定向 stdout/stderr，stdin
-            # 仍继承 → Windows 为子进程新建控制台。
+            capture_output=True, timeout=10,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        for line in (out.stdout or "").splitlines():
-            low = line.lower()
-            # rivet-runtime 是桌面端（tianshu-desktop）的 serve 进程——它
-            # 也在跑（node ... rivet-runtime\main.js serve），但不是 CLI。
-            # 只认 CLI 特征：cmd /k ... rivet 或 tianshu-tui 主程序。
-            if "rivet" in low and "rivet-runtime" not in low:
-                return True
     except Exception:
-        pass
+        return None
+    return _decode_process_bytes(out.stdout)
+
+
+def _line_is_cli_process(line_low):
+    r"""进程命令行是否为天枢 CLI 实例（小写行文本）。
+
+    签名（新→旧）：
+    - `tianshu-tui`：CLI 主程序路径（npm 全局 node_modules\tianshu-tui\dist\main.js
+      ——新版直接以 node 运行，命令行里没有 rivet 字样）
+    - `rivet`：旧版由 `cmd /k ... rivet` 启动（cmd 常驻进程命令行含 rivet）
+    排除项：`.rivet`（数据/配置目录路径，桌面端 MCP server 命令行里带它
+    → 历史误报源）、`rivet-runtime`（桌面端 serve 进程）、`rivet-desktop`。
+    """
+    if "tianshu-tui" in line_low:
+        return True
+    if "rivet" in line_low and not any(
+            k in line_low for k in (".rivet", "rivet-runtime", "rivet-desktop")):
+        return True
     return False
 
 
-def _is_cli_feature(name, pid=None, process_has_rivet_fn=None):
-    """CLI 窗口特征识别：标题特征 + 弱特征进程验证。
+def _cli_process_running(pid=None):
+    """系统里是否存在天枢 CLI 进程（weak 标题窗口的 CLI 身份验证）。
 
-    强特征：「npm prefix」精确短语（CLI 实测标题）或 rivet——裸 "npm" 会
-    误判用户手动开的 npm 子命令窗口（npm root 等），/yes 打错窗口。
-    弱特征：终端宿主默认标题（Windows PowerShell / Command Prompt / 命令
-    提示符——Win11 默认终端接管 CLI 窗口时标题被改写）——必须进程树含
-    rivet 才认（用户自己开的 PowerShell 窗口标题相同但进程无 rivet）。"""
-    low = name.lower()
-    if "npm prefix" in low or "rivet" in low:
+    pid 参数仅为兼容既有调用形态而保留（不做窗口↔进程树关联——WT 标签
+    场景下窗口 PID 是 WindowsTerminal.exe，与 CLI 进程无父子关系，
+    从窗口 PID 查进程树必然落空）。失败（PowerShell 不可用/解析异常）
+    返回 False = 不认作 CLI（宁缺毋滥）。
+    """
+    lines = _cli_process_cmdlines()
+    if lines is None:
+        return False
+    return any(_line_is_cli_process(l.lower()) for l in lines)
+
+
+def _title_has_cli_signature(name):
+    """窗口标题是否带 CLI 签名（强特征，无需进程验证）。
+
+    覆盖三代形态：
+    - `tianshu-tui`：新版 WT 默认标题 = 运行命令行（空闲态实测形态）
+    - `npm prefix`：旧版小漓启动时 `title npm prefix` 设定的标题
+    - `rivet`：更早版本 CLI 标题（排除 `.rivet` 路径误报）
+    """
+    low = (name or "").lower()
+    if "npm prefix" in low or "tianshu-tui" in low:
         return True
+    return "rivet" in low and ".rivet" not in low
+
+
+def _is_desktop_window(name):
+    """桌面端（Electron）窗口判定——**不能按 tianshu 字样一刀切**。
+
+    历史缺陷：新版 CLI 标题/命令行含 `tianshu-tui`，旧规则「含 tianshu 即
+    桌面端」会把 CLI 窗口整个排除（连同进程证据一起失效，CLI 窗口再也找不到）。
+    现行判据：中文「天枢」/ 含 tianshu 但不含 `tianshu-tui` / rivet-desktop。
+    注：CLI 窗口由控制台类枚举筛选，Electron 桌面端天然不是控制台类；
+    本判据用于控制台枚举不可用（回退全量窗口）时的兜底。
+    """
+    s = name or ""
+    if "天枢" in s:
+        return True
+    low = s.lower()
+    if "tianshu-tui" in low:
+        return False
+    return "tianshu" in low or "rivet-desktop" in low
+
+
+def _process_has_rivet(pid=None):
+    """兼容别名（旧名）：进程证据判定主体见 _cli_process_running。"""
+    return _cli_process_running(pid)
+
+
+def _is_cli_feature(name, pid=None, process_has_rivet_fn=None):
+    """CLI 窗口特征识别：标题签名（强特征）+ 终端默认标题（弱特征，需进程验证）。
+
+    强特征（标题自身可判定）：`tianshu-tui`（新版空闲态）/ `npm prefix`（旧版
+    启动标记）/ `rivet`——裸 "npm" 会误判用户手动开的 npm 子命令窗口
+    （npm root 等），/yes 打错窗口，故只认精确短语。
+    弱特征：终端宿主默认标题（Windows PowerShell / Command Prompt / 命令
+    提示符——CLI 跑工具时 WT 自动标题显示子进程名，空闲才回命令行形态）
+    ——必须系统里确实有 CLI 进程才认（用户自己开的 PowerShell 命中同样的
+    标题但系统里没有 CLI 进程时不认）。"""
+    if _title_has_cli_signature(name):
+        return True
+    low = (name or "").lower()
     weak = ("windows powershell" in low or "command prompt" in low
-            or "命令提示符" in name or "powershell" in low)
+            or "命令提示符" in (name or "") or "powershell" in low)
     if weak and pid is not None:
-        fn = process_has_rivet_fn or _process_has_rivet
+        fn = process_has_rivet_fn or _cli_process_running
         try:
             return bool(fn(pid))
         except Exception:
             return False
     return False
+
+
+def _pick_cli_window(candidates, process_fn=None):
+    """从候选控制台窗口里挑 CLI 窗口：强特征优先；弱特征需唯一性。
+
+    - 第一轮：标题自带 CLI 签名（`tianshu-tui` / `npm prefix` / `rivet`）——
+      命中即用，多个命中取第一个（枚举序）。
+    - 第二轮：弱特征（终端默认标题「Windows PowerShell」等——CLI 跑工具时
+      WT 自动标题显示子进程名）必须叠加进程证据；且**仅当候选窗口只剩一个**
+      才采用——多终端窗口时弱特征无法区分是哪一个（进程证据是全系统扫描），
+      猜错会把提示词打进用户自己的 PowerShell/cmd 窗口 → fail-closed 不猜，
+      走下一级启动新 CLI（宁可多开一个窗口，不可乱发）。
+    - 桌面端窗口一律排除（证据式判定，不按 tianshu 字样一刀切）。
+    """
+    cands = [(n, p) for (n, p) in (candidates or [])
+             if not _is_desktop_window(n)]
+    for name, _pid in cands:
+        if _title_has_cli_signature(name):
+            return name
+    if len(cands) == 1 and _is_cli_feature(cands[0][0], cands[0][1], process_fn):
+        return cands[0][0]
+    if len(cands) > 1:
+        logger.info("[CLI 定位] 多个候选终端窗口且均无 CLI 标题签名，"
+                    "fail-closed 不猜（将启动新 CLI）：%s",
+                    [n[:40] for n, _p in cands])
+    return None
 
 
 def _norm_console_entries(entries):
@@ -295,80 +401,14 @@ def detect_tianshu_dir():
     return None
 
 
-def configure_tianshu_auto_approval(cfg, config_path=None):
-    """已有天枢 CLI 时配置为完全自动（YOLO）：任务处理全程无需手动确认。
-
-    天枢 CLI 默认 approval=suggest/Auto——高风险工具（rm/mv/git 写等）仍需
-    用户在终端手动回车确认。小漓是无人值守的后台机器人，投递任务后不会有人
-    去按回车，任务会卡在确认等待，导致全自动回复链路断裂。
-    把 approval 设为 dangerously-skip-permissions（启动即 YOLO）后：
-    所有工具自动执行、无刹车无打扰（回滚兜底 /rollback + git 检查点）。
-    幂等：config.json 已是该值则跳过；无 rivet 命令返回 (False, 原因)。
-
-    实现走 `rivet config set-approval` 子命令（实测非 TTY 可用，小漓无终端）；
-    config.json 位置与 README 一致：Windows 为 %LOCALAPPDATA%\\.rivet。
-    返回 (ok, detail)。
-    """
-    import shutil
-    rivet = shutil.which("rivet") or shutil.which("rivet.cmd")
-    if not rivet:
-        return False, "未找到 rivet 命令（无需配置，或先 npm install -g tianshu-tui）"
-    target = "dangerously-skip-permissions"
-    # 幂等：读 config.json，已配置则跳过（不重复写盘/执行）
-    # 数据根有多个：CLI 用 %LOCALAPPDATA%\.rivet（rivet logs 实测）；
-    # 桌面端便携版用 exe 旁 TianshuData\.rivet。全部配置，任一缺失都补。
-    if config_path is None:
-        data_root = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-        config_path = os.path.join(data_root, ".rivet", "config.json")
-    all_configured = True
-    for cp in _tianshu_config_paths(config_path):
-        try:
-            if os.path.isfile(cp):
-                with open(cp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                agent = data.get("agent") if isinstance(data, dict) else None
-                current = agent.get("approval") if isinstance(agent, dict) else None
-                if current == target:
-                    continue  # 该数据根已配置
-        except Exception:
-            pass
-        all_configured = False
-    if all_configured:
-        return True, "天枢 CLI 已是完全自动（YOLO），无需重复配置"
-    try:
-        r = subprocess.run(
-            [rivet, "config", "set-approval", target],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if r.returncode == 0:
-            return True, "天枢 CLI 已配置为完全自动（YOLO），任务处理不再需要手动确认"
-        return False, f"配置天枢 CLI 自动模式失败（{r.returncode}）"
-    except Exception as e:
-        return False, f"配置天枢 CLI 自动模式失败: {e}"
-
-
-def _tianshu_config_paths(primary):
-    """天枢各数据根的 config.json 路径（CLI 主根 + 桌面端便携根）。
-
-    桌面端便携版（D:\\AI\\Tianshu\\TianshuData\\.rivet）的 approval 也必须
-    配置——用户可能在桌面端而非 CLI 运行天枢。
-    """
-    paths = [primary]
-    for cand in (r"D:\AI\Tianshu", os.path.expanduser("~")):
-        p = os.path.join(cand, "TianshuData", ".rivet", "config.json")
-        if os.path.isfile(p) and p not in paths:
-            paths.append(p)
-    return paths
-
-
 def launch_tianshu(cfg):
     """启动天枢 CLI（rivet）：在用户选的工作间（tasks_dir）下开新 cmd 窗口运行 rivet。
 
     返回 (ok, detail)。rivet 命令经 shutil.which 定位（npm 全局安装 tianshu-tui）。
-    窗口标题保持 CLI 自然值（实测为 npm prefix，含 npm）——不得用 title 设为
-    "Tianshu"：那会与 _is_desktop 的 tianshu 关键词冲突，把 CLI 误判为桌面端，
-    首轮提示词发不出去或误发到桌面端窗口。
+    窗口标题用 `title npm prefix` 标记（不含 tianshu，不撞桌面端判据）——注意
+    Win11 默认终端（Windows Terminal）会按「运行中的进程」自动改写标签标题
+    （空闲=运行命令行，跑工具=子进程名如 Windows PowerShell），title 标记并非
+    全程可见；定位主体靠 CLI 进程签名 + 标题多形态特征（见 _is_cli_feature）。
     历史缺陷：cwd 用 tianshu_workdir（tasks_dir 父目录）导致 agent 工作文件
     （.rivet 等）落在程序目录旁而不是用户选的工作间——改为优先 tasks_dir。
     """
@@ -386,11 +426,9 @@ def launch_tianshu(cfg):
         pass
     try:
         # CREATE_NEW_CONSOLE：Windows 原生新开控制台窗口（可靠）；cmd /k 保持窗口。
-        # title npm prefix：显式设置窗口标题——Win11 默认终端（Windows
-        # Terminal）下 cmd /k 新窗口标题不稳定（用户实测：看起来像 PowerShell
-        # 启动，窗口名变了 → resolve/监控找不到 CLI）。显式 title 后 conhost
-        # 与 WT 标签页标题都稳定为「npm prefix」，且不含 tianshu（不与
-        # _is_desktop 冲突）。
+        # title npm prefix：给窗口设一个不含 tianshu 的标记标题（conhost 托管时
+        # 稳态可见；Win11 默认终端 WT 会按运行进程自动改写标签标题，标记可能
+        # 被盖掉——定位不依赖它，靠进程签名 + 标题多形态特征）。
         # RIVET_PLAN_MODE_SUGGEST=0：关闭复杂任务自动进入 Plan Mode——
         # 无人值守场景任务不能卡在 plan 审批（README：默认 auto 命中多模块/
         # 重构/安全任务时自主进入，等 /plan-approve 确认）。
@@ -499,31 +537,26 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
 
     title 非空 = 找到可发送的 CLI 窗口；空 = detail 含失败原因（launch 失败/窗口未出现）。
     process_has_rivet_fn(pid)：弱特征标题（终端宿主改写的 Windows
-    PowerShell 等）的进程树验证，默认 _process_has_rivet。
+    PowerShell 等）的进程验证，默认 _cli_process_running。
     三级定位，逐级降级：
-    1. 配置的 tianshu_window_title（排除桌面端污染值——标题含 tianshu/天枢 的窗口是桌面端）；
+    1. 配置的 tianshu_window_title（排除桌面端污染值「天枢 · Tianshu」）；
        优先在控制台窗口里匹配，控制台枚举不可用时回退全量（用户显式配置是强信号）；
        命中时返回匹配到的实际窗口标题（而非配置子串，避免 find_window_by_title 子串误选）；
-    2. CLI 特征控制台窗口（标题含 npm/rivet 且非桌面端——CLI 窗口标题实测为 npm prefix，
-       是 cmd/rivet 启动的控制台窗口；Tianshu/天枢 是桌面端特征，不在此列）；
-       弱特征（Windows PowerShell 等终端默认名）须进程树含 rivet 才认；
-       只在控制台窗口里匹配——标题含 npm 的浏览器/编辑器等诱饵窗口不是控制台类，
-       绝不可选（fail-open 反例）；仅当控制台枚举不可用（None）才回退全量；
-    3. 启动 CLI（rivet）后按 CLI 特征窗口名（npm prefix）轮询定位
-       （过滤桌面端；第 2 级已确认无 CLI 特征窗口才走到这里，启动后出现的
-       CLI 特征窗口就是刚启动的 CLI，宁缺毋滥——不得把提示词发给桌面端/诱饵窗口）。
+    2. CLI 特征控制台窗口（`tianshu-tui`[新版命令行形态] / `npm prefix`[旧版启动
+       标记] / `rivet`；Tianshu/天枢 才是桌面端特征）；弱特征（Windows PowerShell
+       等终端默认名——CLI 跑工具时 WT 自动标题显示子进程名）须系统里确有 CLI
+       进程才认；只在控制台窗口里匹配——标题含 npm 的浏览器/编辑器等诱饵窗口
+       不是控制台类，绝不可选（fail-open 反例）；仅当控制台枚举不可用才回退全量；
+    3. 启动 CLI（rivet）后按 CLI 特征窗口名轮询定位（过滤桌面端；第 2 级已确认
+       无 CLI 特征窗口才走到这里，启动后出现的 CLI 特征窗口就是刚启动的 CLI，
+       宁缺毋滥——不得把提示词发给桌面端/诱饵窗口）。
     """
     list_windows_fn = list_windows_fn or _list_windows
     launch_fn = launch_fn or launch_tianshu
     sleep_fn = sleep_fn or time.sleep
     console_windows_fn = console_windows_fn or _console_windows
     cfg = cfg or {}
-
-    def _is_desktop(name):
-        """桌面端窗口特征：中文「天枢」、纯英文 Tianshu、app.tianshu.* Electron
-        辅助窗口、tianshu-desktop 进程窗口——统一按 tianshu 关键词识别。
-        纯英文标题（Tianshu）漏判会被第 2 级 CLI 特征误选，首轮提示词发错目标。"""
-        return "天枢" in name or "tianshu" in name.lower()
+    _is_desktop = _is_desktop_window  # 模块级证据式判定（不再按 tianshu 一刀切）
 
     def _cli_candidates():
         """CLI 窗口候选：(title, pid) 列表；控制台枚举不可用（None）时回退全量。
@@ -547,16 +580,15 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
         except Exception:
             pass
 
-    # 2) CLI 特征窗口（npm/rivet——CLI 窗口标题实测为 npm prefix；Tianshu 是桌面端特征）。
-    #    只在控制台窗口里匹配：标题含 npm 的浏览器/编辑器等诱饵窗口不是控制台类，
-    #    绝不可选（fail-open 反例 C1）；仅当控制台枚举不可用（None）才回退全量。
-    #    弱特征标题（Windows PowerShell 等）须进程树含 rivet（_is_cli_feature 内处理）。
+    # 2) CLI 特征窗口：_pick_cli_window 统一判定——标题签名（tianshu-tui /
+    #    npm prefix / rivet）优先；弱特征（Windows PowerShell 等终端默认标题）
+    #    叠加进程证据且要求候选唯一（多终端窗口时不猜，fail-closed）。
+    #    只在控制台窗口里匹配：浏览器/编辑器等诱饵窗口不是控制台类，天然排除
+    #    （fail-open 反例 C1）；仅当控制台枚举不可用（None）才回退全量。
     try:
-        for name, pid in _cli_candidates():
-            if _is_desktop(name):
-                continue
-            if _is_cli_feature(name, pid, process_has_rivet_fn):
-                return name, ""
+        name = _pick_cli_window(_cli_candidates(), process_has_rivet_fn)
+        if name:
+            return name, ""
     except Exception:
         pass
 
@@ -574,20 +606,17 @@ def resolve_cli_window(cfg, list_windows_fn=None, launch_fn=None, sleep_fn=None,
     sleep_fn(3)  # CLI 启动 + 加载工作目录（用户要求：等待缩短到 3 秒，防误以为没反应）
     for _ in range(15):
         try:
-            # 直接按 CLI 特征窗口名定位：天枢 CLI 窗口标题实测为 npm prefix
-            # （含 npm/rivet）。只在控制台窗口里匹配（_cli_candidates 控制台优先，
-            # 枚举不可用时回退全量）——标题含 npm 的浏览器/编辑器等诱饵窗口
-            # 不是控制台类，天然排除（test_skips_decoy_npm_window 场景）。
-            # 不依赖"新增窗口差集"——标题与既有窗口重复时差集为空会漏判
-            # （test_stage3_duplicate_title_fallback 场景），且第 2 级已确认
-            # 无 CLI 特征窗口才会走到这里，启动后出现的 CLI 特征窗口就是刚
-            # 启动的 CLI。桌面端（天枢/Tianshu）绝不可选，否则首轮提示词
+            # 直接按 CLI 特征窗口定位（_pick_cli_window：标题多形态签名优先，
+            # 弱特征+进程证据要求候选唯一）。只在控制台窗口里匹配
+            # （_cli_candidates 控制台优先，枚举不可用时回退全量）——
+            # 浏览器/编辑器等诱饵窗口不是控制台类，天然排除。
+            # 不依赖"新增窗口差集"——标题与既有窗口重复时差集为空会漏判，
+            # 且第 2 级已确认无 CLI 特征窗口才会走到这里，启动后出现的
+            # CLI 特征窗口就是刚启动的 CLI。桌面端绝不可选，否则首轮提示词
             # 误发到桌面端窗口（commit c67b995/d0b4ca6 的场景）。
-            for name, pid in _cli_candidates():
-                if _is_desktop(name):
-                    continue
-                if _is_cli_feature(name, pid, process_has_rivet_fn):
-                    return name, ""
+            name = _pick_cli_window(_cli_candidates(), process_has_rivet_fn)
+            if name:
+                return name, ""
             # 全是桌面端/无关窗口 → 不返回，继续轮询（宁缺毋滥，不得误发）
         except Exception:
             pass
@@ -655,14 +684,13 @@ def close_window_by_title(title, sleep_fn=None):
     if not found:
         # 标题匹配失败回退（用户实测）：/yes 发送后 CLI 窗口标题可能从
         # 「npm prefix」变成「Windows PowerShell」——旧逻辑按发送前标题
-        # 枚举找不到 → 窗口关不掉。回退到「进程树含 rivet 的控制台窗口」：
-        # 无论标题变成什么，只要 CLI 进程树在就能定位（_is_cli_feature
-        # 弱特征 = 终端默认标题 + 进程树验证）。用户自己开的 PowerShell
-        # 进程树无 rivet，不会被误关（fail-open 反例）。
+        # 枚举找不到 → 窗口关不掉。回退到「CLI 特征的控制台窗口」：
+        # 无论标题变成什么，只要 CLI 进程在就能定位（_is_cli_feature
+        # 弱特征 = 终端默认标题 + 进程证据）。用户自己开的 PowerShell
+        # 系统里无 CLI 进程，不会被误关（fail-open 反例）。
         try:
             for name, pid in _norm_console_entries(_console_windows() or []):
-                low = name.lower()
-                if "tianshu" in low or "天枢" in name:
+                if _is_desktop_window(name):
                     continue
                 if _is_cli_feature(name, pid):
                     def _cb2(hwnd, _lp):
@@ -739,16 +767,6 @@ def send_yes_and_close(title, sleep_fn=None, send_fn=None, close_fn=None):
     return ok
 
 
-def guide_tianshu_cli(cfg, resolve_fn=None, sleep_fn=None):
-    """首启引导：确保 CLI 窗口打开并定位。返回 (title, detail)。
-
-    复用 resolve_cli_window（第 3 级自动 launch 新 CLI，含 60s 冷却护栏；
-    cwd=tianshu_workdir）。
-    """
-    resolve_fn = resolve_fn or resolve_cli_window
-    return resolve_fn(cfg or {})
-
-
 def _install_tianshu_cli(timeout=180):
     """自动安装天枢 CLI：npm install -g tianshu-tui。返回 bool。"""
     import shutil
@@ -785,23 +803,22 @@ def _guide_dialog(parent, dialog_fn, title, text, buttons=None):
 
 
 def _find_npm_prefix_window(console_windows_fn=None, process_has_rivet_fn=None):
-    """在控制台窗口里找天枢 CLI 窗口（进入会话后标题为「npm prefix」）。
+    """在控制台窗口里找天枢 CLI 窗口（供首启引导发 /yes 用）。
 
-    用户实测：CLI 启动后配置模型/API key 阶段窗口标题还不是 npm prefix——
-    只有配置完成进入会话才变。因此引导流程不在此阶段定位窗口，而是持续
-    监控该标题出现（= 用户配置完成的信号）。
-    匹配用「npm prefix」精确短语而非裸 "npm"——用户手动开的 npm 子命令
-    窗口（如「npm root」）标题含 npm 但不是 CLI，误发 /yes 会打错窗口
-    （真机日志 14:24:44 向「npm root」发送 /yes 的故障链）。返回标题或 None。
-    弱特征：终端宿主（Windows Terminal）把标题改写为「Windows PowerShell」
-    时，按进程树含 rivet 认（用户实测 CLI 窗口名可能是 npm prefix 也可能是
-    Windows PowerShell——_is_cli_feature 统一处理，防误发用户自己的 PowerShell）。
+    匹配交给 _is_cli_feature 统一处理，覆盖三代标题形态：
+    - 新版：WT 默认标题 = 运行命令行（含 `tianshu-tui`）；跑工具时自动标题
+      变成子进程名（Windows PowerShell）→ 弱特征 + 进程证据兜底
+    - 旧版：小漓启动时 `title npm prefix` 的精确短语（裸 "npm" 不认——用户
+      手动开的 npm 子命令窗口「npm root」含 npm 但不是 CLI，误发 /yes 会打错
+      窗口，真机日志 14:24:44 的故障链）
+    桌面端窗口按 _is_desktop_window 排除（不能按 tianshu 字样一刀切——新版
+    CLI 标题含 tianshu-tui 会被误杀）。返回标题或 None。
     """
     try:
         for name, pid in _norm_console_entries(
                 (console_windows_fn or _console_windows)()):
             if _is_cli_feature(name, pid, process_has_rivet_fn) \
-                    and not ("tianshu" in name.lower() or "天枢" in name):
+                    and not _is_desktop_window(name):
                 return name
     except Exception:
         pass
@@ -829,12 +846,13 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
                         console_windows_fn=None, dialog_fn=None):
     """工作文件夹保存后的一次性引导（首次/换目录都触发），返回 True = 完成。
 
-    流程（用户实测确认的正确交互——配置阶段窗口标题还不是 npm prefix，
+    流程（用户实测确认的正确交互——CLI 未进会话前不在窗口检测范围，
     不能在确认前定位窗口；自动监控触发 /yes 是错误设计）：
     ① CLI 检测（rivet 命令，无则 npm install -g tianshu-tui 自动安装）
     ② launch_tianshu 打开 CLI（帮助用户打开，不定位窗口）
     ③ 模态弹窗：指导用户选模型/输 API key/回车确认 → 点「确认完成」
-    ④ 确认后才检查 npm prefix 窗口（此时配置完成，标题已变）→ 无则提示重试
+    ④ 确认后按 CLI 特征（tianshu-tui / npm prefix / 终端默认标题+进程证据）
+       检查窗口 → 无则提示重试
     ⑤ 找到 → 发 /yes（两次回车，全自动持久化）→ 关闭 CLI 窗口
     ⑥ config 标记 tianshu_guided=True（此后初始化不再切 YOLO）
 
@@ -857,7 +875,7 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
                 "请手动执行：npm install -g tianshu-tui\n"
                 "安装完成后重新打开本程序。")
             return False
-    # ② 打开 CLI（用户配置模型/API key；窗口标题此时还不是 npm prefix）
+    # ② 打开 CLI（用户配置模型/API key；CLI 未进会话前不做窗口定位）
     if launch_fn is None:
         launch_fn = launch_tianshu
     ok_launch, detail = launch_fn(cfg)
@@ -872,12 +890,12 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
         [("确认完成", None), ("取消", None)])
     if choice != "确认完成":
         return False  # 取消：不标记，设置页可重跑
-    # ④ 确认后才检查 npm prefix（配置完成窗口标题已变）
+    # ④ 确认后按 CLI 特征检查窗口（配置完成、CLI 进程在跑）
     title = _find_npm_prefix_window(console_windows_fn)
     if not title:
         _guide_dialog(
             parent, dialog_fn, "未检测到天枢 CLI 窗口",
-            "未找到「npm prefix」窗口。\n"
+            "未找到天枢 CLI 窗口。\n"
             "请确认已在 CLI 窗口中完成配置（选择模型、输入 API key、按回车确认），"
             "然后在设置页点击「重新引导天枢 CLI」重试。")
         return False

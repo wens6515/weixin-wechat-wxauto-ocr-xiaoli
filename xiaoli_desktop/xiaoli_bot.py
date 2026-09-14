@@ -13,7 +13,7 @@ import queue
 import threading
 import requests as req
 import pyautogui
-from wechat_bot import (WeChatBot, Controller, load_config, logger,
+from wechat_bot import (WeChatBot, Controller, logger,
                         is_group_chat, _extract_file_name_token,
                         VISION_MODEL_DEFAULT)
 from wx_backend.models import MessageType
@@ -41,12 +41,18 @@ TASK_DEFAULTS = {
     "listen_hold_seconds": 2,   # 任务完成后延迟恢复消息监听的秒数（缓冲文件发送，防止切窗打断）
 }
 
+# 任务进度转发节流（progress.json 协议）：投递后前 PROGRESS_SILENCE_SECONDS
+# 静默（短任务 result 很快到，进度是噪音）；此后阶段文本变化才发，且每
+# PROGRESS_MIN_INTERVAL_SECONDS 最多一条——天枢写太勤也不会把微信刷屏
+PROGRESS_SILENCE_SECONDS = 120
+PROGRESS_MIN_INTERVAL_SECONDS = 600
+
 
 def load_merged_config(path="config.json"):
     """CLI 配置入口：委托 config_store（迁移/投影/写回——与 GUI 同一事实源），
-    再补齐 task_* 默认。历史缺陷：CLI 走 wechat_bot.load_config、GUI 走
-    config_store.load_config_store，两套默认值并存（tasks_dir 默认都不一致），
-    字段补全逻辑漂移。统一后 CLI 也支持角色卡/多 provider。
+    再补齐 task_* 默认。历史缺陷：CLI 曾维护一套独立默认值表（已删）、
+    GUI 走 config_store.load_config_store，两套默认值并存（tasks_dir 默认
+    都不一致），字段补全逻辑漂移。统一后 CLI 也支持角色卡/多 provider。
     """
     from xiaoli_app import config_store as _cs
     base = os.path.dirname(os.path.abspath(path)) or "."
@@ -998,6 +1004,7 @@ class AgentBot(WeChatBot):
         self.tianshu_workdir = cfg.get("tianshu_workdir", "")  # CLI（rivet）工作目录，resolve_cli_window 第 3 级启动时使用
         self.tianshu_poll_interval = cfg.get("tianshu_poll_interval", 5)
         self._last_poll_time = 0
+        self._progress_state = {}  # 任务 id -> {stage, last_sent, first_seen}（进度转发节流状态）
         self._sending_lock = False  # 成果回传期间置 True，暂停消息轮询防发错联系人
         self._listen_hold_seconds = cfg.get("listen_hold_seconds", 10)
         self._task_was_active = False  # 是否曾因任务暂停监听（用于任务完成后的缓冲期）
@@ -1354,19 +1361,12 @@ class AgentBot(WeChatBot):
                     fpath = resolve_result_file(task_dir, os.path.join(self.tasks_dir, "sent"), fname)
                     if os.path.isfile(fpath):
                         sent = False
-                        # 剪贴板 CF_HDROP 主用（wxauto SendFiles 在新版微信实测不可用）
+                        # 剪贴板 CF_HDROP 唯一发送方式（wxauto SendFiles 在新版微信
+                        # 实测不可用；visual 后端未实现协议 send_file，无兜底分支）
                         try:
                             sent = self._send_file_clipboard(fpath, chat)
                         except Exception as e:
                             logger.warning(f"[回传] 剪贴板发送异常: {e}")
-                        if not sent:
-                            # 协议 send_file 兜底（visual 后端未实现返回 False）
-                            try:
-                                sent = self.wx.send_file(fpath, chat)
-                                if sent:
-                                    logger.info(f"[回传] send_file 发送: {fname}")
-                            except Exception as e:
-                                logger.error(f"[回传] send_file 失败: {e}")
                         if not sent:
                             logger.error(f"[回传] 文件发送失败，保留在任务目录: {fname}")
                 # 无论发送成败，任务结果都写入对话记忆（记忆记录的是任务产出，不是发送状态）
@@ -1401,6 +1401,61 @@ class AgentBot(WeChatBot):
         if now - self._last_poll_time >= self.tianshu_poll_interval:
             self._last_poll_time = now
             self._poll_outbox()
+            self._poll_task_progress()
+
+    def _poll_task_progress(self):
+        """任务进度转发（progress.json 协议）：扫描活跃任务目录的阶段文本，
+        按节流规则转发到微信。天枢侧约定只在关键节点覆写（见 tasks_dir
+        README 与首轮提示词），bot 侧再兜底三重闸门：投递后前 2 分钟静默、
+        阶段文本变化才发、每 10 分钟最多一条。result.json 出现后由
+        _poll_outbox 负责回传与归档，此处只处理未完成任务；已结束任务的
+        转发状态随之清理。"""
+        if not os.path.isdir(self.tasks_dir):
+            return
+        now = time.time()
+        active = set()
+        for name in sorted(os.listdir(self.tasks_dir)):
+            task_dir = os.path.join(self.tasks_dir, name)
+            if not os.path.isdir(task_dir) or name == "sent":
+                continue
+            if not os.path.isfile(os.path.join(task_dir, "task.json")):
+                continue
+            if os.path.isfile(os.path.join(task_dir, "result.json")):
+                continue  # 已完成待回传：发送与归档由 _poll_outbox 负责
+            active.add(name)
+            try:
+                with open(os.path.join(task_dir, "progress.json"),
+                          "r", encoding="utf-8") as f:
+                    stage = str(json.load(f).get("stage") or "").strip()
+            except (OSError, ValueError):
+                continue
+            if not stage:
+                continue
+            st = self._progress_state.setdefault(
+                name, {"stage": None, "last_sent": 0.0, "first_seen": now})
+            if now - st["first_seen"] < PROGRESS_SILENCE_SECONDS:
+                continue
+            if stage == st["stage"]:
+                continue  # 阶段没变不发（同内容覆写不刷屏）
+            if now - st["last_sent"] < PROGRESS_MIN_INTERVAL_SECONDS:
+                continue
+            st["stage"] = stage
+            st["last_sent"] = now
+            chat = ""
+            try:
+                with open(os.path.join(task_dir, "task.json"),
+                          "r", encoding="utf-8") as f:
+                    chat = str(json.load(f).get("chat_name") or "").strip()
+            except (OSError, ValueError):
+                pass
+            if not chat:
+                continue
+            logger.info(f"[任务进度] {name} -> {chat}: {stage[:60]}")
+            # 触发回复通道直发（旁路 _send_text 的占位归零语义，同定时/条件触发器）
+            self._send_trigger_reply(stage, chat)
+        for tid in list(self._progress_state.keys()):
+            if tid not in active:
+                self._progress_state.pop(tid, None)
 
     def _process_file_with_instruction(self, chat_name, sender, filepath, filename, user_instruction, extra_attachments=None, multi_sender=False):
         """根据用户指令处理文件：vision-exp 单调用判断任务 → 天枢投递 或 原文件识别。
@@ -2317,6 +2372,20 @@ def run_self_test():
         check("T12 OCR 丢下划线的显示名命中带下划线的磁盘文件",
               got_d == underscore_d, str(got_d))
 
+        # 场景 E：同主干不同后缀——目录里同名 .7z 自己攒出 (2) 编号，跨类型
+        # 压倒刚收的 .pdf（真机事故：bot 把 PDF 任务导向了同名压缩包）。
+        # 后缀必须参与匹配，(N)/ctime 只在同后缀组内竞争。
+        dir_f = os.path.join(tmp, "recv_f")
+        os.makedirs(dir_f)
+        bot_f = make_bot(dir_f)
+        for name in ("纳新宣传海报.7z", "纳新宣传海报(1).7z",
+                     "纳新宣传海报(2).7z", "纳新宣传海报.pdf"):
+            with open(os.path.join(dir_f, name), "w") as f:
+                f.write("x")
+        got_f = bot_f._find_file_by_display_name("纳新宣传海报.pdf")
+        check("T12 同主干异后缀选同后缀（(2).7z 不参战）",
+              got_f == os.path.join(dir_f, "纳新宣传海报.pdf"), str(got_f))
+
         # ---- T13: 显示名提取（真实 content 格式：'文件\n<名>\n<大小>\n微信电脑版'）----
         dir_e = os.path.join(tmp, "recv_e")
         os.makedirs(dir_e)
@@ -2399,6 +2468,9 @@ if __name__ == "__main__":
             logger.error("检测到已有小漓实例在运行（双开会导致任务并发处理冲突、文件回传失败），本实例退出")
             sys.exit(1)
         cfg = load_merged_config("config.json")
+        # 联网搜索代理注入（仅作用于 web_search/web_fetch，不影响模型 API）
+        from xiaoli_app.web_search import set_proxy
+        set_proxy(cfg.get("web_proxy", ""))
         bot = AgentBot(cfg)
         # 首次启动：选择天枢 CLI 窗口
         if cfg.get("task_enabled") and not cfg.get("tianshu_window_title"):
