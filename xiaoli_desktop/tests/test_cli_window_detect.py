@@ -155,5 +155,72 @@ class TestDecodeProcessBytes(unittest.TestCase):
         self.assertEqual(S._decode_process_bytes(None), [])
 
 
+class TestConsoleClassFilter(unittest.TestCase):
+    """窗口类过滤：泛化关键字 "windowclass" 曾把 10 个隐藏辅助窗口当成终端
+    候选（下列 JUNK 为真机实测名单）——候选列表被垃圾占满后，弱特征标题
+    （终端默认名「Windows PowerShell」）要求的「候选唯一」永远不成立，
+    每次定位都 fail-closed 去开新 CLI 窗口。现只认真终端类名子串。
+    """
+
+    JUNK = (
+        "NvContainerWindowClass000047E8",
+        "BluetoothNotificationAreaIconWindowClass",
+        "Qt6111TrayIconMessageWindowClass",
+        "Qt51514WxTrayIconMessageWindowClass",
+        "CrossDeviceResumeWindowClass",
+        "COMTASKSWINDOWCLASS",
+    )
+    REAL = (
+        "ConsoleWindowClass",             # conhost
+        "CASCADIA_HOSTING_WINDOW_CLASS",  # Windows Terminal
+        "mintty",                         # Git Bash / MSYS2
+        "VirtualConsoleClass",            # ConEmu
+    )
+
+    def test_junk_helper_windows_are_not_console(self):
+        for cls in self.JUNK:
+            self.assertFalse(S._is_console_class(cls), cls)
+
+    def test_real_terminal_classes_are_console(self):
+        for cls in self.REAL:
+            self.assertTrue(S._is_console_class(cls), cls)
+
+    def test_empty_class_never_matches(self):
+        self.assertFalse(S._is_console_class(""))
+        self.assertFalse(S._is_console_class(None))
+
+
+class TestPickCliWindowLogging(unittest.TestCase):
+    """fail-closed 日志：走 DEBUG（前端日志页只读 INFO+ 轨的 bot_run.log），
+    且同一候选签名只记一次（定位轮询每秒一次，否则刷屏）。"""
+
+    def setUp(self):
+        S._last_dup_log_key = None
+
+    def test_fail_closed_logs_once_at_debug(self):
+        cands = [("A", 1), ("B", 2)]
+        with self.assertLogs("xiaoli", level="DEBUG") as cm:
+            self.assertIsNone(S._pick_cli_window(cands, lambda pid: True))
+            self.assertIsNone(S._pick_cli_window(cands, lambda pid: True))
+        hits = [r for r in cm.output if "fail-closed" in r]
+        self.assertEqual(len(hits), 1, cm.output)
+        self.assertTrue(hits[0].startswith("DEBUG"), hits[0])
+
+    def test_match_resets_dedupe_and_logs_nothing(self):
+        S._last_dup_log_key = ("A", "B")
+        with self.assertNoLogs("xiaoli", level="DEBUG"):
+            self.assertEqual(S._pick_cli_window([("npm prefix", 1)]), "npm prefix")
+        self.assertIsNone(S._last_dup_log_key)
+
+    def test_weak_single_candidate_matches(self):
+        """去掉垃圾候选后，弱特征标题 + 进程证据 + 候选唯一 → 认（这才是
+        正常路径：已开着的 CLI 窗口标题被终端改写为 Windows PowerShell）。"""
+        with self.assertNoLogs("xiaoli", level="DEBUG"):
+            self.assertEqual(
+                S._pick_cli_window([("Windows PowerShell", 8204)],
+                                   lambda pid: True),
+                "Windows PowerShell")
+
+
 if __name__ == "__main__":
     unittest.main()
