@@ -79,13 +79,37 @@ def _list_windows():
     return [name for name, _h in list_windows()]
 
 
-def _console_windows():
-    """枚举控制台/终端类顶层窗口，返回 [(标题, PID)] 列表。
+# 控制台/终端窗口类名特征（小写子串）。历史缺陷：曾用泛化的 "windowclass"
+# 关键字「一网打尽」，实际命中的是 10 个**隐藏的系统辅助窗口**
+# （NvContainerWindowClass×5 / BluetoothNotificationAreaIconWindowClass /
+#  Qt6111TrayIconMessageWindowClass / Qt51514WxTrayIconMessageWindowClass /
+#  CrossDeviceResumeWindowClass / COMTASKSWINDOWCLASS）——候选列表常年被垃圾
+# 占满，弱特征标题（终端默认名「Windows PowerShell」）要求的「候选唯一」
+# 永远不成立 → 每次定位都 fail-closed 去开新 CLI 窗口（用户实测：发一个任务
+# 多一个 Tianshu 窗口，且任务落到新会话）。现只认真终端类名子串。
+_CONSOLE_CLASS_KEYWORDS = (
+    "console",                        # ConsoleWindowClass（conhost）/ VirtualConsoleClass（ConEmu）
+    "cascadia_hosting_window_class",  # Windows Terminal
+    "mintty",                         # Git Bash / MSYS2
+    "conemu",
+)
 
-    Win32：ConsoleWindowClass / CASCADIA / mintty / WindowClass_。PID 用于
-    进程树验证（终端宿主把 CLI 标题改写为「Windows PowerShell」时，靠
-    PID 查进程命令行是否含 rivet 来确认是 CLI 而非用户自己的 PowerShell）。
-    枚举失败（非 Windows）返回 None，调用方据此回退全量匹配。
+
+def _is_console_class(class_name):
+    """窗口类名是否属于控制台/终端类（小写子串匹配，见常量注释）。"""
+    cn = (class_name or "").lower()
+    return any(k in cn for k in _CONSOLE_CLASS_KEYWORDS)
+
+
+def _console_windows():
+    """枚举**可见的**控制台/终端类顶层窗口，返回 [(标题, PID)] 列表。
+
+    Win32 类名：ConsoleWindowClass（conhost）/ CASCADIA_HOSTING_WINDOW_CLASS
+    （Windows Terminal）/ mintty（Git Bash）。PID 用于终端宿主改写标题时的
+    进程证据（见 _is_cli_feature）。枚举失败（非 Windows）返回 None，调用方
+    据此回退全量匹配。
+    必须过滤 IsWindowVisible：系统里大量辅助窗口的类名带 WindowClass 字样
+    （见 _CONSOLE_CLASS_KEYWORDS 注释），不过滤就会污染候选列表。
     天枢 CLI 是 cmd /k rivet 启动的控制台窗口——按窗口类名区分后，浏览器/编辑器等
     标题含 "npm" 的诱饵窗口（非控制台类）天然被排除，杜绝 resolve_cli_window 的 fail-open 误发。
     """
@@ -100,13 +124,16 @@ def _console_windows():
 
         def _cb(hwnd, _lparam):
             try:
+                # 隐藏窗口一律不是 CLI 终端（上述辅助窗口全为隐藏态）；
+                # 最小化的窗口 IsWindowVisible 仍为真，不会被误杀。
+                if not user32.IsWindowVisible(hwnd):
+                    return True
                 buf = ctypes.create_unicode_buffer(512)
                 n = user32.GetWindowTextW(hwnd, buf, 512)
                 if n > 0:
                     cls = ctypes.create_unicode_buffer(256)
                     user32.GetClassNameW(hwnd, cls, 256)
-                    cn = (cls.value or "").lower()
-                    if any(k in cn for k in ("console", "cascadia", "mintty", "windowclass")):
+                    if _is_console_class(cls.value):
                         pid = wintypes.DWORD()
                         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                         titles.append((buf.value.strip(), int(pid.value)))
@@ -221,6 +248,11 @@ def _process_has_rivet(pid=None):
     return _cli_process_running(pid)
 
 
+# _pick_cli_window 的 fail-closed 日志去重键：定位轮询每秒一次，同签名
+# 只记一次（定位成功即复位），免得刷爆日志。
+_last_dup_log_key = None
+
+
 def _is_cli_feature(name, pid=None, process_has_rivet_fn=None):
     """CLI 窗口特征识别：标题签名（强特征）+ 终端默认标题（弱特征，需进程验证）。
 
@@ -257,17 +289,26 @@ def _pick_cli_window(candidates, process_fn=None):
       走下一级启动新 CLI（宁可多开一个窗口，不可乱发）。
     - 桌面端窗口一律排除（证据式判定，不按 tianshu 字样一刀切）。
     """
+    global _last_dup_log_key
     cands = [(n, p) for (n, p) in (candidates or [])
              if not _is_desktop_window(n)]
     for name, _pid in cands:
         if _title_has_cli_signature(name):
+            _last_dup_log_key = None  # 定位成功：去重状态复位，下次卡住能再记一条
             return name
     if len(cands) == 1 and _is_cli_feature(cands[0][0], cands[0][1], process_fn):
+        _last_dup_log_key = None
         return cands[0][0]
     if len(cands) > 1:
-        logger.info("[CLI 定位] 多个候选终端窗口且均无 CLI 标题签名，"
-                    "fail-closed 不猜（将启动新 CLI）：%s",
-                    [n[:40] for n, _p in cands])
+        # DEBUG 而非 INFO：前端日志页只读 INFO+（bot_run.log），而定位轮询
+        # 每秒调一次这里——15 轮就是 15 行，会把前端刷爆。全量细节留在
+        # bot.log（DEBUG 轨）。同签名只记一次，避免轮询里重复刷屏。
+        key = tuple(n for n, _p in cands)
+        if key != _last_dup_log_key:
+            _last_dup_log_key = key
+            logger.debug("[CLI 定位] 多个候选终端窗口且均无 CLI 标题签名，"
+                         "fail-closed 不猜（将启动新 CLI）：%s",
+                         [n[:40] for n, _p in cands])
     return None
 
 

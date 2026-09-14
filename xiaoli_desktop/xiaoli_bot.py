@@ -376,7 +376,16 @@ def send_trigger_to_window(title, command, hold=0.5, enter_times=1):
     for _ in range(enter_times):
         pyautogui.press("enter")
         time.sleep(0.3)
-    logger.info(f"[天枢] 已向窗口「{title}」发送指令: {command}（回车 {enter_times} 次）")
+    # 前端日志（INFO 轨）只留一行摘要：窗口标题可能是整条命令行（WT 默认
+    # 标题形态），指令全文首轮提示词有上千字——直接打会把前端日志页刷爆。
+    # 全文与完整窗口标题落 bot.log（DEBUG 轨），排障看全量。
+    _command = command or ""
+    _head = _command.splitlines()[0].strip() if _command else ""
+    _title_show = title if len(title) <= 60 else title[:60] + "…"
+    logger.info(f"[天枢] 已向窗口「{_title_show}」发送指令: "
+                f"{_head[:40]}{'…' if len(_command) > 40 else ''}"
+                f"（共 {len(_command)} 字，回车 {enter_times} 次）")
+    logger.debug(f"[天枢] 指令全文（窗口「{title}」）：{_command}")
     return True
 
 
