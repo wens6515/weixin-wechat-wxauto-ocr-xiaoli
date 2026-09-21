@@ -1223,6 +1223,68 @@ class TestDetectRedClusters(unittest.TestCase):
         self.assertEqual(_detect_red_clusters(img), [])
 
 
+class TestSessionNameAnchor(unittest.TestCase):
+    """会话名获取 v3：红圈锚定（几何）+ 保留原始符号。
+
+    真机实测依据（.rivet/scratch/dump_session_geo.py / verify_anchor2d.py，
+    窗口 1300x1610，列表区 426x1452 局部坐标）：
+
+        y     x    w    h   text
+        4    65   36   34   '0'                     ← 角标数字
+       22    97   83   32   '王文生'                 ← 名字
+       24   349   55   26   '20:33'                 ← 时间戳
+      134   113  142   38   '“强盗”集团'            ← 名字（引号完整）
+      139   349   55   25   '19:03'
+      172    97  286   31   '哆菈A夢：就这样吧😄，我还…'  ← 预览
+
+    关键：名字与时间戳的 y 只差 2px，仅按 y 会翻车；红圈在头像位
+    （x≈82）与名字相邻，与时间戳（x≈349）差一个数量级 → 必须二维距离。
+    """
+
+    def test_pick_block_near_badge_beats_timestamp(self):
+        """名字块离红圈最近：时间戳(Δy=2)与角标数字不得胜出。"""
+        from wx_backend.visual_backend import _pick_block_near_badge
+        blocks = [
+            {"text": "0", "x": 65, "y": 4, "w": 36, "h": 34},
+            {"text": "王文生", "x": 97, "y": 22, "w": 83, "h": 32},
+            {"text": "20:33", "x": 349, "y": 24, "w": 55, "h": 26},
+        ]
+        got = _pick_block_near_badge((82, 22), blocks)
+        self.assertIsNotNone(got)
+        self.assertEqual(got["text"], "王文生")
+
+    def test_pick_block_near_badge_keeps_quotes(self):
+        """带引号会话名原样保留——不切碎、不剥符号。"""
+        from wx_backend.visual_backend import _pick_block_near_badge
+        blocks = [
+            {"text": "“强盗”集团", "x": 113, "y": 134, "w": 142, "h": 38},
+            {"text": "19:03", "x": 349, "y": 139, "w": 55, "h": 25},
+            {"text": "哆菈A夢：就这样吧😄，我还…", "x": 97, "y": 172, "w": 286, "h": 31},
+        ]
+        got = _pick_block_near_badge((82, 134), blocks)
+        self.assertIsNotNone(got)
+        self.assertEqual(got["text"], "“强盗”集团")
+
+    def test_pick_block_near_badge_too_far_returns_none(self):
+        """所有块都离红圈过远 → None（宁可不处理，不拿错名去操作）。"""
+        from wx_backend.visual_backend import _pick_block_near_badge
+        blocks = [{"text": "某某", "x": 300, "y": 900, "w": 80, "h": 30}]
+        self.assertIsNone(_pick_block_near_badge((10, 10), blocks))
+
+    def test_pick_main_name_keeps_leading_symbols(self):
+        """名字开头的引号属于名字本身，不得被清洗掉。
+
+        历史缺陷：_pick_main_name 用 re.sub(r"^[^汉字A-Za-z0-9]+", ...)
+        剥首符号，把 OCR 读对的「“强盗”集团」削成「强盗”集团」，
+        再经 memory_key 归一化成「强盗集团」→ 用户在记忆页看到残缺名。
+        """
+        from wx_backend.visual_backend import VisualBackend
+        lines = [{"text": "“强盗”集团", "x": 113, "y": 134, "w": 142, "h": 38}]
+        picked = VisualBackend._pick_main_name(lines)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked[0], "“强盗”集团")
+
+
 class TestIterUnreadSessions(unittest.TestCase):
     def _backend(self):
         b = VisualBackend()

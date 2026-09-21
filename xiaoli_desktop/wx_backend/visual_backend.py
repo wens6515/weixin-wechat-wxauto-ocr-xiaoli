@@ -776,6 +776,41 @@ def _detect_red_clusters(shot: Image.Image, grid: int = 20,
     return sorted(out)
 
 
+# 红圈锚定的最大容许距离（列表区局部像素）。真机实测：名字块 Δ≈15、
+# 角标数字 Δ≈35、时间戳/预览行 Δ≥50（见 .rivet/scratch/verify_anchor2d.py）。
+# 超阈值说明红圈位置异常（如误报落在预览行）→ 返回 None，宁可不处理也不猜。
+_BADGE_ANCHOR_MAX_DIST = 80
+
+
+def _pick_block_near_badge(badge_xy: tuple[int, int],
+                           blocks: list[dict],
+                           max_dist: int = _BADGE_ANCHOR_MAX_DIST,
+                           ) -> dict | None:
+    """红圈锚定：取距红圈 (x, y) 二维距离最近的文本块（会话名块）；超阈值 → None。
+
+    为什么二维而非只看 y（真机实测，窗口 1300x1610，列表区局部坐标）：
+
+        真角标 (82,22) → '王文生'(97,22) Δ=15 ；'20:33'(349,24) Δ=269
+                         仅比 y：名字 Δy=0 但时间戳 Δy=2 —— 2px 之差会翻车
+        红圈在头像位（x≈82），名字紧邻其右（x≈97），时间戳在最右列（x≈349），
+        带上 x 后两者差一个数量级。
+
+    badge_xy 与 blocks 必须同一坐标系（调用方传列表区局部坐标）。
+    """
+    if not blocks:
+        return None
+    best = None
+    best_d = None
+    for it in blocks:
+        d = abs(it["x"] - badge_xy[0]) + abs(it["y"] - badge_xy[1])
+        if best_d is None or d < best_d:
+            best_d = d
+            best = it
+    if best is None or best_d is None or best_d > max_dist:
+        return None
+    return best
+
+
 # 自学习选中高亮：微信列表选中条目有浅灰高亮背景（浅色主题 ≈ #F0F0F0，
 # 未选中纯白 #FFFFFF，差值 15~25）。PrintWindow 像素稳定（噪声 <3），
 # 容差取 12 夹在两者之间——既能容忍截图噪声，又不会把纯白误判成高亮。
@@ -1156,10 +1191,13 @@ class VisualBackend:
             if re.match(r"^[\s\[\]]{0,2}[\u4e00-\u9fff]{1,4}[\s\[\]]{0,2}$", t) \
                     and len(t) <= 6 and ("[" in t or "]" in t):
                 continue
-            name = re.sub(r"^[^\u4e00-\u9fffA-Za-z0-9]+", "", t)
+            # 只清引号内侧的 OCR 空格，**不剥首尾符号**——名字开头的引号/
+            # emoji 属于名字本身（历史缺陷：剥首把 OCR 读对的「“强盗”集团」
+            # 削成「强盗”集团」，再经键归一化成「强盗集团」，用户在记忆页
+            # 看到的是残缺名；真机日志 303 次「强盗”」即此因）。
+            name = t.strip()
             name = re.sub(r"\"\s+", "\"", name)
             name = re.sub(r"\s+\"", "\"", name)
-            name = name.strip()
             if name:
                 return name, it
         return None
@@ -1192,8 +1230,9 @@ class VisualBackend:
         效率路径（事件热路径 OCR ①）：
         1. 最小化哨兵 + 截图 force（红圈像素检测毫秒级，无 diff 保护）
         2. 无红簇 → 直接结束（零 OCR 零点击）
-        3. 有红簇 → 每个红圈只裁所在行条带 OCR 读会话名（~0.3s/个）
-        4. 条带漏读的红圈 → 整表 OCR + 几何匹配旧路径兜底；仍失败 →
+        3. 有红簇 → 列表区整块 OCR 一次（~0.46s，一次覆盖所有红圈；整块
+           读到的名字不会被条带切碎），再按红圈几何锚定挨个取会话名
+        4. 锚定失败的红圈 → 整表 OCR + 几何匹配旧路径兜底；仍失败 →
            红圈锚定 fallback（点击红圈右下条目，读顶部标题）
         """
         if self._ensure_not_iconic():
@@ -1207,21 +1246,39 @@ class VisualBackend:
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
+        # 列表区局部坐标系（红圈锚定的换算基准）
+        w, h = shot.size
+        sr = self._session_region
+        sl, st = int(w * sr[0]), int(h * sr[1])
+        srr, sbb = int(w * sr[2]), int(h * sr[3])
         seen: set[str] = set()
         self._badge_coords.clear()  # 每轮重建（红圈坐标通道：供 _switch_chat 点击直用）
         strip_failed = []
+        list_blocks = None  # 列表区 OCR 惰性一次（真出现红圈才付这个成本）
         for (bl, bt, br, bb) in badges:
             bcx = win_l + (bl + br) // 2
             bcy = win_t + (bt + bb) // 2
-            name = self._name_at_badge(bcx, bcy, shot)
+            # 命名走「列表区整块 OCR + 红圈几何锚定」：条带裁剪会把
+            # 「“强盗”集团」切成「“强盗”」+「集团」两块，取上半块得到
+            # 残缺名（真机日志 303 次「强盗”」即此因）。
+            if list_blocks is None:
+                list_blocks = ocr_image(shot.crop((sl, st, srr, sbb)))
+            blk = _pick_block_near_badge(
+                (bcx - win_l - sl, bcy - win_t - st), list_blocks)
+            name = blk["text"].strip() if blk else None
             if name:
                 if name in seen:
                     logger.debug(f"[未读] {name!r} 已有红圈（重复角标，跳过）")
                     continue
                 seen.add(name)
                 self._badge_coords[name] = (bcx, bcy)
-                # 条带锚定的点击坐标：红圈右下条目主体（与 _anchor_badge 同偏移）
-                self._session_coords[name] = (bcx + _BADGE_CLICK_OFFSET_X, bcy)
+                # 点击坐标取名字块中心——比「红圈 + 固定偏移」可靠：真机
+                # 出现过偏移点击落到相邻条目的情形（20:05:38 日志红圈锚定
+                # 「强盗”」切过去，标题读到的是「王文生」）。
+                self._session_coords[name] = (
+                    win_l + sl + blk["x"] + blk["w"] // 2,
+                    win_t + st + blk["y"] + blk["h"] // 2,
+                )
                 logger.debug(f"[未读] {name!r} 红圈屏幕 ({bcx},{bcy})")
                 yield name
             else:
