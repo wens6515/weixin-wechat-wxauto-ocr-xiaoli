@@ -26,7 +26,7 @@ from wx_backend.visual_backend import VisualBackend
 
 WIN_W, WIN_H = 1300, 1610
 SESSION_REGION = (0.09, 0.09, 0.42, 0.99)
-ROWS = {163: "联系人甲", 294: "某群聊"}
+ROWS = {163: "联系人丁", 294: "“闲聊”集团"}
 
 
 class _World:

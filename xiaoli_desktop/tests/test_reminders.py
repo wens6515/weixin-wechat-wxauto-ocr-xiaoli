@@ -22,7 +22,7 @@ class TestRemindersStore(unittest.TestCase):
         self.store = RemindersStore(os.path.join(self.dir, "rem.json"))
 
     def test_add_list_remove(self):
-        r = self.store.add("联系人甲", "查成绩", time.time() + 600, "once")
+        r = self.store.add("联系人丁", "查成绩", time.time() + 600, "once")
         self.assertEqual(len(self.store.list()), 1)
         self.assertTrue(self.store.remove(r["id"]))
         self.assertEqual(self.store.list(), [])
@@ -84,7 +84,7 @@ class _FakeWx:
     def read_title(self, foreground=False):
         # 触发发送前必须读标题确认落点（防发错人）；桩固定返回目标会话，
         # 表示窗口已停在它上面 → 直接发送、不点击。
-        return "联系人甲"
+        return "联系人丁"
 
     def send_text(self, chat, text):
         self.sent.append((chat, text))
@@ -115,14 +115,14 @@ class TestSchedulerAndDrain(unittest.TestCase):
 
     def test_scheduler_enqueues_once(self):
         store = RemindersStore(os.path.join(self.dir, "rem.json"))
-        store.add("联系人甲", "到期了", time.time() - 1)
+        store.add("联系人丁", "到期了", time.time() - 1)
         q = queue.Queue()
         stop = threading.Event()
         sched = ReminderScheduler(store, q, stop_event=stop, scan_seconds=0.05)
         sched.start()
         try:
             item = q.get(timeout=2)
-            self.assertEqual(item["chat"], "联系人甲")
+            self.assertEqual(item["chat"], "联系人丁")
         finally:
             stop.set()
             sched.join(timeout=2)
@@ -134,22 +134,22 @@ class TestSchedulerAndDrain(unittest.TestCase):
         不再发固定文案【定时提醒】，也不注入预写提醒事项（content 已废）。"""
         bot = make_rem_bot(self.dir)
         fire_at = time.time() - 1
-        r = bot.reminders.add("联系人甲", "", fire_at)
+        r = bot.reminders.add("联系人丁", "", fire_at)
         bot._reminder_queue.put(dict(r))
         bot._drain_reminders()
         self.assertEqual(len(bot._chats), 1)
         chat, trigger = bot._chats[0]
-        self.assertEqual(chat, "联系人甲")
+        self.assertEqual(chat, "联系人丁")
         self.assertIn("定时触发", trigger)
         self.assertIn("指定时间", trigger)
-        self.assertEqual(bot.wx.sent, [("联系人甲", "回复[联系人甲]")])
+        self.assertEqual(bot.wx.sent, [("联系人丁", "回复[联系人丁]")])
         rec = [x for x in bot.reminders.list() if x["id"] == r["id"]][0]
         self.assertFalse(rec["enabled"])  # 单次触发后关闭
         self.assertEqual(len(bot._reminder_queue.queue), 0)
 
     def test_drain_over_grace_skips_send(self):
         bot = make_rem_bot(self.dir)
-        r = bot.reminders.add("联系人甲", "太久之前", time.time() - GRACE_SECONDS - 60)
+        r = bot.reminders.add("联系人丁", "太久之前", time.time() - GRACE_SECONDS - 60)
         bot._reminder_queue.put(dict(r))
         bot._drain_reminders()
         self.assertEqual(bot.wx.sent, [])
@@ -166,14 +166,14 @@ class TestSetReminderTool(unittest.TestCase):
         result = {"kind": "tool_call", "name": "set_reminder",
                   "arguments": json.dumps({"time": fire, "content": "查成绩",
                                            "repeat": "once"})}
-        out = self.bot._apply_vision_result("联系人甲", "联系人甲", result,
+        out = self.bot._apply_vision_result("联系人丁", "联系人丁", result,
                                             user_text="明天提醒我查成绩")
         self.assertTrue(out)
         recs = self.bot.reminders.list()
         self.assertEqual(len(recs), 1)
-        self.assertEqual(recs[0]["chat"], "联系人甲")
+        self.assertEqual(recs[0]["chat"], "联系人丁")
         self.assertEqual(recs[0]["kind"], "time")
-        self.assertEqual(self.bot.wx.sent[-1][0], "联系人甲")
+        self.assertEqual(self.bot.wx.sent[-1][0], "联系人丁")
         # 无预写文案（用户定案）：确认回复只确认时间，不带「提醒事项」
         self.assertIn("记住啦", self.bot.wx.sent[-1][1])
 
@@ -183,7 +183,7 @@ class TestSetReminderTool(unittest.TestCase):
         result = {"kind": "tool_call", "name": "set_reminder",
                   "arguments": json.dumps({"time": fire})}
         self.assertTrue(
-            self.bot._apply_vision_result("联系人甲", "联系人甲", result,
+            self.bot._apply_vision_result("联系人丁", "联系人丁", result,
                                           user_text="明天下午三点叫我"))
         self.assertEqual(len(self.bot.reminders.list()), 1)
 
@@ -192,7 +192,7 @@ class TestSetReminderTool(unittest.TestCase):
                   "arguments": json.dumps({"time": "not-a-time",
                                            "content": "x"})}
         self.assertIsNone(
-            self.bot._apply_vision_result("联系人甲", "联系人甲", result))
+            self.bot._apply_vision_result("联系人丁", "联系人丁", result))
         self.assertEqual(self.bot.reminders.list(), [])
 
     def test_past_time_degrades_to_chat(self):
@@ -200,7 +200,7 @@ class TestSetReminderTool(unittest.TestCase):
         result = {"kind": "tool_call", "name": "set_reminder",
                   "arguments": json.dumps({"time": fire, "content": "x"})}
         self.assertIsNone(
-            self.bot._apply_vision_result("联系人甲", "联系人甲", result))
+            self.bot._apply_vision_result("联系人丁", "联系人丁", result))
         self.assertEqual(self.bot.reminders.list(), [])
 
     def test_vision_payload_declares_tool_only_with_store(self):

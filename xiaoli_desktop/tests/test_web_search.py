@@ -39,11 +39,11 @@ DDG_HTML = """
 # 百度：h3 结果块 + /link?url= 重定向 + 摘要 + 内部链接应过滤
 BAIDU_HTML = """
 <html><body>
-<div class="result c-container"><h3 class="c-title"><a href="http://www.baidu.com/link?url=abc" target="_blank">唐勇-经济与管理学院</a></h3>
-<span class="c-abstract">毕业于天津大学，现为福州大学金融学教授。</span>
-<span>https://jgxy.fzu.edu.cn/i... 2023-06-16</span></div>
-<div class="result c-container"><h3 class="c-title"><a href="https://baike.baidu.com/item/x">唐勇 百度百科</a></h3>
-<span class="c-abstract">福州大学经济与管理学院教师。</span></div>
+<div class="result c-container"><h3 class="c-title"><a href="http://www.baidu.com/link?url=abc" target="_blank">李文华-经济与管理学院</a></h3>
+<span class="c-abstract">毕业于天津大学，现为云溪大学金融学教授。</span>
+<span>https://jgxy.example.edu.cn/i... 2023-06-16</span></div>
+<div class="result c-container"><h3 class="c-title"><a href="https://baike.baidu.com/item/x">李文华 百度百科</a></h3>
+<span class="c-abstract">云溪大学经济与管理学院教师。</span></div>
 <div class="result c-container"><h3><a href="https://www.baidu.com/s?wd=next">站内搜索</a></h3>
 <span>内部链接应被过滤</span></div>
 </body></html>
@@ -52,8 +52,8 @@ BAIDU_HTML = """
 # 搜狗：相对 /link?url= 需 urljoin 补全
 SOGOU_HTML = """
 <html><body>
-<div class="vrwrap"><h3><a href="/link?url=xyz">唐勇 -经济与管理 学院</a></h3>
-毕业于天津大学原管理学院，现为福州大学金融学教授。 福州大学 https://jgxy.fzu.edu.cn/i... 2023-06-16 推荐您搜索</div>
+<div class="vrwrap"><h3><a href="/link?url=xyz">李文华 -经济与管理 学院</a></h3>
+毕业于天津大学原管理学院，现为云溪大学金融学教授。 云溪大学 https://jgxy.example.edu.cn/i... 2023-06-16 推荐您搜索</div>
 </body></html>
 """
 
@@ -108,19 +108,19 @@ class TestBaiduSogouParse(unittest.TestCase):
             self.assertIn("baidu.com", url)
             return _resp(BAIDU_HTML)
         with mock.patch.object(ws.requests, "get", side_effect=fake_get):
-            results = ws.web_search("福州大学 唐勇", backends=("baidu",))
+            results = ws.web_search("云溪大学 李文华", backends=("baidu",))
         self.assertEqual(len(results), 2)  # baidu /s 内部链接被过滤
-        self.assertEqual(results[0]["title"], "唐勇-经济与管理学院")
+        self.assertEqual(results[0]["title"], "李文华-经济与管理学院")
         self.assertEqual(results[0]["url"], "http://www.baidu.com/link?url=abc")
         self.assertEqual(results[0]["source"], "baidu")
-        self.assertIn("福州大学金融学教授", results[0]["snippet"])
+        self.assertIn("云溪大学金融学教授", results[0]["snippet"])
         # 摘要截掉展示网址/日期噪声
-        self.assertNotIn("jgxy.fzu", results[0]["snippet"])
+        self.assertNotIn("jgxy.example", results[0]["snippet"])
 
     def test_sogou_relative_link_urljoined(self):
         with mock.patch.object(ws.requests, "get",
                                return_value=_resp(SOGOU_HTML)):
-            results = ws.web_search("福州大学 唐勇", backends=("sogou",))
+            results = ws.web_search("云溪大学 李文华", backends=("sogou",))
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["url"],
                          "https://www.sogou.com/link?url=xyz")
@@ -231,8 +231,8 @@ class TestBingNewLayout(unittest.TestCase):
     NEW_HTML = """
     <li class="b_algo"><link rel="stylesheet" href="a.css"/>
     <div class="b_tpcn"><a class="tilk" href="https://cn.bing.com/ck/a?x=1" h="ID=SERP,1.1">icon</a></div>
-    <a class="tilk" href="https://example.com/qishan" h="ID=SERP,1.2">旗山校区天气预报</a>
-    <div class="b_caption"><p class="b_lineclamp2">今天旗山校区阴，气温 25 度</p></div></li>
+    <a class="tilk" href="https://example.com/qishan" h="ID=SERP,1.2">东校区天气预报</a>
+    <div class="b_caption"><p class="b_lineclamp2">今天东校区阴，气温 25 度</p></div></li>
     <li class="b_algo"><h2><a href="https://example.org/legacy">旧版结果</a></h2><p>旧版仍在</p></li>
     """
 
@@ -242,7 +242,7 @@ class TestBingNewLayout(unittest.TestCase):
             results = ws._search_bing("q", 5)
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0]["url"], "https://example.com/qishan")
-        self.assertEqual(results[0]["title"], "旗山校区天气预报")
+        self.assertEqual(results[0]["title"], "东校区天气预报")
         self.assertIn("阴", results[0]["snippet"])
         self.assertEqual(results[1]["url"], "https://example.org/legacy")
 
@@ -267,7 +267,7 @@ class TestWebFetchRedirectStub(unittest.TestCase):
                '<script>window.location.replace("https://tq.example/fuzhou/")</script>')
     STUB_META = ("<noscript><META http-equiv=\"refresh\" "
                  "content=\"0;URL='https://tq.example/fuzhou/'\"></noscript>")
-    REAL = "<html><body>" + "今天福州阴转小雨，气温 25 到 30 度，湿度很大。" * 4 + "</body></html>"
+    REAL = "<html><body>" + "今天云溪阴转小雨，气温 25 到 30 度，湿度很大。" * 4 + "</body></html>"
 
     def test_js_redirect_stub_followed(self):
         side = [self._resp_with(self.STUB_JS, "https://www.sogou.com/link?url=x"),
@@ -489,7 +489,7 @@ class TestVisionSearchLoop(unittest.TestCase):
 # ---------------- web_fetch：网页正文抓取 ----------------
 
 FETCH_HTML = """<html><head><style>.a{color:red}</style></head>
-<body><script>var x=1;</script><h1>福州天气</h1>
+<body><script>var x=1;</script><h1>云溪天气</h1>
 <!-- comment -->
 <p>今天 33℃ 多云，南风 2 级，湿度 71%，空气质量优，适合外出游玩。</p>
 <noscript>请开启JS</noscript></body></html>"""
@@ -512,7 +512,7 @@ class TestWebFetch(unittest.TestCase):
         with mock.patch.object(ws.requests, "get",
                                return_value=_fetch_resp(FETCH_HTML)) as m:
             text = ws.web_fetch("https://example.com/weather")
-        self.assertIn("福州天气", text)
+        self.assertIn("云溪天气", text)
         self.assertIn("33℃ 多云", text)
         self.assertNotIn("var x", text)
         self.assertNotIn(".a{", text)
@@ -573,13 +573,13 @@ class TestVisionFetchLoop(unittest.TestCase):
                      "function": {"name": "web_fetch",
                                   "arguments": '{"url": "https://www.tianqi.com/fuzhou/today/"}'}},
                 ]}}]}
-            return {"choices": [{"message": {"content": "福州今天 33℃ 多云"}}]}
+            return {"choices": [{"message": {"content": "云溪今天 33℃ 多云"}}]}
 
         bot._post_chat_completions = fake_post
-        fetch = mock.Mock(return_value="福州 33℃ 多云 湿度71%")
+        fetch = mock.Mock(return_value="云溪 33℃ 多云 湿度71%")
         with mock.patch.object(wb, "web_fetch", fetch):
             out = bot.call_vision_api([{"type": "text", "text": "hi"}])
-        self.assertEqual(out["content"], "福州今天 33℃ 多云")
+        self.assertEqual(out["content"], "云溪今天 33℃ 多云")
         fetch.assert_called_once_with("https://www.tianqi.com/fuzhou/today/")
         tool_msgs = [m for m in payloads[1]["messages"] if m.get("role") == "tool"]
         self.assertEqual(tool_msgs[0]["tool_call_id"], "f1")
@@ -593,7 +593,7 @@ class TestVisionFetchLoop(unittest.TestCase):
             payloads.append(payload)
             if len(payloads) == 1:
                 return {"choices": [{"message": {"tool_calls": [
-                    _search_call("s1", "福州天气"),
+                    _search_call("s1", "云溪天气"),
                     {"id": "f1", "type": "function",
                      "function": {"name": "web_fetch",
                                   "arguments": '{"url": "https://u"}'}},

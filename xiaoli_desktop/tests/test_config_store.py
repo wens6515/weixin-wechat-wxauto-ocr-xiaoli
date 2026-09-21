@@ -784,8 +784,8 @@ class TestChatCardBindings(unittest.TestCase):
                                "temperature": 0.5, "top_p": 0.6,
                                "max_history": 55})
         cfg = self._cfg()
-        cfg["chat_card_bindings"] = {"联系人甲": "assist"}
-        p = config_store._project_chat_bindings(cfg, tmp)["联系人甲"]
+        cfg["chat_card_bindings"] = {"联系人丁": "assist"}
+        p = config_store._project_chat_bindings(cfg, tmp)["联系人丁"]
         self.assertEqual(p["system_prompt"], "SP")
         self.assertEqual(p["chat_model"], "p1:m1")
         self.assertEqual(p["ai_api_url"], "https://x/v1/chat/completions")
@@ -812,12 +812,12 @@ class TestChatCardBindings(unittest.TestCase):
         self._write_card(tmp, {"id": "assist", "name": "助手",
                                "system_prompt": "SP"})
         cfg = self._cfg()
-        cfg["chat_card_bindings"] = {'" 某群 " 集团': "assist"}
+        cfg["chat_card_bindings"] = {'" 闲聊 " 集团': "assist"}
         params = config_store._project_chat_bindings(cfg, tmp)
-        self.assertIn('" 某群 " 集团', params)
-        self.assertIn("某群聊", params)
-        self.assertEqual(params['" 某群 " 集团']["system_prompt"], "SP")
-        self.assertEqual(params["某群聊"]["system_prompt"], "SP")
+        self.assertIn('" 闲聊 " 集团', params)
+        self.assertIn("闲聊集团", params)
+        self.assertEqual(params['" 闲聊 " 集团']["system_prompt"], "SP")
+        self.assertEqual(params["闲聊集团"]["system_prompt"], "SP")
 
     def test_save_config_strips_derived_params(self):
         tmp = tempfile.mkdtemp()

@@ -77,12 +77,12 @@ class TestRecallMemory(unittest.TestCase):
     def test_recall_hits_deep_and_recent(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = make_bot(tmp)
-            bot._add_history("小明", "user", "我下周去福州大学报到")
+            bot._add_history("小明", "user", "我下周去云溪大学报到")
             bot._add_history("小明", "assistant", "好耶，到时候拍照片给我看")
             for i in range(6):  # 把报到那条挤进深层
                 bot._add_history("小明", "user", f"日常{i}")
-            out = bot._recall_memory("小明", "福州大学")
-            self.assertIn("福州大学报到", out)
+            out = bot._recall_memory("小明", "云溪大学")
+            self.assertIn("云溪大学报到", out)
             self.assertIn("[", out)  # 带时间戳前缀
             self.assertIn("用户", out)
 
@@ -127,14 +127,14 @@ class TestImportantAndRelated(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bot = make_bot(tmp)
             bot.memory_commit_compression("小明", 0, [], [
-                {"kw": ["报到", "福州大学"], "mem": "3月说要去福州大学报到"},
+                {"kw": ["报到", "云溪大学"], "mem": "3月说要去云溪大学报到"},
                 {"kw": ["火锅"], "mem": "爱吃火锅"},
                 {"kw": ["游戏"], "mem": "a"},
                 {"kw": ["电影"], "mem": "b"},
                 {"kw": ["音乐"], "mem": "c"},
             ])
             out = bot._match_related_memory("小明", "我报到的事定了吗")
-            self.assertIn("福州大学报到", out)
+            self.assertIn("云溪大学报到", out)
             self.assertNotIn("火锅", out)
             # 最多注入 3 条
             out_all = bot._match_related_memory("小明", "火锅 游戏 电影 音乐")

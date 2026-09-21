@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """深层存档的键一致性：同一会话的 OCR 变体名不得把深层 jsonl 分裂成多份。
 
-真机场景：同一个会话（如「某群聊」）在不同帧里会被 OCR 读成
-「某群”集团」「某群聊」「" 某群 " 集团」等变体。
+真机场景：同一个会话（如「“闲聊”集团」）在不同帧里会被 OCR 读成
+「闲聊”集团」「"闲聊"集团」「" 闲聊 " 集团」等变体。
 
 memory.json 的键经 _resolve_key 归一到首次写入的原文键（这层已修）；
 但深层记忆是按会话名 percent-encode 出**文件名**——若写入路径不先把
@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xiaoli_app.memory_store import MemoryStore
 
-RAW = "某群聊"      # 原文名（升级后的键形态）
-VAR = "某群”集团"        # 同一会话的 OCR 变体（前引号丢失）
+RAW = "“闲聊”集团"      # 原文名（升级后的键形态）
+VAR = "闲聊”集团"        # 同一会话的 OCR 变体（前引号丢失）
 
 
 def make_store(tmp):
@@ -76,7 +76,7 @@ class TestDeepFileKeyConsistency(unittest.TestCase):
             from urllib.parse import quote
             store = make_store(tmp)
             store.load()
-            legacy_name = "某群聊"          # 旧归一化名
+            legacy_name = "闲聊集团"          # 旧归一化名
             deep_dir = os.path.join(tmp, "memory_deep")
             os.makedirs(deep_dir, exist_ok=True)
             legacy_path = os.path.join(deep_dir, quote(legacy_name, safe="") + ".jsonl")
