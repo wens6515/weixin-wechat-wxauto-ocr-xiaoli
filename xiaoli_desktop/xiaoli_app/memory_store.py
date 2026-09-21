@@ -169,22 +169,56 @@ class MemoryStore:
 
     # ---------- 近期记忆（注入上下文的 recent 窗口） ----------
 
+    def _resolve_key(self, chat_id):
+        """把任意 OCR 变体解析到已存在的原文键；无已存在的则返回原文。
+
+        键存的是**会话名原文**（不归一化——用户在记忆页看到的就是微信里
+        的名字本身，「“强盗”集团」不再被剥成「强盗集团」）。
+
+        但**查找**必须容忍 OCR 差异：同一会话可能被读成「“强盗”集团」
+        「强盗”集团」「"强盗"集团」「" 强盗 " 集团」等。这里按 memory 键
+        口径做等价类匹配，命中即复用首次写入的那个原文键——既不因 OCR
+        抖动把记忆分裂成多份，也不改写要显示的名字。
+
+        用 list() 快照遍历：调用方未必持锁（_lookup 是只读路径），
+        直接遍历 dict 会在并发写入时炸 RuntimeError。
+        """
+        if chat_id in self.memory_db:
+            return chat_id
+        target = memory_key(chat_id)
+        if target:
+            for k in list(self.memory_db):
+                if memory_key(k) == target:
+                    return k
+        return chat_id
+
     def _state(self, chat_id):
-        """取（或创建）聊天的 v2 记忆状态。调用方必须已持锁。"""
-        st = self.memory_db.get(chat_id)
+        """取（或创建）聊天的 v2 记忆状态。调用方必须已持锁。
+
+        键 = 会话名原文；查找经 _resolve_key 做 OCR 变体等价匹配，
+        于是「显示用原文」与「OCR 抖动不分裂」两者兼得。
+        """
+        key = self._resolve_key(chat_id)
+        st = self.memory_db.get(key)
         if st is None:
             st = {"recent": [], "important": [], "index": [], "indexed": 0}
-            self.memory_db[chat_id] = st
+            self.memory_db[key] = st
         return st
+
+    def _lookup(self, chat_id):
+        """按原文取状态（只读，不创建）；经 _resolve_key 容忍 OCR 变体。
+
+        供 important_block / match_related 这类「有就注入、没有就跳过」的
+        只读路径使用——不能用 _state（它会创建空条目）。
+        """
+        return self.memory_db.get(self._resolve_key(chat_id)) or {}
 
     def recent(self, chat_id):
         """近期记忆。深层历史不在此列——由 recall 按需检索。"""
-        chat_id = memory_key(chat_id)
         with self.lock:
             return self._state(chat_id)["recent"]
 
     def add(self, chat_id, role, content, deep_enabled=True):
-        chat_id = memory_key(chat_id)
         with self.lock:
             st = self._state(chat_id)
             st["recent"].append({
@@ -224,9 +258,21 @@ class MemoryStore:
     # ---------- 深层记忆（memory_deep/<chat>.jsonl，append-only 永不删除） ----------
 
     def deep_path(self, chat_id):
-        """深层记忆文件路径：聊天名 percent-encode（文件名安全且可逆）。"""
+        """深层记忆文件路径：聊天名 percent-encode（文件名安全且可逆）。
+
+        兼容升级前的命名（键曾归一化）：那时文件名是归一化名的 encode，
+        与新名不同。新名文件不存在、旧名文件存在时返回旧路径，让历史深层
+        记忆继续可读可追加（否则「记忆丢了」）。
+        """
         from urllib.parse import quote
-        return os.path.join(self._deep_dir, quote(chat_id, safe="") + ".jsonl")
+        p = os.path.join(self._deep_dir, quote(chat_id, safe="") + ".jsonl")
+        if not os.path.exists(p):
+            legacy = memory_key(chat_id)
+            if legacy and legacy != chat_id:
+                lp = os.path.join(self._deep_dir, quote(legacy, safe="") + ".jsonl")
+                if os.path.exists(lp):
+                    return lp
+        return p
 
     def _append_deep_unlocked(self, chat_id, msg):
         """一条消息溢出 recent 时归档进深层文件。调用方负责开关判定与持锁。"""
@@ -303,7 +349,6 @@ class MemoryStore:
     def recall(self, chat_id, query):
         """在本聊天的全部记忆（深层存档 + 近期窗口）中按关键词检索。
         返回给模型的可读文本（带时间戳的命中消息列表）。"""
-        chat_id = memory_key(chat_id)
         terms = [t for t in re.split(r"[\s，。！？、：；\"'（）()\[\]【】]+",
                                      str(query or "").strip()) if t]
         if not terms:
@@ -334,7 +379,7 @@ class MemoryStore:
     def important_block(self, chat_id):
         """重要记忆 system 块（无内容返回 None）。per-chat 独立 system——
         不得并进人设消息（人设是跨聊天共享的缓存前缀）。"""
-        st = self.memory_db.get(memory_key(chat_id)) or {}
+        st = self._lookup(chat_id)
         items = [str(x.get("content") or "").strip()
                  for x in (st.get("important") or []) if isinstance(x, dict)]
         items = [x for x in items if x]
@@ -348,7 +393,7 @@ class MemoryStore:
         text = str(user_text or "")
         if not text.strip():
             return None
-        st = self.memory_db.get(memory_key(chat_id)) or {}
+        st = self._lookup(chat_id)
         hits = []
         for e in (st.get("index") or []):
             if not isinstance(e, dict):
@@ -372,7 +417,6 @@ class MemoryStore:
         [{"content": ...}]；index_new：[{"kw": [...], "mem": ...}]。
         条目超上限时裁掉最旧的（重要记忆上限 important_max，索引上限
         300——索引只增会让注入匹配越来越慢且陈旧）。"""
-        chat_id = memory_key(chat_id)
         with self.lock:
             st = self._state(chat_id)
             st["indexed"] = max(int(st.get("indexed") or 0), int(consumed))
@@ -410,7 +454,6 @@ class MemoryStore:
 
         deep_query 非空：深层全量过滤，deep 截 200 条 + deep_matched 总数；
         否则深层返回第 deep_offset 页（deep_limit 条），deep_matched=None。"""
-        chat_id = memory_key(chat_id)
         with self.lock:
             st = self.memory_db.get(chat_id) or {}
             deep_total = int(self.deep_count.get(chat_id, 0))
@@ -437,7 +480,6 @@ class MemoryStore:
 
     def delete_important(self, chat_id, idx):
         """删除第 idx（1 基）条重要记忆。返回是否删除。"""
-        chat_id = memory_key(chat_id)
         with self.lock:
             st = self._state(chat_id)
             if 1 <= idx <= len(st["important"]):
@@ -448,7 +490,6 @@ class MemoryStore:
 
     def delete_index_entry(self, chat_id, idx):
         """删除第 idx（1 基）条关键词索引。返回是否删除。"""
-        chat_id = memory_key(chat_id)
         with self.lock:
             st = self._state(chat_id)
             if 1 <= idx <= len(st["index"]):
@@ -463,7 +504,6 @@ class MemoryStore:
         深层文件原子重写；行号落在压缩边界 indexed 之前时 indexed 同步
         -1（边界按行数推进，少一行必须回退，否则下轮压缩错位跳过一条）。
         返回是否删除。"""
-        chat_id = memory_key(chat_id)
         with self.lock:
             st = self._state(chat_id)
             removed, new_count = deep_delete_line(self.deep_path(chat_id),
@@ -477,9 +517,8 @@ class MemoryStore:
             return True
 
     def delete_messages(self, chat_id, indices):
-        chat_id = memory_key(chat_id)
         with self.lock:
-            st = self.memory_db.get(chat_id)
+            st = self.memory_db.get(self._resolve_key(chat_id))
             if st is None:
                 logger.warning(f"❌ 聊天 {chat_id} 不存在于记忆中")
                 return False
@@ -509,7 +548,7 @@ class MemoryStore:
     def clear_history(self, chat_id=None):
         with self.lock:
             if chat_id:
-                key = memory_key(chat_id)
+                key = self._resolve_key(chat_id)   # 变体名也能清到同一条
                 self.memory_db.pop(key, None)
                 self.clear_deep(key)
                 logger.info(f"已清空聊天 {chat_id} 的历史（含深层记忆）")

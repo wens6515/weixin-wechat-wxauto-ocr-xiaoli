@@ -800,8 +800,13 @@ class TestChatCardBindings(unittest.TestCase):
         cfg["chat_card_bindings"] = {"路人": "nope"}
         self.assertEqual(config_store._project_chat_bindings(cfg, tmp), {})
 
-    def test_key_normalized(self):
-        """绑定键做 memory 口径归一化：引号/空格差异不分裂同一会话。"""
+    def test_key_keeps_raw_name_with_normalized_alias(self):
+        """绑定键用会话名原文，并保留归一化别名（兼容升级前保存的绑定）。
+
+        键不再被改写成归一化形态——记忆页显示的就是微信里的名字本身。
+        但查找仍要容忍 OCR 引号/空格差异，故同一份参数在归一化键下也能
+        查到（旧 config 里 user 存的是任意拼写，不能要求重设）。
+        """
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         self._write_card(tmp, {"id": "assist", "name": "助手",
@@ -809,7 +814,9 @@ class TestChatCardBindings(unittest.TestCase):
         cfg = self._cfg()
         cfg["chat_card_bindings"] = {'" 强盗 " 集团': "assist"}
         params = config_store._project_chat_bindings(cfg, tmp)
-        self.assertEqual(list(params.keys()), ["强盗集团"])
+        self.assertIn('" 强盗 " 集团', params)
+        self.assertIn("强盗集团", params)
+        self.assertEqual(params['" 强盗 " 集团']["system_prompt"], "SP")
         self.assertEqual(params["强盗集团"]["system_prompt"], "SP")
 
     def test_save_config_strips_derived_params(self):

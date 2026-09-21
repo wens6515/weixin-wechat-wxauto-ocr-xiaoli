@@ -393,7 +393,8 @@ class WeChatBot:
         if not chat_id:
             return {}
         params = getattr(self, "chat_card_params", None) or {}
-        return params.get(_memory_key(chat_id)) or {}
+        # 先按名字原文查（新口径），再退回归一化键（兼容升级前保存的绑定）
+        return params.get(chat_id) or params.get(_memory_key(chat_id)) or {}
 
     def _recent_cap(self, chat_id=None):
         """近期记忆保留条数：memory_keep_recent 与 max_history 取小
