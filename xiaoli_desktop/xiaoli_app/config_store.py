@@ -470,7 +470,7 @@ def _project_chat_bindings(cfg, cards_dir):
     params = {}
     for chat, cid in bindings.items():
         cid = str(cid or "").strip()
-        key = memory_key(chat)
+        key = str(chat or "").strip()   # 新口径：会话名原文（与记忆键一致）
         if not cid or not key:
             continue
         card = _read_card(cards_dir, cid)
@@ -487,6 +487,11 @@ def _project_chat_bindings(cfg, cards_dir):
             "top_p": card.get("top_p"),
             "max_history": card.get("max_history"),
         }
+        # 兼容旧口径（键曾归一化）：同一份参数在归一化键下也能查到，
+        # 让升级前保存的绑定继续生效，不必要求用户重设。
+        legacy = memory_key(key)
+        if legacy and legacy != key:
+            params.setdefault(legacy, params[key])
     return params
 
 
