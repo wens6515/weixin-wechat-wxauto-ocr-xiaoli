@@ -9,18 +9,18 @@ import wechat_bot as wb
 class TestMemoryKey(unittest.TestCase):
     def test_quote_variants_stripped(self):
         # 半/全角弯引号、直引号、全角引号、OCR 丢前引号 → 剥掉后同键
-        self.assertEqual(wb._memory_key("“强盗”集团"), "强盗集团")
-        self.assertEqual(wb._memory_key('强盗"集团'), "强盗集团")
-        self.assertEqual(wb._memory_key("＂强盗＂集团"), "强盗集团")
-        self.assertEqual(wb._memory_key("「强盗」集团"), "强盗集团")
-        self.assertEqual(wb._memory_key("强盗”集团"), "强盗集团")  # OCR 丢前引号
+        self.assertEqual(wb._memory_key("“摸鱼”集团"), "摸鱼集团")
+        self.assertEqual(wb._memory_key('摸鱼"集团'), "摸鱼集团")
+        self.assertEqual(wb._memory_key("＂摸鱼＂集团"), "摸鱼集团")
+        self.assertEqual(wb._memory_key("「摸鱼」集团"), "摸鱼集团")
+        self.assertEqual(wb._memory_key("摸鱼”集团"), "摸鱼集团")  # OCR 丢前引号
 
     def test_whitespace_stripped(self):
-        self.assertEqual(wb._memory_key('" 强盗 " 集团'), "强盗集团")
-        self.assertEqual(wb._memory_key("王文生 "), "王文生")
+        self.assertEqual(wb._memory_key('" 摸鱼 " 集团'), "摸鱼集团")
+        self.assertEqual(wb._memory_key("林小满 "), "林小满")
 
     def test_plain_name_unchanged(self):
-        self.assertEqual(wb._memory_key("王文生"), "王文生")
+        self.assertEqual(wb._memory_key("林小满"), "林小满")
         self.assertEqual(wb._memory_key(None), "")
 
     def test_history_roundtrip_same_chat(self):
@@ -34,13 +34,13 @@ class TestMemoryKey(unittest.TestCase):
         bot._deep_count = {}
         bot._deep_dir = ""
         # 各种 OCR 变体读写的应是同一份历史
-        bot._add_history("“强盗”集团", "user", "在吗")
-        self.assertEqual(len(bot._get_history("强盗”集团")), 1)   # 丢前引号
-        self.assertEqual(len(bot._get_history('强盗"集团')), 1)   # 半角直引号
-        self.assertEqual(len(bot._get_history('" 强盗 " 集团')), 1)  # 引号带空格
+        bot._add_history("“摸鱼”集团", "user", "在吗")
+        self.assertEqual(len(bot._get_history("摸鱼”集团")), 1)   # 丢前引号
+        self.assertEqual(len(bot._get_history('摸鱼"集团')), 1)   # 半角直引号
+        self.assertEqual(len(bot._get_history('" 摸鱼 " 集团')), 1)  # 引号带空格
         # 变体清空同样命中
-        bot.clear_history("＂强盗＂集团 ")
-        self.assertEqual(len(bot._get_history("「强盗」集团")), 0)
+        bot.clear_history("＂摸鱼＂集团 ")
+        self.assertEqual(len(bot._get_history("「摸鱼」集团")), 0)
 
 
 if __name__ == "__main__":

@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """会话切换的「已选中」判定：标题是权威信号。
 
-真机缺陷（用户实测复现）：小漓在「王文生」回复完消息后，用户**手动**切到
-「“强盗”集团」。王文生再发新消息时，bot 认为"已经在王文生会话里"→ 不点击
-→ 后续读到的是「“强盗”集团」的消息（窗口实际停在那儿）。
+真机缺陷（用户实测复现）：小漓在「林小满」回复完消息后，用户**手动**切到
+「“摸鱼”集团」。林小满再发新消息时，bot 认为"已经在林小满会话里"→ 不点击
+→ 后续读到的是「“摸鱼”集团」的消息（窗口实际停在那儿）。
 
 真机探针（.rivet/scratch/probe_switch_state.py）实测：
-    标题 read_title() = '“强盗”集团(5)'    ← 权威：微信停在强盗集团
-    '王文生' 行像素 (47,47,48)  → _is_row_selected = False   ← 像素判定正确
-    '“强盗”集团' 行像素 (13,168,105) → True                  ← 只有当前会话高亮
+    标题 read_title() = '“摸鱼”集团(5)'    ← 权威：微信停在摸鱼集团
+    '林小满' 行像素 (47,47,48)  → _is_row_selected = False   ← 像素判定正确
+    '“摸鱼”集团' 行像素 (13,168,105) → True                  ← 只有当前会话高亮
 
 即像素级判定没错，是 `_switch_chat(force=False)` 的**第三级兜底**把标题读到的
 否定证据盖掉了：`_current_chat` 只在点击成功时更新，用户手动切换微信不会通知
@@ -23,11 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wx_backend.visual_backend import VisualBackend
 
-TARGET = "王文生"
-OTHER_TITLE = "“强盗”集团(5)"
+TARGET = "林小满"
+OTHER_TITLE = "“摸鱼”集团(5)"
 
 
-def make_backend(titles, highlight=False, current="王文生"):
+def make_backend(titles, highlight=False, current="林小满"):
     """VisualBackend 桩：不连微信，只装配 _switch_chat 判定所需的字段。"""
     b = VisualBackend.__new__(VisualBackend)
     b._hwnd = 1
@@ -74,10 +74,10 @@ class TestSwitchChatToggleGuard(unittest.TestCase):
     def test_title_variant_matches_skips_click(self):
         """OCR 变体是同一会话 → 不点击。
 
-        真机形态差异：列表区那条读成「强盗"集团」（前引号被吃掉），标题区读
-        成「“强盗”集团(5)」。严格相等会判成"不在目标会话"→ 白点一下反而
+        真机形态差异：列表区那条读成「摸鱼"集团」（前引号被吃掉），标题区读
+        成「“摸鱼”集团(5)」。严格相等会判成"不在目标会话"→ 白点一下反而
         toggle 取消选中、消息区变空。"""
-        variant = '强盗"集团'
+        variant = '摸鱼"集团'
         b = make_backend([OTHER_TITLE], highlight=False, current="")
         b._session_coords = {variant: (300, 294)}
         with mock.patch("pyautogui.click") as click, mock.patch("time.sleep"):
@@ -102,7 +102,7 @@ class TestSwitchChatToggleGuard(unittest.TestCase):
 
     def test_no_title_other_memory_clicks(self):
         """标题读不到 + 像素不命中 + 内存状态不是目标 → 必须点击。"""
-        b = make_backend([None, None], highlight=False, current="杨冬梅")
+        b = make_backend([None, None], highlight=False, current="周雨桐")
         ok, clicks = self._click_count(b)
         self.assertTrue(ok)
         self.assertEqual(clicks, 1, "内存状态也非目标时应点击切换")

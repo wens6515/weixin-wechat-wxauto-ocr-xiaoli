@@ -711,11 +711,11 @@ class TestGroupNameChain(unittest.TestCase):
         （每条带各自发送者名，只包群聊名前缀在 call_chat_ai 完成）。
 
         RED 复现：旧实现 multi_sender 信号不存在，call_chat_ai 把最后一条
-        sender 再包一层 → '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗'。"""
+        sender 再包一层 → '群聊：群名 林小满：哆拉A萝：内容\n林小满：在吗'。"""
         bot = _make_bot()
         bot.wx = _FakeWx([
             _text_msg("哆拉A萝", "豆包有学生优惠了 @小漓", "m1"),
-            _text_msg("王文生", "在吗 @小漓", "m2"),
+            _text_msg("林小满", "在吗 @小漓", "m2"),
         ])
         bot.wx._current_is_group = True
         bot._tick_poll_outbox = lambda: None
@@ -737,7 +737,7 @@ class TestGroupNameChain(unittest.TestCase):
         user_msg = calls.get("user_msg", "")
         self.assertIn("哆拉A萝：豆包有学生优惠了", user_msg,
                       "合并文本第一条带各自发送者名")
-        self.assertIn("王文生：在吗", user_msg,
+        self.assertIn("林小满：在吗", user_msg,
                       "合并文本第二条带各自发送者名")
 
 
@@ -752,7 +752,7 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
     call_chat_ai）一个都不 mock。
 
     RED 复现（wave1 缺陷）：多发送者时 call_chat_ai 把最后一条 sender 再包
-    一层 → '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗' 双层嵌套。
+    一层 → '群聊：群名 林小满：哆拉A萝：内容\n林小满：在吗' 双层嵌套。
     """
 
     def _final_decorated(self, msgs, is_group=True):
@@ -814,16 +814,16 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
         """多发送者合并全链路：最终 decorated = 群聊名一次 + 每条 sender
         各自在内容前 + 无双层嵌套。
         RED 复现：旧实现把最后一条 sender 再包一层 →
-        '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗'。"""
+        '群聊：群名 林小满：哆拉A萝：内容\n林小满：在吗'。"""
         content = self._final_decorated([
             _text_msg("哆拉A萝", "豆包有学生优惠了@小漓", "m1"),
-            _text_msg("王文生", "在吗@小漓", "m2"),
+            _text_msg("林小满", "在吗@小漓", "m2"),
         ])
         self.assertEqual(content,
-                         "群聊：小明 哆拉A萝：豆包有学生优惠了\n王文生：在吗",
+                         "群聊：小明 哆拉A萝：豆包有学生优惠了\n林小满：在吗",
                          "多发送者最终 decorated：群聊名只一次、每条 sender 各自")
         self.assertEqual(content.count("群聊：小明"), 1, "群聊名只能出现一次")
-        self.assertNotIn("王文生：哆拉A萝", content, "不得出现双层嵌套")
+        self.assertNotIn("林小满：哆拉A萝", content, "不得出现双层嵌套")
 
     def test_group_no_sender_fallback_chat_name(self):
         """sender 缺失（空字符串，视觉层未读到）：最终 decorated 用群聊名
@@ -841,9 +841,9 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
     def test_private_format_unchanged(self):
         """私聊全链路：格式保持「私聊 - 发送者名：内容」不变。"""
         content = self._final_decorated([
-            _text_msg("王文生", "在吗", "m1"),
+            _text_msg("林小满", "在吗", "m1"),
         ], is_group=False)
-        self.assertEqual(content, "私聊 - 王文生：在吗",
+        self.assertEqual(content, "私聊 - 林小满：在吗",
                          "私聊格式保持不变")
 
 

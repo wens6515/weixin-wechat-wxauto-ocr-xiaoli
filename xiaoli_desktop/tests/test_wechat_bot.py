@@ -252,7 +252,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
             def iter_sessions(self):
                 calls["sessions"] += 1
-                return iter(["王文生", "杨冬梅"])
+                return iter(["林小满", "周雨桐"])
 
             def get_messages(self, chat, assume_switched=False):
                 return []  # 无消息 → 不触发后续处理
@@ -354,7 +354,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         handled = []
 
         class FakeWx:
-            _current_is_group = True  # 标题 '强盗"集团(5)' 判定
+            _current_is_group = True  # 标题 '摸鱼"集团(5)' 判定
             read_marks = []           # mark_session_read 调用记录
 
             def mark_session_read(self):
@@ -403,7 +403,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
     def test_private_msg_after_group_not_filtered_by_at(self):
         """私聊在群聊之后处理：_current_is_group 缓存残留 True 不得让私聊走 @ 过滤。
 
-        回归（实测日志）：bot 处理完群聊后，私聊「王文生」被判群聊走
+        回归（实测日志）：bot 处理完群聊后，私聊「林小满」被判群聊走
         「群聊消息未 @小漓」跳过。根因：_handle_unread 在 analyze_window
         （read_title 刷新 _current_is_group 为本次会话权威值）之前读取旧缓存
         判定 is_group，局部变量不随刷新更新。
@@ -430,10 +430,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
             def get_messages(self, chat, assume_switched=False):
                 # 联合 OCR 契约：读取消息时解析标题刷新 _current_is_group
-                # （私聊标题「王文生」无括号人数 → False）
+                # （私聊标题「林小满」无括号人数 → False）
                 self._current_is_group = False
                 return [
-                    WeChatMessage(id="v1", chat=chat, sender="王文生",
+                    WeChatMessage(id="v1", chat=chat, sender="林小满",
                                   content="在吗", type=MessageType.TEXT),
                 ]
 
@@ -458,7 +458,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                          return_value=(True, False, None)), \
              _mock.patch.object(bot, "_tick_poll_outbox"):
             bot.process_new_messages()
-        self.assertEqual(handled, [("王文生", "在吗")],
+        self.assertEqual(handled, [("林小满", "在吗")],
                          "私聊不应被上一轮群聊的 _current_is_group 残留误判为群聊")
 
     def test_group_message_with_at_is_handled(self):
@@ -562,7 +562,7 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
             )
 
         with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
-            reply = bot.call_chat_ai("强盗”集团", user_msg, **kwargs)
+            reply = bot.call_chat_ai("摸鱼”集团", user_msg, **kwargs)
         self.assertEqual(reply, "ok")
         content = sent["json"]["messages"][-1]["content"]
         # 沉浸要求已随默认人设内置（运行时注入机制已删）——user 消息即原文
@@ -572,7 +572,7 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         bot = self._make()
         content = self._user_msg_content(
             bot, sender_name="哆拉A萝", is_group=True)
-        self.assertEqual(content, "群聊：强盗”集团 哆拉A萝：豆包有学生优惠了",
+        self.assertEqual(content, "群聊：摸鱼”集团 哆拉A萝：豆包有学生优惠了",
                          "群聊 decorated 必须为「群聊名+发送者名+内容」")
 
     def test_group_without_sender_falls_back_chat_name(self):
@@ -580,19 +580,19 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         不退化 f"群聊：{user_msg}" 无名字分支。"""
         bot = self._make()
         content = self._user_msg_content(bot, sender_name=None, is_group=True)
-        self.assertEqual(content, "群聊：强盗”集团：豆包有学生优惠了",
+        self.assertEqual(content, "群聊：摸鱼”集团：豆包有学生优惠了",
                          "群聊无发送者名时用群聊名兜底，不得退化为无名字")
 
     def test_group_multi_sender_no_double_wrap(self):
         """多发送者已装饰文本：只包『群聊：群名』前缀，不再重包 sender。
         RED 复现：旧实现把最后一条 sender 再包一层 →
-        '群聊：群名 王文生：哆拉A萝：内容\n王文生：在吗' 双层嵌套。"""
+        '群聊：群名 林小满：哆拉A萝：内容\n林小满：在吗' 双层嵌套。"""
         bot = self._make()
         content = self._user_msg_content(
-            bot, "哆拉A萝：豆包有学生优惠了\n王文生：在吗",
-            sender_name="王文生", is_group=True, multi_sender=True)
+            bot, "哆拉A萝：豆包有学生优惠了\n林小满：在吗",
+            sender_name="林小满", is_group=True, multi_sender=True)
         self.assertEqual(content,
-                         "群聊：强盗”集团 哆拉A萝：豆包有学生优惠了\n王文生：在吗",
+                         "群聊：摸鱼”集团 哆拉A萝：豆包有学生优惠了\n林小满：在吗",
                          "多发送者只包群聊名前缀，不得重包 sender")
 
     def test_group_multi_sender_branch_wins_over_sender_name(self):
@@ -600,9 +600,9 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         （视觉层只给最后一条）也不得重包或退化兜底。"""
         bot = self._make()
         content = self._user_msg_content(
-            bot, "哆拉A萝：你好\n王文生：在吗",
+            bot, "哆拉A萝：你好\n林小满：在吗",
             sender_name=None, is_group=True, multi_sender=True)
-        self.assertEqual(content, "群聊：强盗”集团 哆拉A萝：你好\n王文生：在吗",
+        self.assertEqual(content, "群聊：摸鱼”集团 哆拉A萝：你好\n林小满：在吗",
                          "多发送者分支不依赖 sender_name")
 
     def test_group_single_multiline_not_multi_sender(self):
@@ -611,14 +611,14 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         bot = self._make()
         content = self._user_msg_content(
             bot, "第一行\n第二行", sender_name="哆拉A萝", is_group=True)
-        self.assertEqual(content, "群聊：强盗”集团 哆拉A萝：第一行\n第二行",
+        self.assertEqual(content, "群聊：摸鱼”集团 哆拉A萝：第一行\n第二行",
                          "单条多行仍走单条分支（群聊名+sender+内容）")
 
     def test_private_format_unchanged_with_sender(self):
         bot = self._make()
         content = self._user_msg_content(
-            bot, sender_name="王文生", is_group=False)
-        self.assertEqual(content, "私聊 - 王文生：豆包有学生优惠了",
+            bot, sender_name="林小满", is_group=False)
+        self.assertEqual(content, "私聊 - 林小满：豆包有学生优惠了",
                          "私聊格式保持现状不变")
 
     def test_private_format_unchanged_without_sender(self):
@@ -648,11 +648,11 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
                 status_code=200,
                 text="{}",
                 json=lambda: {"choices": [{"message": {
-                    "content": "[私聊 - 王文生] 你好呀"}}]},
+                    "content": "[私聊 - 林小满] 你好呀"}}]},
             )
 
         with mock.patch("wechat_bot.requests.post", side_effect=fake_post):
-            out = bot.call_chat_ai("王文生", "在吗", sender_name="王文生")
+            out = bot.call_chat_ai("林小满", "在吗", sender_name="林小满")
         self.assertEqual(out, "你好呀", "回复开头的 [私聊 - 名字] 前缀应被剥除")
 
 
@@ -804,7 +804,7 @@ class TestImageCaptureBranches(unittest.TestCase):
              _mock.patch.object(bot, "_copy_image_from_viewer",
                                 return_value="/tmp/orig.jpg") as copy, \
              _mock.patch.object(bot, "_crop_media_region") as crop:
-            out = bot._capture_media_images("王文生")
+            out = bot._capture_media_images("林小满")
         self.assertEqual(out, ["/tmp/orig.jpg"])
         pg.click.assert_called_once_with(160, 260)  # 媒体矩形中心
         fw.assert_called_with("图片和视频")
@@ -822,7 +822,7 @@ class TestImageCaptureBranches(unittest.TestCase):
              _mock.patch.object(bot, "_copy_image_from_viewer") as copy, \
              _mock.patch.object(bot, "_crop_media_region",
                                 return_value="/tmp/sticker.jpg") as crop:
-            out = bot._capture_media_images("王文生")
+            out = bot._capture_media_images("林小满")
         self.assertEqual(out, ["/tmp/sticker.jpg"])
         pg.hotkey.assert_not_called()   # 表情路线绝不 Ctrl+C
         pg.press.assert_not_called()    # 绝不 ESC——否则关掉微信主窗口
@@ -840,7 +840,7 @@ class TestImageCaptureBranches(unittest.TestCase):
                                 return_value=None), \
              _mock.patch.object(bot, "_crop_media_region",
                                 return_value="/tmp/f.jpg") as crop:
-            out = bot._capture_media_images("王文生")
+            out = bot._capture_media_images("林小满")
         self.assertEqual(out, ["/tmp/f.jpg"])
         pg.press.assert_called_once_with("esc")
         crop.assert_called_once_with(100, 200, 220, 320)
@@ -857,7 +857,7 @@ class TestImageCaptureBranches(unittest.TestCase):
              _mock.patch.object(bot, "_copy_image_from_viewer",
                                 side_effect=["/tmp/a.jpg", "/tmp/b.jpg"]), \
              _mock.patch.object(bot, "_crop_media_region") as crop:
-            out = bot._capture_media_images("王文生")
+            out = bot._capture_media_images("林小满")
         self.assertEqual(out, ["/tmp/a.jpg", "/tmp/b.jpg"])
         pg.click.assert_any_call(160, 260)  # 第一张中心
         pg.click.assert_any_call(160, 460)  # 第二张中心
@@ -869,7 +869,7 @@ class TestImageCaptureBranches(unittest.TestCase):
         bot = self._bot()
         with _mock.patch("wechat_bot.pyautogui"), \
              _mock.patch("wechat_bot.find_window_by_title", return_value=None):
-            bot._capture_media_images("王文生", min_top=456,
+            bot._capture_media_images("林小满", min_top=456,
                                       exclude_rows=[(915, 985)])
         bot.wx.media_screen_boxes.assert_called_once_with(
             min_top=456, exclude_rows=[(915, 985)])
@@ -885,7 +885,7 @@ class TestImageCaptureBranches(unittest.TestCase):
              _mock.patch.object(bot, "_copy_image_from_viewer"), \
              _mock.patch.object(bot, "_crop_media_region",
                                 side_effect=[None, "/tmp/b.jpg"]) as crop:
-            out = bot._capture_media_images("王文生")
+            out = bot._capture_media_images("林小满")
         self.assertEqual(out, ["/tmp/b.jpg"])
         self.assertEqual(crop.call_count, 2)
 
@@ -1068,7 +1068,7 @@ class TestClearHistory(unittest.TestCase):
         bot = self._make()
         with tempfile.TemporaryDirectory() as tmp:
             bot.memory_file = os.path.join(tmp, "memory.json")
-            bot.memory_db = {"王文生": [
+            bot.memory_db = {"林小满": [
                 {"role": "user", "content": "旧记忆", "time": "2026-06-14 10:00:00"}]}
             bot.clear_history()
             self.assertEqual(bot.memory_db, {}, "内存记忆应清空")
@@ -1280,7 +1280,7 @@ class TestCallVisionApi(unittest.TestCase):
         captured, patcher = self._post(
             {"body": {"choices": [{"message": {"content": "ok"}}]}})
         with patcher:
-            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
@@ -1341,7 +1341,7 @@ class TestCallVisionApi(unittest.TestCase):
         captured, patcher = self._post(
             {"body": {"choices": [{"message": {"content": "ok"}}]}})
         with patcher:
-            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
@@ -1365,7 +1365,7 @@ class TestCallVisionApi(unittest.TestCase):
         captured, patcher = self._post(
             {"body": {"choices": [{"message": {"content": "ok"}}]}})
         with patcher:
-            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
         msgs = captured["json"]["messages"]
         # 无 persona → 历史为第一条，当前时间 system 紧贴当前消息
         self.assertEqual(msgs[0]["content"], "没时间戳的历史",
@@ -1382,7 +1382,7 @@ class TestCallVisionApi(unittest.TestCase):
             {"body": {"choices": [{"message": {
                 "content": "[2026-06-14 10:00:00] 你上一条说的是吃饭"}}]}})
         with patcher:
-            result = bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+            result = bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
         self.assertEqual(result, {"kind": "text", "content": "你上一条说的是吃饭"})
 
     def test_text_reply_strips_private_chat_prefix(self):
@@ -1391,9 +1391,9 @@ class TestCallVisionApi(unittest.TestCase):
         bot._get_history = lambda chat_id: []
         captured, patcher = self._post(
             {"body": {"choices": [{"message": {
-                "content": "[私聊 - 王文生] 你上一条说的是吃饭"}}]}})
+                "content": "[私聊 - 林小满] 你上一条说的是吃饭"}}]}})
         with patcher:
-            result = bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+            result = bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
         self.assertEqual(result, {"kind": "text", "content": "你上一条说的是吃饭"})
 
     def test_history_trimmed_by_budget_before_payload(self):
@@ -1421,7 +1421,7 @@ class TestCallVisionApi(unittest.TestCase):
 
         with _mock.patch("wechat_bot.fit_messages_in_budget", side_effect=fake_fit), \
              patcher:
-            bot.call_vision_api(self.TEXT_ONLY, chat_id="王文生")
+            bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
 
         self.assertEqual(len(calls), 1,
                          "payload 构造前必须调用一次 fit_messages_in_budget")
@@ -1640,8 +1640,8 @@ class TestVisionRouteImmersion(unittest.TestCase):
             return {"kind": "text", "content": "嗨"}
 
         bot.call_vision_api = fake_vision
-        bot._vision_route("王文生", "王文生", "你好呀")
-        self.assertTrue(sent["text"].endswith("用户消息：\n私聊 - 王文生：你好呀"),
+        bot._vision_route("林小满", "林小满", "你好呀")
+        self.assertTrue(sent["text"].endswith("用户消息：\n私聊 - 林小满：你好呀"),
                         "user 消息必须是 decorated 原文（无注入后缀）")
         self.assertNotIn("【角色沉浸要求】", sent["text"],
                          "运行时不得再拼接沉浸要求（人设已内置）")
@@ -1696,7 +1696,7 @@ class TestVisionRoutePersona(unittest.TestCase):
         bot._apply_vision_result = lambda *a, **k: True
         captured, patcher = self._capture_payload(bot)
         with patcher:
-            bot._vision_route("王文生", "王文生", "你好呀")
+            bot._vision_route("林小满", "林小满", "你好呀")
 
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system", "人设必须由 system 消息承载")
@@ -1709,7 +1709,7 @@ class TestVisionRoutePersona(unittest.TestCase):
         self.assertEqual(msgs[2]["role"], "user")
         user_text = msgs[2]["content"][0]["text"]
         self.assertIn("判断用户的消息", user_text, "user 消息仍含路由指令")
-        self.assertIn("用户消息：\n私聊 - 王文生：你好呀", user_text,
+        self.assertIn("用户消息：\n私聊 - 林小满：你好呀", user_text,
                       "sender 必须进 prompt（修复：vision 单调用分流丢失发送者信息）")
         self.assertNotIn("你叫小漓", user_text,
                          "不变量：_vision_route 的 user prompt 不重复注入人设")
@@ -1721,7 +1721,7 @@ class TestVisionRoutePersona(unittest.TestCase):
         bot._apply_vision_result = lambda *a, **k: True
         captured, patcher = self._capture_payload(bot)
         with patcher:
-            result = bot._vision_route("王文生", "王文生", "你好")
+            result = bot._vision_route("林小满", "林小满", "你好")
 
         self.assertTrue(result, "空人设时调用链路不报错、正常返回")
         msgs = captured["json"]["messages"]
@@ -1733,7 +1733,7 @@ class TestVisionRoutePersona(unittest.TestCase):
         self.assertEqual(msgs[1]["role"], "user")
         user_text = msgs[1]["content"][0]["text"]
         self.assertIn("判断用户的消息", user_text, "路由指令必须保留")
-        self.assertIn("用户消息：\n私聊 - 王文生：你好", user_text,
+        self.assertIn("用户消息：\n私聊 - 林小满：你好", user_text,
                       "私聊 decorated 带 sender（空人设不破坏 sender 分流）")
 
     def test_group_single_sender_goes_to_user_text(self):
@@ -1743,28 +1743,28 @@ class TestVisionRoutePersona(unittest.TestCase):
         bot._apply_vision_result = lambda *a, **k: True
         captured, patcher = self._capture_payload(bot)
         with patcher:
-            bot._vision_route("强盗\"集团", "王文生", "我是谁",
+            bot._vision_route("摸鱼\"集团", "林小满", "我是谁",
                               is_group=True, multi_sender=False)
         msgs = captured["json"]["messages"]
         user_text = msgs[1]["content"][0]["text"]
-        self.assertIn("用户消息：\n群聊：强盗\"集团 王文生：我是谁", user_text,
+        self.assertIn("用户消息：\n群聊：摸鱼\"集团 林小满：我是谁", user_text,
                       "群聊名与发送者必须都进 prompt")
 
     def test_group_multi_sender_no_double_wrap(self):
         """多发送者：只包「群聊：群名」前缀、不重包 sender（防「群聊：群名
-        王文生：王文生：」双层嵌套——text 里每条已自带发送者名）。"""
+        林小满：林小满：」双层嵌套——text 里每条已自带发送者名）。"""
         bot = self._agent("")
         bot._apply_vision_result = lambda *a, **k: True
         captured, patcher = self._capture_payload(bot)
         with patcher:
             bot._vision_route(
-                "强盗\"集团", "王文生", "王文生：内容A\n李四：内容B",
+                "摸鱼\"集团", "林小满", "林小满：内容A\n李四：内容B",
                 is_group=True, multi_sender=True)
         msgs = captured["json"]["messages"]
         user_text = msgs[1]["content"][0]["text"]
-        self.assertIn("用户消息：\n群聊：强盗\"集团 王文生：内容A\n李四：内容B",
+        self.assertIn("用户消息：\n群聊：摸鱼\"集团 林小满：内容A\n李四：内容B",
                       user_text, "多发送者只包群名前缀")
-        self.assertNotIn("王文生：王文生", user_text,
+        self.assertNotIn("林小满：林小满", user_text,
                          "不重包 sender（防双层嵌套）")
 
 
@@ -1774,7 +1774,7 @@ class TestChatCardOverrides(unittest.TestCase):
     def _bot(self):
         bot = WeChatBot.__new__(WeChatBot)
         bot.chat_card_params = {
-            "王文生": {"system_prompt": "SP", "chat_model": "p1:m1",
+            "林小满": {"system_prompt": "SP", "chat_model": "p1:m1",
                      "ai_api_url": "https://x/v1/chat/completions",
                      "ai_api_key": "K", "temperature": 0.1, "top_p": 0.2,
                      "max_history": 55}}
@@ -1792,15 +1792,15 @@ class TestChatCardOverrides(unittest.TestCase):
 
     def test_override_lookup_and_miss(self):
         bot = self._bot()
-        self.assertEqual(bot._chat_overrides("王文生")["system_prompt"], "SP")
+        self.assertEqual(bot._chat_overrides("林小满")["system_prompt"], "SP")
         self.assertEqual(bot._chat_overrides("路人"), {})
         self.assertEqual(bot._chat_overrides(None), {})
 
     def test_recent_cap_per_chat(self):
         bot = self._bot()
-        self.assertEqual(bot._recent_cap("王文生"), 30)   # min(keep=30, 卡55)
+        self.assertEqual(bot._recent_cap("林小满"), 30)   # min(keep=30, 卡55)
         bot.memory_keep_recent = 100
-        self.assertEqual(bot._recent_cap("王文生"), 55)   # 卡 max_history 覆盖
+        self.assertEqual(bot._recent_cap("林小满"), 55)   # 卡 max_history 覆盖
         self.assertEqual(bot._recent_cap("路人"), 100)    # 未绑定走全局
 
     def _ready_for_call(self, bot, d):
@@ -1828,7 +1828,7 @@ class TestChatCardOverrides(unittest.TestCase):
                 return {"choices": [{"message": {"content": "ok"}}]}
 
             bot._post_chat_completions = fake_post
-            reply = bot.call_chat_ai("王文生", "hi", sender_name="王")
+            reply = bot.call_chat_ai("林小满", "hi", sender_name="王")
             self.assertEqual(reply, "ok")
             self.assertEqual(captured["url"], "https://x/v1/chat/completions")
             self.assertEqual(captured["auth"], "Bearer K")

@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xiaoli_bot import AgentBot
 
-CHAT = "王文生"
+CHAT = "林小满"
 STAGE = "正在跑单元测试"
 
 

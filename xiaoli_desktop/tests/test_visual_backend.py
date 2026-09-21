@@ -60,7 +60,7 @@ def _solid(size, color):
 
 class TestNormCjk(unittest.TestCase):
     def test_removes_space_between_cjk(self):
-        self.assertEqual(_norm_cjk("王 文 生"), "王文生")
+        self.assertEqual(_norm_cjk("林 小 满"), "林小满")
 
     def test_keeps_time_separator(self):
         self.assertEqual(_norm_cjk("20:14"), "20:14")
@@ -124,7 +124,7 @@ class TestOcrImageMocked(unittest.TestCase):
         import numpy as np
 
         class _FakeOut:
-            txts = ("王文生", "[图片]")
+            txts = ("林小满", "[图片]")
             scores = (0.99, 0.95)
             boxes = np.array([
                 [[10, 20], [100, 20], [100, 50], [10, 50]],
@@ -139,7 +139,7 @@ class TestOcrImageMocked(unittest.TestCase):
         img = _solid((200, 200), (255, 255, 255))
         items = ocr_image(img)
         self.assertEqual(items, [
-            {"text": "王文生", "x": 10, "y": 20, "w": 90, "h": 30},
+            {"text": "林小满", "x": 10, "y": 20, "w": 90, "h": 30},
             {"text": "[图片]", "x": 5, "y": 80, "w": 55, "h": 20},
         ])
 
@@ -227,7 +227,7 @@ class TestFilterMediaBoxes(unittest.TestCase):
     """media_screen_boxes 的纯几何过滤：min_top 下沿阈值 + exclude_rows
     行区间剔除（文件卡片类型图标碎片与文件名行同块相交）。"""
 
-    # 真机探针实测几何（王文生窗口，文件+图片同轮）：
+    # 真机探针实测几何（林小满窗口，文件+图片同轮）：
     # bot 侧 docx 图标碎片 / 对方真图 / 对方 PDF 卡图标碎片
     BOXES = [(320, 389, 533, 588), (565, 844, 119, 398), (918, 987, 470, 525)]
 
@@ -302,9 +302,9 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
-                    {"text": "王文生", "x": 0, "y": 20, "w": 60, "h": 20},
+                    {"text": "林小满", "x": 0, "y": 20, "w": 60, "h": 20},
                     {"text": "20:14", "x": 0, "y": 40, "w": 40, "h": 15},
-                    {"text": "杨冬梅", "x": 0, "y": 70, "w": 60, "h": 20},
+                    {"text": "周雨桐", "x": 0, "y": 70, "w": 60, "h": 20},
                     {"text": "昨天", "x": 0, "y": 90, "w": 30, "h": 15},
                 ])
     def test_iter_sessions_yields_names(self, _ocr, _cap, _find):
@@ -312,7 +312,7 @@ class TestVisualBackend(unittest.TestCase):
         b.connect()
         names = list(b.iter_sessions())
         # 时间戳/日期行被过滤
-        self.assertEqual(names, ["王文生", "杨冬梅"])
+        self.assertEqual(names, ["林小满", "周雨桐"])
         b.close()
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
@@ -330,21 +330,21 @@ class TestVisualBackend(unittest.TestCase):
     def test_get_messages_merges_adjacent_lines(self, _ocr, _cap, _find, _switch):
         b = VisualBackend()
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 2)
         self.assertTrue(all(isinstance(m, WeChatMessage) for m in msgs))
         self.assertEqual(msgs[0].content, "你好")
         self.assertEqual(msgs[1].content, "今天天气不错")
-        self.assertEqual(msgs[0].chat, "王文生")
+        self.assertEqual(msgs[0].chat, "林小满")
         b.close()
 
     def test_get_messages_union_force_reswitch_on_empty_title(self):
         """RED 复现：点击后标题区空（toggle 取消选中/黑图）→ 联合 OCR
         必须 force 重切（原 analyze_window 防线迁入 get_messages 联合路径）。
         否则读的是空消息区（has_other=False 判空跳过），红圈不消导致
-        5 轮循环漏消息——真机日志：王文生新消息 5 轮未处理。"""
+        5 轮循环漏消息——真机日志：林小满新消息 5 轮未处理。"""
         b = VisualBackend()
-        b._current_chat = "王文生"  # assume 路径前提：analyze 刚完成切换
+        b._current_chat = "林小满"  # assume 路径前提：analyze 刚完成切换
         # 只有消息带条目（标题带空）→ 触发 force 重切
         items = [{"text": "在吗", "x": 40, "y": 120, "w": 60, "h": 20}]
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
@@ -361,7 +361,7 @@ class TestVisualBackend(unittest.TestCase):
                         return_value=[]):
             b._hwnd = 0x1234
             b._last_shot = None
-            msgs = b.get_messages("王文生", assume_switched=True)
+            msgs = b.get_messages("林小满", assume_switched=True)
         force_calls = [c for c in m_switch.call_args_list if c.kwargs.get("force")]
         self.assertTrue(force_calls, "标题区空（联合 OCR）应触发 force 重切")
         self.assertTrue(any(m.content == "在吗" for m in msgs),
@@ -427,7 +427,7 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 1, "同一气泡多行应合并为一条消息")
         self.assertIn("镜头2", msgs[0].content)
         self.assertIn("镜头3", msgs[0].content)
@@ -449,7 +449,7 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
-        with mock.patch.object(b, "read_title", return_value="王文生"):
+        with mock.patch.object(b, "read_title", return_value="林小满"):
             # OCR 文字（1x 坐标）：对方气泡 1x [40,30,240,110]、
             # 自己气泡 1x [160,150,360,210]
             _ocr.return_value = [
@@ -457,11 +457,11 @@ class TestVisualBackend(unittest.TestCase):
                 {"text": "镜头2：特写侧脸", "x": 50, "y": 70, "w": 100, "h": 15},
                 {"text": "收到任务啦", "x": 170, "y": 160, "w": 100, "h": 15},
             ]
-            msgs = b.get_messages("王文生")
+            msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 2, "应分组成 2 条（对方气泡 + 自己气泡）")
         self.assertIn("镜头1", msgs[0].content)
         self.assertIn("镜头2", msgs[0].content)
-        self.assertEqual(msgs[0].sender, "王文生", "对方气泡 → 私聊 sender=会话名")
+        self.assertEqual(msgs[0].sender, "林小满", "对方气泡 → 私聊 sender=会话名")
         self.assertEqual(msgs[1].content, "收到任务啦")
         self.assertEqual(msgs[1].sender, "self", "绿色气泡 → self")
         b.close()
@@ -477,7 +477,7 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
-        with mock.patch.object(b, "read_title", return_value="王文生"), \
+        with mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch("wx_backend.visual_backend.detect_avatar_tops",
                         return_value=[150]):
             _ocr.return_value = [
@@ -486,7 +486,7 @@ class TestVisualBackend(unittest.TestCase):
                 # 头像文字（落在自己头像矩形 (336,150,64,40) 内）
                 {"text": "蓝色大肥鱼", "x": 355, "y": 155, "w": 30, "h": 10},
             ]
-            msgs = b.get_messages("王文生")
+            msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 1, "头像文字应被排除，只剩气泡内容")
         self.assertIn("镜头1", msgs[0].content)
         self.assertNotIn("蓝色大肥鱼", msgs[0].content)
@@ -501,7 +501,7 @@ class TestVisualBackend(unittest.TestCase):
     def test_get_messages_empty_ocr(self, _ocr, _cap, _find, _switch):
         b = VisualBackend()
         b.connect()
-        self.assertEqual(b.get_messages("王文生"), [])
+        self.assertEqual(b.get_messages("林小满"), [])
         b.close()
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
@@ -524,11 +524,11 @@ class TestVisualBackend(unittest.TestCase):
         """时间戳分隔消息块；x 中线判 self/对方；噪音过滤。"""
         b = VisualBackend()
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 2)
         # 时间戳行被分隔，不成为消息
         self.assertEqual(msgs[0].content, "你好")
-        self.assertEqual(msgs[0].sender, "王文生")   # 左侧 → 对方（私聊发送人=会话名）
+        self.assertEqual(msgs[0].sender, "林小满")   # 左侧 → 对方（私聊发送人=会话名）
         self.assertEqual(msgs[1].content, "我回复的")
         self.assertEqual(msgs[1].sender, "self")   # 右侧 → 自己
         b.close()
@@ -557,7 +557,7 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)  # 全窗，与配置解耦、确定性
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 1, "发送按钮应被过滤，只剩用户真实消息")
         self.assertEqual(msgs[0].content, "你好")
         b.close()
@@ -576,16 +576,16 @@ class TestVisualBackend(unittest.TestCase):
                                                            _find, _switch):
         """私聊（非群聊）时消息区左侧的发送人就是会话名本身。
 
-        RED 复现：真机日志 [最新消息] sender='未知'——私聊王文生会话里
+        RED 复现：真机日志 [最新消息] sender='未知'——私聊林小满会话里
         左侧消息的 sender 硬编码"未知"，上层拿不到发送人。私聊场景
         sender 应为 chat（会话名=发送人），群聊才是消息区气泡名。
         """
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0].sender, "王文生",
+        self.assertEqual(msgs[0].sender, "林小满",
                          "私聊左侧消息 sender 应为会话名，而非'未知'")
         b.close()
 
@@ -607,7 +607,7 @@ class TestVisualBackend(unittest.TestCase):
         """群聊时消息区气泡上方有发送者名（短文本行紧贴内容），
         sender 应为发送者名，且名字行本身不得成为一条消息。
 
-        RED 复现：真机读「强盗”集团」群聊，OCR 读到 '哆拉A萝'（发送者）
+        RED 复现：真机读「摸鱼”集团」群聊，OCR 读到 '哆拉A萝'（发送者）
         与 '豆包有学生优惠了'（内容）两条独立项——当前实现把名字行
         当成独立消息（sender=群名），上层拿不到发送者。
         真机 y 差：名字-内容 106px，内容块间最小 186px → 可区分。
@@ -615,7 +615,7 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
-        msgs = b.get_messages("强盗”集团")
+        msgs = b.get_messages("摸鱼”集团")
         self.assertEqual(len(msgs), 1, "发送者名行不应成为独立消息")
         self.assertEqual(msgs[0].sender, "哆拉A萝", "群聊 sender 应为发送者名")
         self.assertEqual(msgs[0].content, "豆包有学生优惠了")
@@ -639,11 +639,11 @@ class TestVisualBackend(unittest.TestCase):
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
         with mock.patch.object(b, "read_title",
-                               side_effect=[None, "王文生"]) as _rt:
-            b.get_messages("王文生")
+                               side_effect=[None, "林小满"]) as _rt:
+            b.get_messages("林小满")
         self.assertEqual(_rt.call_count, 2, "read_title None 后应重试一次")
         force_calls = [c for c in _switch.call_args_list
-                       if c == mock.call("王文生", force=True)]
+                       if c == mock.call("林小满", force=True)]
         self.assertTrue(force_calls, "None 后应 force 重切会话恢复选中")
         b.close()
 
@@ -689,13 +689,13 @@ class TestVisualBackend(unittest.TestCase):
                                             _copy, _rect, _cap, _find):
         """发送中文必须走剪贴板粘贴，不能 typewrite 逐键模拟。
 
-        RED 复现：真机日志 🤖→[王文生] 显示正常回复，但微信输入框实际
+        RED 复现：真机日志 🤖→[林小满] 显示正常回复，但微信输入框实际
         只出现'（）'——pyautogui.typewrite 逐键模拟对非 ASCII（中文）
         无法映射键位，按键序列被中文输入法拦截成括号。
         """
         b = VisualBackend()
         b.connect()
-        self.assertTrue(b.send_text("王文生", "你好呀"))
+        self.assertTrue(b.send_text("林小满", "你好呀"))
         _click.assert_called_once()
         _copy.assert_called_once_with("你好呀")
         _hotkey.assert_called_once_with("ctrl", "v")
@@ -715,7 +715,7 @@ class TestVisualBackend(unittest.TestCase):
 
     def test_extract_session_names_excludes_top_title(self):
         """顶部标题（x 落在 [region[2]*w, (region[2]+0.17)*w) 区间，如置顶会话
-        在窗口顶部的标题）不应被误当会话列表条目——真机实测：置顶王文生时
+        在窗口顶部的标题）不应被误当会话列表条目——真机实测：置顶林小满时
         顶部标题 x=543（0.418w）被 +0.17 容差纳入，导致红圈 y 差 66>60 匹配失败。"""
         b = VisualBackend()
         b._hwnd = 0x1234
@@ -725,11 +725,11 @@ class TestVisualBackend(unittest.TestCase):
             # 顶部标题：x=543 = 0.4177w，在 region[2]=0.4165w 之外、+0.17 之内
             {"text": "干立牛", "x": 543, "y": 85, "w": 71, "h": 20},
             # 列表条目：x=217 = 0.167w，正常会话名
-            {"text": "强盗集团", "x": 217, "y": 293, "w": 131, "h": 20},
+            {"text": "摸鱼集团", "x": 217, "y": 293, "w": 131, "h": 20},
         ]):
             coords = b._extract_session_names(shot)
         self.assertNotIn("干立牛", coords)
-        self.assertIn("强盗集团", coords)
+        self.assertIn("摸鱼集团", coords)
 
     def test_extract_session_names(self):
         """会话名提取：整窗 OCR 聚类出会话名 + 坐标（预览类型已移除）。"""
@@ -738,16 +738,16 @@ class TestVisualBackend(unittest.TestCase):
         b._session_region = (0.09, 0.0855, 0.4165, 0.993)
         shot = _solid((1300, 1610), (255, 255, 255))
         with mock.patch("wx_backend.visual_backend.ocr_image", return_value=[
-            {"text": "王文生", "x": 214, "y": 163, "w": 73, "h": 20},
+            {"text": "林小满", "x": 214, "y": 163, "w": 73, "h": 20},
             {"text": "[文件] 部门简介.docx", "x": 220, "y": 203, "w": 291, "h": 20},
-            {"text": "杨冬梅", "x": 215, "y": 393, "w": 73, "h": 20},
+            {"text": "周雨桐", "x": 215, "y": 393, "w": 73, "h": 20},
             {"text": "[图片]", "x": 217, "y": 430, "w": 52, "h": 20},
-            {"text": "王美晨", "x": 216, "y": 506, "w": 73, "h": 20},
+            {"text": "陈嘉禾", "x": 216, "y": 506, "w": 73, "h": 20},
         ]):
             coords = b._extract_session_names(shot)
-        self.assertIn("王文生", coords)
-        self.assertIn("杨冬梅", coords)
-        self.assertIn("王美晨", coords)
+        self.assertIn("林小满", coords)
+        self.assertIn("周雨桐", coords)
+        self.assertIn("陈嘉禾", coords)
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
                 return_value=True)
@@ -775,11 +775,11 @@ class TestVisualBackend(unittest.TestCase):
                                                             _switch):
         """RED 复现：other 气泡框被误检在右侧（left>中线）时，头像排除
         不得把整个消息区当头像区——否则所有消息被丢弃，get_messages 读空
-        （真机根因：19:10 王文生已选中读 0 条，OCR 17 行全被 _in_avatar
+        （真机根因：19:10 林小满已选中读 0 条，OCR 17 行全被 _in_avatar
         丢弃，other_avatar_x_max 被右侧误检框污染成 1220）。"""
         b = VisualBackend()
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         self.assertTrue(msgs, "右侧误检 other 框不得导致消息全被头像区排除")
         self.assertTrue(any("你好" in m.content for m in msgs),
                         "「你好」应被读到（不被误判头像区）")
@@ -804,7 +804,7 @@ class TestVisualBackend(unittest.TestCase):
         """RED 复现：bot 文件卡片（media 框，无气泡）文件名 OCR 行 x 靠左、
         y 离头像中心 >35 → _is_self 降级判对方。修复后 media 头像几何判据
         把该行标 self。真机锚点：bot 发 index.html，卡片 media 框
-        l=334 < 中线 373 < r=613，文件名行 cx 靠左被判 '王文生'。"""
+        l=334 < 中线 373 < r=613，文件名行 cx 靠左被判 '林小满'。"""
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
 
@@ -818,13 +818,13 @@ class TestVisualBackend(unittest.TestCase):
             {"text": "index.html", "x": 150, "y": 290, "w": 40, "h": 20},
         ]
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         b.close()
         self.assertTrue(msgs, "bot 文件卡片文件名应被读到")
         file_msg = next((m for m in msgs if "index.html" in m.content), None)
         self.assertIsNotNone(file_msg, "应读到 index.html 消息")
         self.assertEqual(file_msg.sender, "self",
-                         "bot 文件卡片文件名不得判为对方（真机误判'王文生'）")
+                         "bot 文件卡片文件名不得判为对方（真机误判'林小满'）")
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
                 return_value=True)
@@ -846,7 +846,7 @@ class TestVisualBackend(unittest.TestCase):
         判成 is_self=False 气泡（非 media）。文件名行 x 靠左、y 离头像中心
         ≥35 → _bubble_self=False + _is_self 降级，sender 误判对方。修复后
         头像几何判据（首行 y 对齐右侧头像 top）优先于气泡色判 self。
-        真机锚点：22:39 王文生发纯文字，bot 文件卡片气泡 (913,1026,182,622,False)
+        真机锚点：22:39 林小满发纯文字，bot 文件卡片气泡 (913,1026,182,622,False)
         顶部 913 对齐 bot_tops=913，却因非绿被判对方走文件流程。"""
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
@@ -862,7 +862,7 @@ class TestVisualBackend(unittest.TestCase):
             {"text": "index.html", "x": 45, "y": 88, "w": 20, "h": 10},
         ]
         b.connect()
-        msgs = b.get_messages("王文生")
+        msgs = b.get_messages("林小满")
         b.close()
         self.assertTrue(msgs, "bot 文件卡片文件名应被读到")
         file_msg = next((m for m in msgs if "index.html" in m.content), None)
@@ -882,7 +882,7 @@ class TestVisualBackend(unittest.TestCase):
             return [0, 50] if side == "right" else [100]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -897,7 +897,7 @@ class TestVisualBackend(unittest.TestCase):
                         ]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[]):
-            win = b.analyze_window("王文生")
+            win = b.analyze_window("林小满")
         self.assertEqual(win["bot_bottom"], 100,
                          "bot_bottom = 我方最后头像之后第一条消息上边框（几何，不再取气泡 bottom）")
         self.assertEqual(win["other_text"], [(100, 130, 10, 160)],
@@ -912,7 +912,7 @@ class TestVisualBackend(unittest.TestCase):
             return [0] if side == "right" else []
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -923,7 +923,7 @@ class TestVisualBackend(unittest.TestCase):
                         return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[(0, 100, 100, 180)]):
-            win = b.analyze_window("王文生")
+            win = b.analyze_window("林小满")
         self.assertEqual(win["bot_bottom"], 200,
                          "无下一条消息时 bot_bottom = 消息区高度（几何兜底）")
         self.assertEqual(win["other_media"], [],
@@ -942,7 +942,7 @@ class TestVisualBackend(unittest.TestCase):
             return [85, 392] if side == "right" else [0, 250, 490, 588, 1055]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((747, 1135), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -954,7 +954,7 @@ class TestVisualBackend(unittest.TestCase):
                                       (392, 454, 131, 621, True)]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes",
                         return_value=[(733, 891, 160, 319)]):  # 只截图片中间段
-            win = b.analyze_window("王文生")
+            win = b.analyze_window("林小满")
         self.assertTrue(win["has_other"],
                         "气泡/media 漏检时，头像几何仍应判有对方新消息")
         self.assertEqual(win["bot_bottom"], 490,
@@ -970,7 +970,7 @@ class TestVisualBackend(unittest.TestCase):
             return [50, 200, 350] if side == "right" else [100, 400]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -979,7 +979,7 @@ class TestVisualBackend(unittest.TestCase):
                         side_effect=fake_avatar_tops), \
              mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
-            win = b.analyze_window("王文生", skip_bot=0)
+            win = b.analyze_window("林小满", skip_bot=0)
         self.assertEqual(win["bot_bottom"], 400,
                          "skip_bot=0 时 bot_bottom = max(bot_tops)=350 之后第一条消息 top")
 
@@ -993,7 +993,7 @@ class TestVisualBackend(unittest.TestCase):
             return [50, 200, 350] if side == "right" else [100, 400]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -1002,7 +1002,7 @@ class TestVisualBackend(unittest.TestCase):
                         side_effect=fake_avatar_tops), \
              mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
-            win = b.analyze_window("王文生", skip_bot=1)
+            win = b.analyze_window("林小满", skip_bot=1)
         self.assertEqual(win["bot_bottom"], 350,
                          "skip_bot=1 取 sorted(bot_tops)[-2]=200，之后第一条消息 top=350")
         self.assertEqual(win["other_text"], [],
@@ -1020,7 +1020,7 @@ class TestVisualBackend(unittest.TestCase):
             return [200] if side == "right" else [300]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -1029,7 +1029,7 @@ class TestVisualBackend(unittest.TestCase):
                         side_effect=fake_avatar_tops), \
              mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
-            win = b.analyze_window("王文生", skip_bot=5)
+            win = b.analyze_window("林小满", skip_bot=5)
         self.assertEqual(win["bot_bottom"], 300,
                          "skip 兜底到 0，last_bot_top=max(bot_tops)=200，之后第一条消息 top=300")
 
@@ -1042,7 +1042,7 @@ class TestVisualBackend(unittest.TestCase):
             return [] if side == "right" else [100]
 
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
              mock.patch.object(b, "_refresh", return_value=_solid((200, 200), (30, 30, 31))), \
              mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                         return_value={"bg": (30, 30, 31), "other": (47, 47, 48),
@@ -1051,7 +1051,7 @@ class TestVisualBackend(unittest.TestCase):
                         side_effect=fake_avatar_tops), \
              mock.patch("wx_backend.visual_backend.find_bubble_boxes", return_value=[]), \
              mock.patch("wx_backend.visual_backend.find_media_boxes", return_value=[]):
-            win = b.analyze_window("王文生", skip_bot=2)
+            win = b.analyze_window("林小满", skip_bot=2)
         self.assertIsNone(win["bot_bottom"],
                           "无 bot 回复时 bot_bottom 维持 None")
         self.assertTrue(win["has_other"],
@@ -1064,10 +1064,10 @@ class TestVisualBackend(unittest.TestCase):
         原 analyze_window 读标题判定群聊；合并后由 get_messages 联合 OCR
         的标题解析刷新缓存（用户定案：事件内 OCR 两次封顶）。"""
         b = VisualBackend()
-        b._current_chat = "强盗”集团"  # assume 路径前提
+        b._current_chat = "摸鱼”集团"  # assume 路径前提
         items = [
             # 标题带（联合区 2x，center-y < 标题区下沿 18px）：拆段标题
-            {"text": '"强盗"', "x": 40, "y": 4, "w": 80, "h": 8},
+            {"text": '"摸鱼"', "x": 40, "y": 4, "w": 80, "h": 8},
             {"text": "集团(5)", "x": 130, "y": 4, "w": 60, "h": 8},
             # 消息带（center-y >= 标题区下沿）
             {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
@@ -1086,7 +1086,7 @@ class TestVisualBackend(unittest.TestCase):
                         return_value=[]):
             b._hwnd = 0x1234
             b._last_shot = None
-            msgs = b.get_messages("强盗”集团", assume_switched=True)
+            msgs = b.get_messages("摸鱼”集团", assume_switched=True)
         self.assertIs(b._current_is_group, True,
                       "群聊标题带括号人数 → 联合 OCR 刷新 is_group=True")
         self.assertTrue(any(m.content == "你们好呀" for m in msgs),
@@ -1098,10 +1098,10 @@ class TestVisualBackend(unittest.TestCase):
     def test_get_messages_union_parses_private_title(self):
         """私聊标题（无括号人数）→ 联合 OCR 刷新 is_group=False。"""
         b = VisualBackend()
-        b._current_chat = "王文生"
+        b._current_chat = "林小满"
         b._current_is_group = True  # 上一轮群聊残留 → 本事件必须刷新为 False
         items = [
-            {"text": "王文生", "x": 40, "y": 4, "w": 70, "h": 8},
+            {"text": "林小满", "x": 40, "y": 4, "w": 70, "h": 8},
             {"text": "在吗", "x": 40, "y": 120, "w": 50, "h": 20},
         ]
         with mock.patch.object(b, "_switch_chat", return_value=True), \
@@ -1118,7 +1118,7 @@ class TestVisualBackend(unittest.TestCase):
                         return_value=[]):
             b._hwnd = 0x1234
             b._last_shot = None
-            b.get_messages("王文生", assume_switched=True)
+            b.get_messages("林小满", assume_switched=True)
         self.assertIs(b._current_is_group, False,
                       "私聊标题无括号人数 → 联合 OCR 刷新 is_group=False")
         b.close()
@@ -1231,9 +1231,9 @@ class TestSessionNameAnchor(unittest.TestCase):
 
         y     x    w    h   text
         4    65   36   34   '0'                     ← 角标数字
-       22    97   83   32   '王文生'                 ← 名字
+       22    97   83   32   '林小满'                 ← 名字
        24   349   55   26   '20:33'                 ← 时间戳
-      134   113  142   38   '“强盗”集团'            ← 名字（引号完整）
+      134   113  142   38   '“摸鱼”集团'            ← 名字（引号完整）
       139   349   55   25   '19:03'
       172    97  286   31   '哆菈A夢：就这样吧😄，我还…'  ← 预览
 
@@ -1246,24 +1246,24 @@ class TestSessionNameAnchor(unittest.TestCase):
         from wx_backend.visual_backend import _pick_block_near_badge
         blocks = [
             {"text": "0", "x": 65, "y": 4, "w": 36, "h": 34},
-            {"text": "王文生", "x": 97, "y": 22, "w": 83, "h": 32},
+            {"text": "林小满", "x": 97, "y": 22, "w": 83, "h": 32},
             {"text": "20:33", "x": 349, "y": 24, "w": 55, "h": 26},
         ]
         got = _pick_block_near_badge((82, 22), blocks)
         self.assertIsNotNone(got)
-        self.assertEqual(got["text"], "王文生")
+        self.assertEqual(got["text"], "林小满")
 
     def test_pick_block_near_badge_keeps_quotes(self):
         """带引号会话名原样保留——不切碎、不剥符号。"""
         from wx_backend.visual_backend import _pick_block_near_badge
         blocks = [
-            {"text": "“强盗”集团", "x": 113, "y": 134, "w": 142, "h": 38},
+            {"text": "“摸鱼”集团", "x": 113, "y": 134, "w": 142, "h": 38},
             {"text": "19:03", "x": 349, "y": 139, "w": 55, "h": 25},
             {"text": "哆菈A夢：就这样吧😄，我还…", "x": 97, "y": 172, "w": 286, "h": 31},
         ]
         got = _pick_block_near_badge((82, 134), blocks)
         self.assertIsNotNone(got)
-        self.assertEqual(got["text"], "“强盗”集团")
+        self.assertEqual(got["text"], "“摸鱼”集团")
 
     def test_pick_block_near_badge_too_far_returns_none(self):
         """所有块都离红圈过远 → None（宁可不处理，不拿错名去操作）。"""
@@ -1275,14 +1275,14 @@ class TestSessionNameAnchor(unittest.TestCase):
         """名字开头的引号属于名字本身，不得被清洗掉。
 
         历史缺陷：_pick_main_name 用 re.sub(r"^[^汉字A-Za-z0-9]+", ...)
-        剥首符号，把 OCR 读对的「“强盗”集团」削成「强盗”集团」，
-        再经 memory_key 归一化成「强盗集团」→ 用户在记忆页看到残缺名。
+        剥首符号，把 OCR 读对的「“摸鱼”集团」削成「摸鱼”集团」，
+        再经 memory_key 归一化成「摸鱼集团」→ 用户在记忆页看到残缺名。
         """
         from wx_backend.visual_backend import VisualBackend
-        lines = [{"text": "“强盗”集团", "x": 113, "y": 134, "w": 142, "h": 38}]
+        lines = [{"text": "“摸鱼”集团", "x": 113, "y": 134, "w": 142, "h": 38}]
         picked = VisualBackend._pick_main_name(lines)
         self.assertIsNotNone(picked)
-        self.assertEqual(picked[0], "“强盗”集团")
+        self.assertEqual(picked[0], "“摸鱼”集团")
 
 
 class TestIterUnreadSessions(unittest.TestCase):
@@ -1327,8 +1327,8 @@ class TestIterUnreadSessions(unittest.TestCase):
     def test_parse_title_group_has_member_count(self):
         """标题带括号人数 = 群聊（视觉权威信号，替代名称启发式）。"""
         from wx_backend.visual_backend import parse_title
-        self.assertEqual(parse_title('强盗"集团(5)'), ("强盗\"集团", True, 5))
-        self.assertEqual(parse_title("王文生"), ("王文生", False, None))
+        self.assertEqual(parse_title('摸鱼"集团(5)'), ("摸鱼\"集团", True, 5))
+        self.assertEqual(parse_title("林小满"), ("林小满", False, None))
         self.assertEqual(parse_title(""), ("", False, None))
         self.assertEqual(parse_title(None), ("", False, None))
 
@@ -1337,18 +1337,18 @@ class TestIterUnreadSessions(unittest.TestCase):
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
                     {"text": "X", "x": 300, "y": 10, "w": 10, "h": 10},
-                    {"text": '"强盗"', "x": 100, "y": 10, "w": 80, "h": 20},
+                    {"text": '"摸鱼"', "x": 100, "y": 10, "w": 80, "h": 20},
                     {"text": "集团(5)", "x": 185, "y": 10, "w": 60, "h": 20},
                 ])
     def test_read_title_joins_split_segments(self, _ocr, _refresh):
-        """标题被 OCR 拆成多段时按 x 拼接（真机：'"强盗"' + '集团(5)'）。
+        """标题被 OCR 拆成多段时按 x 拼接（真机：'"摸鱼"' + '集团(5)'）。
 
         RED 复现：真机 read_title 只读到'集团(5)'——OCR 把带引号的
-        '强盗'与'集团(5)'分成两个独立项，旧实现只取最长单行导致标题缺左半。
+        '摸鱼'与'集团(5)'分成两个独立项，旧实现只取最长单行导致标题缺左半。
         """
         b = self._backend()
         b._title_region = (0.0, 0.0, 1.0, 1.0)
-        self.assertEqual(b.read_title(), '"强盗"集团(5)')
+        self.assertEqual(b.read_title(), '"摸鱼"集团(5)')
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid((200, 200), (255, 255, 255)))
@@ -1389,19 +1389,19 @@ class TestSelectedRowHighlight(unittest.TestCase):
         b = VisualBackend()
         b._hwnd = 0x1234  # 不 connect，直接设句柄（GetWindowRect 失败 rect 零值）
         b._last_shot = None
-        b._session_coords = {"王文生": (30, 50)}  # 屏幕坐标（窗口偏移 0 = 截图坐标）
+        b._session_coords = {"林小满": (30, 50)}  # 屏幕坐标（窗口偏移 0 = 截图坐标）
         return b
 
     @mock.patch("pyautogui.click")
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid_with_highlight_rows())
     @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
-                return_value="王文生")
+                return_value="林小满")
     def test_switch_chat_learns_selected_color(self, _rt, _refresh, _click):
         """点击成功且标题非空 → 采样该条目行背景色缓存为选中色；
         _is_row_selected 对高亮行 True、对非高亮行 False（两种背景断言）。"""
         b = self._backend()
-        self.assertTrue(b._switch_chat("王文生", force=True))
+        self.assertTrue(b._switch_chat("林小满", force=True))
         _click.assert_called_once_with(30, 50)
         self.assertEqual(b._selected_row_color, (240, 240, 240),
                          "点击成功后应采样该行背景色缓存为选中色")
@@ -1415,19 +1415,19 @@ class TestSelectedRowHighlight(unittest.TestCase):
         """高亮命中缓存选中色 → 已选中，不点击直接返回 True（防 toggle 重复点击）。"""
         b = self._backend()
         b._selected_row_color = (240, 240, 240)
-        self.assertTrue(b._switch_chat("王文生"))
+        self.assertTrue(b._switch_chat("林小满"))
         _click.assert_not_called()
 
     @mock.patch("pyautogui.click")
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
-                return_value="王文生")
+                return_value="林小满")
     def test_switch_chat_fallback_title_when_no_highlight(self, _rt, _refresh,
                                                           _click):
         """高亮缓存缺失 → 回退 UI 标题比较：标题=目标会话 → 已选中不点击。"""
         b = self._backend()  # _selected_row_color 默认 None（缓存缺失）
-        self.assertTrue(b._switch_chat("王文生"))
+        self.assertTrue(b._switch_chat("林小满"))
         _click.assert_not_called()
 
     @mock.patch("pyautogui.click")
@@ -1435,17 +1435,17 @@ class TestSelectedRowHighlight(unittest.TestCase):
                 return_value=_solid_with_highlight_rows())
     @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])
     @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
-                return_value="杨冬梅")
+                return_value="周雨桐")
     def test_switch_chat_badge_coord_fallback(self, _rt, _ocr, _refresh,
                                               _click):
         """OCR 坐标缺失但 _badge_coords 有红圈坐标 → 点红圈右下条目主体
         （bcx+45, bcy，复用 _anchor_badge 思路），不再因缺坐标放弃切换。"""
         b = self._backend()
         b._session_coords = {}  # 目标会话 OCR 名漏读 → 无坐标
-        b._badge_coords = {"杨冬梅": (30, 56)}  # 红圈中心屏幕坐标
-        self.assertTrue(b._switch_chat("杨冬梅", force=True))
+        b._badge_coords = {"周雨桐": (30, 56)}  # 红圈中心屏幕坐标
+        self.assertTrue(b._switch_chat("周雨桐", force=True))
         _click.assert_called_once_with(75, 56)  # 30+45, 56（条目主体）
-        self.assertEqual(b._current_chat, "杨冬梅")
+        self.assertEqual(b._current_chat, "周雨桐")
 
 
 # ---- 用户圈定区域配置加载 ----
@@ -1661,7 +1661,7 @@ class TestGetMessagesInMedia(unittest.TestCase):
     """media 框内 OCR 文字不得拆成假文字消息；紧贴框顶的发送者名被吞掉。
 
     真实群聊缺陷（region_1x.png）：图片块内文字 '我不是'/'大肥鱼' 被 OCR
-    读出后拆出 sender='我不是' 的假消息；发送者名 '王文生' 紧贴图片框顶，
+    读出后拆出 sender='我不是' 的假消息；发送者名 '林小满' 紧贴图片框顶，
     不得成为独立文字消息——图片消息只产 1 条（由 analyze_window 媒体框承载）。
     """
 
@@ -1684,18 +1684,18 @@ class TestGetMessagesInMedia(unittest.TestCase):
                                                   _cap, _find, _switch):
         """1x 坐标：左头像 top=100、右头像 top=30；media 框 (150,250,40,160)
         顶部 150 落入左头像 100 的区间 → 对方媒体框。
-        发送者名 '王文生'（y=140）紧贴 media 框顶（y=150）→ 被吞掉。
+        发送者名 '林小满'（y=140）紧贴 media 框顶（y=150）→ 被吞掉。
         media 框内 '我不是'/'大肥鱼'（y=160/180）→ 剔除不产消息。"""
         _tops.side_effect = lambda img, bg, side: [100] if side == "left" else [30]
         _media.return_value = [(150, 250, 40, 160)]
         _ocr.return_value = [
-            {"text": "王文生", "x": 25, "y": 140, "w": 25, "h": 10},
+            {"text": "林小满", "x": 25, "y": 140, "w": 25, "h": 10},
             {"text": "我不是", "x": 50, "y": 160, "w": 30, "h": 10},
             {"text": "大肥鱼", "x": 50, "y": 180, "w": 30, "h": 10},
         ]
         b = self._backend()
-        with mock.patch.object(b, "read_title", return_value="王文生"):
-            msgs = b.get_messages("王文生")
+        with mock.patch.object(b, "read_title", return_value="林小满"):
+            msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 0,
                          "图片块文字（含发送者名行）不得拆成文字消息")
         b.close()
@@ -1723,8 +1723,8 @@ class TestGetMessagesInMedia(unittest.TestCase):
             {"text": "我不是", "x": 50, "y": 160, "w": 30, "h": 10},
         ]
         b = self._backend()
-        with mock.patch.object(b, "read_title", return_value="王文生"):
-            msgs = b.get_messages("王文生")
+        with mock.patch.object(b, "read_title", return_value="林小满"):
+            msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 1, "media 框外文字消息应保留")
         self.assertEqual(msgs[0].content, "这是一条正常的文字消息")
         b.close()
@@ -1769,7 +1769,7 @@ class TestAnalyzeWindowAvatarBucket(unittest.TestCase):
 
     几何坐标与真实 fixture region_1x.png 一致：bot 头像 top=38、
     对方头像 top=801、bot 长气泡 (38,765)、对方气泡 (869,928)、
-    王文生图片块 media (838,1117)。"""
+    林小满图片块 media (838,1117)。"""
 
     def _backend(self):
         b = VisualBackend()
@@ -1791,9 +1791,9 @@ class TestAnalyzeWindowAvatarBucket(unittest.TestCase):
             (38, 765, 131, 621, True),    # bot 长气泡（顶 = bot 头像顶 38）
             (869, 928, 140, 229, False),  # 对方气泡（顶落入对方头像 801 区间）
         ]
-        _media.return_value = [(838, 1117, 119, 398)]  # 王文生图片块
+        _media.return_value = [(838, 1117, 119, 398)]  # 林小满图片块
         b = self._backend()
-        win = b.analyze_window("王文生")
+        win = b.analyze_window("林小满")
         self.assertEqual(win["other_text"], [(869, 928, 140, 229)],
                          "对方气泡按头像划块归属；bot 长气泡不得误判对方")
         self.assertEqual(win["other_media"], [(838, 1117, 119, 398)],
@@ -1817,7 +1817,7 @@ class TestAnalyzeWindowAvatarBucket(unittest.TestCase):
         _bubbles.return_value = [(38, 765, 131, 621, True)]
         _media.return_value = []
         b = self._backend()
-        win = b.analyze_window("王文生")
+        win = b.analyze_window("林小满")
         self.assertFalse(win["has_other"])
         self.assertEqual(win["other_text"], [])
         self.assertEqual(win["other_media"], [])
@@ -1845,18 +1845,18 @@ class TestRealFixtureRegion(unittest.TestCase):
             cls.ocr_items = json.load(f)
 
     def test_get_messages_no_fake_media_text(self):
-        """王文生图片块不拆假文字消息：无 sender='我不是'、无图片内文字；
+        """林小满图片块不拆假文字消息：无 sender='我不是'、无图片内文字；
         我方超长气泡 sender='self'。"""
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b.connect()
         img = Image.open(_REGION_1X)
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-                mock.patch.object(b, "read_title", return_value="王文生"), \
+                mock.patch.object(b, "read_title", return_value="林小满"), \
                 mock.patch.object(b, "_refresh", return_value=img), \
                 mock.patch("wx_backend.visual_backend.ocr_image",
                            return_value=self.ocr_items):
-            msgs = b.get_messages("王文生")
+            msgs = b.get_messages("林小满")
         self.assertEqual(len(msgs), 1,
                          "图片块文字被剔除后只剩我方超长气泡一条")
         self.assertEqual(msgs[0].sender, "self", "我方超长气泡 sender='self'")
@@ -1873,11 +1873,11 @@ class TestRealFixtureRegion(unittest.TestCase):
         b.connect()
         img = Image.open(_REGION_1X)
         with mock.patch.object(b, "_switch_chat", return_value=True), \
-         mock.patch.object(b, "read_title", return_value="王文生"), \
+         mock.patch.object(b, "read_title", return_value="林小满"), \
                 mock.patch.object(b, "_refresh", return_value=img):
-            win = b.analyze_window("王文生")
+            win = b.analyze_window("林小满")
         self.assertEqual(win["other_media"], [(838, 1117, 119, 398)],
-                         "王文生图片块只产 1 条媒体框")
+                         "林小满图片块只产 1 条媒体框")
         self.assertEqual(win["other_text"], [(869, 928, 140, 229)])
         self.assertTrue(win["has_media"] and win["has_other"])
         self.assertEqual(win["bot_bottom"], 801)

@@ -1603,7 +1603,7 @@ class AgentBot(WeChatBot):
         """当前会话名与目标名是否同一会话（容忍 OCR 差异）。
 
         口径与 memory 键一致（剥引号变体与空白），并做双向子串兜底——
-        OCR 会漏字（真机「“强盗”集团」被读成「强盗”」），严格相等会
+        OCR 会漏字（真机「“摸鱼”集团」被读成「摸鱼”」），严格相等会
         把切换判成失败。
         """
         a = _memory_key(active)
@@ -1616,8 +1616,8 @@ class AgentBot(WeChatBot):
         """确保微信窗口停在 chat 会话；返回是否已确认（可以发送）。
 
         触发式发送（定时/条件到点）必须走这里：那一刻窗口停在「最后处理过
-        的会话」上——真机事故 17:40 的拿快递提醒意图发给「王文生」，实际落进
-        了「强盗」集团。判定顺序：
+        的会话」上——真机事故：拿快递提醒的意图发给「林小满」，实际落进了
+        「摸鱼集团」。判定顺序：
 
         1. 已在目标会话 → 直接确认（**不点击**：重复点已选中条目会 toggle
            取消选中，消息区反而变空）
@@ -1955,7 +1955,7 @@ class AgentBot(WeChatBot):
         # 被判普通气泡（has_text 而非 has_media），但文件下载/渲染同样需防抖。
         # 注意：_window_msgs → get_messages 内部 read_title 会刷新
         # _current_is_group 为本次会话权威值——群聊判定必须在这之后读取，
-        # 否则私聊被上一轮群聊残留误判为群聊（实测日志「私聊王文生被判
+        # 否则私聊被上一轮群聊残留误判为群聊（实测日志「私聊林小满被判
         # 群聊消息未 @小漓」；analyze_window 本身无 read_title 不刷新）。
         window_msgs = _window_msgs(win)
         has_file_initial = any(_looks_like_file_text(m.content) for m in window_msgs)

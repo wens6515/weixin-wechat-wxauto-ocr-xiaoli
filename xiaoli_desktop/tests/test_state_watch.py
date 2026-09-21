@@ -24,7 +24,7 @@ class TestConditionStore(unittest.TestCase):
 
     def test_add_condition_normalizes(self):
         item = self.store.add_condition(
-            "王文生", "拿快递", "https://x/weather", "下雨了", judge="api",
+            "林小满", "拿快递", "https://x/weather", "下雨了", judge="api",
             match_type="weird", met_keywords=["雨"], scope_start="今天",
             scope_end="", interval_seconds=1, expire_at=123.5)
         self.assertEqual(item["kind"], "condition")
@@ -102,8 +102,8 @@ def make_watcher(bot):
 
 # 真机实验同构页面：当前时段暴雨、未来时段晴天——整页匹配必误判，
 # scope 切片后只有当前时段参与判定（用户点名的场景）
-MIXED_PAGE_RAIN = "福州天气 今天 7天 2日（今天）暴雨 26℃ 3日（明天）大雨 30℃ 4日（后天）中雨转多云 5日（周六）晴 36℃"
-MIXED_PAGE_SUNNY = "福州天气 今天 7天 2日（今天）晴 26℃ 3日（明天）大雨 30℃ 4日（后天）中雨转多云 5日（周六）晴 36℃"
+MIXED_PAGE_RAIN = "云溪天气 今天 7天 2日（今天）暴雨 26℃ 3日（明天）大雨 30℃ 4日（后天）中雨转多云 5日（周六）晴 36℃"
+MIXED_PAGE_SUNNY = "云溪天气 今天 7天 2日（今天）晴 26℃ 3日（明天）大雨 30℃ 4日（后天）中雨转多云 5日（周六）晴 36℃"
 
 
 class TestConditionWatcher(unittest.TestCase):
@@ -113,7 +113,7 @@ class TestConditionWatcher(unittest.TestCase):
         self.w = make_watcher(self.bot)
 
     def _add(self, **kw):
-        base = dict(chat="王文生", content="拿快递", url="https://x/w",
+        base = dict(chat="林小满", content="拿快递", url="https://x/w",
                     condition="雨停了", judge="local", match_type="absent",
                     met_keywords=["雨", "降雨"], scope_start="今天",
                     scope_end="明天", interval_seconds=60,
@@ -148,7 +148,7 @@ class TestConditionWatcher(unittest.TestCase):
         evs = self._drain_events()
         self.assertEqual(len(evs), 1)
         self.assertEqual(evs[0]["type"], "met")
-        self.assertEqual(evs[0]["chat"], "王文生")
+        self.assertEqual(evs[0]["chat"], "林小满")
         rec = self.bot.reminders.list_conditions(active_only=False)[0]
         self.assertFalse(rec["enabled"])
         self.assertEqual(rec["done"], "met")
@@ -286,7 +286,7 @@ class TestHandleSetReminderCondition(unittest.TestCase):
     def _call(self, args, user_text="下雨了提醒我拿快递"):
         result = {"kind": "tool_call", "name": "set_reminder",
                   "arguments": json.dumps(args)}
-        return self.bot._apply_vision_result("王文生", "王文生", result,
+        return self.bot._apply_vision_result("林小满", "林小满", result,
                                              user_text=user_text)
 
     def test_disabled_sends_hint_no_entry(self):
@@ -363,7 +363,7 @@ class TestDrainConditions(unittest.TestCase):
             def read_title(self, foreground=False):
                 # 触发发送前会读标题确认落点（防发错人）；桩返回目标会话
                 # = 窗口已停在它上面 → 直接发送、不触发切换点击。
-                return "王文生"
+                return "林小满"
 
             def send_text(self, chat, text):
                 self.sent.append((chat, text))
@@ -371,24 +371,24 @@ class TestDrainConditions(unittest.TestCase):
 
     def test_met_event_calls_api_and_sends(self):
         self.bot._condition_queue.put({
-            "type": "met", "chat": "王文生", "condition": "雨停了",
+            "type": "met", "chat": "林小满", "condition": "雨停了",
             "content": "拿快递", "evidence": "页面显示晴"})
         self.bot._drain_conditions()
         self.assertEqual(len(self.bot._chats), 1)
         chat, trigger = self.bot._chats[0]
-        self.assertEqual(chat, "王文生")
+        self.assertEqual(chat, "林小满")
         self.assertIn("条件达成", trigger)
         self.assertIn("雨停了", trigger)
         self.assertIn("页面显示晴", trigger)
         # content（提醒事项）已随「回递即回复」语义废除——触发消息只带
         # 条件与页面状况，措辞由 API 自行生成（用户定案）
         self.assertNotIn("拿快递", trigger)
-        self.assertEqual(self.bot.wx.sent, [("王文生", "好")])
+        self.assertEqual(self.bot.wx.sent, [("林小满", "好")])
         self.assertTrue(self.bot._condition_queue.empty())
 
     def test_expired_event_mentions_deadline(self):
         self.bot._condition_queue.put({
-            "type": "expired", "chat": "王文生", "condition": "雨停了",
+            "type": "expired", "chat": "林小满", "condition": "雨停了",
             "content": "拿快递", "evidence": "仍有雨"})
         self.bot._drain_conditions()
         _chat, trigger = self.bot._chats[0]

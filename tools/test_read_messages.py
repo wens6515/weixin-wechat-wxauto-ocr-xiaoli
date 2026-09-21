@@ -26,7 +26,7 @@ from wx_backend.models import MessageType  # noqa: E402
 
 
 def main():
-    chat = sys.argv[1] if len(sys.argv) > 1 else "王文生"
+    chat = sys.argv[1] if len(sys.argv) > 1 else "林小满"
     print(f"[1/3] 连接 visual 后端（PrintWindow 截图）...")
     try:
         backend = create_backend("visual")
