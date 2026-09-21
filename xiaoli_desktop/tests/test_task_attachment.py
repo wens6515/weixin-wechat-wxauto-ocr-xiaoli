@@ -32,14 +32,17 @@ class _FakeWx:
         self._has_media = has_media
         self._bot_bottom = bot_bottom
         self._session_types = {}
+        # 位置模式下会话身份的来源：真实后端由 get_messages 的联合 OCR 刷新
+        # _current_title，桩在这里直接给（与 iter_unread_sessions 的条目对应）。
+        self._current_title = "小明"
 
     def iter_unread_with_type(self):
         return iter([("小明", MessageType.TEXT)])
 
     def iter_unread_sessions(self):
-        return iter(["小明"])
+        return iter([(100, 163)])   # 位置条目（红圈中心屏幕坐标），与真实后端同契约
 
-    def analyze_window(self, chat, foreground=True, skip_bot=0):
+    def analyze_window(self, chat, foreground=True, skip_bot=0, assume_switched=False):
         return {
             "bot_bottom": self._bot_bottom,
             "other_first_top": None,
@@ -529,7 +532,7 @@ class TestSkipBotPassing(unittest.TestCase):
         seen = []
 
         class Wx(_FakeWx):
-            def analyze_window(self, chat, foreground=True, skip_bot=0):
+            def analyze_window(self, chat, foreground=True, skip_bot=0, assume_switched=False):
                 seen.append((chat, skip_bot))
                 return super().analyze_window(chat)
 
@@ -556,12 +559,15 @@ class TestSkipBotPassing(unittest.TestCase):
                         f"应传 skip_bot=2，实际: {seen}")
 
     def test_skip_bot_zero_default(self):
-        """无占位记录 → skip_bot=0（与旧行为完全一致）。"""
+        """无占位记录 → 首次分析就按 skip_bot=0（与旧行为一致），且不会为了
+        取名再分析一次。位置模式下第一次分析时还不知道会话名，chat 为 None
+        是正常形态。"""
         bot = _make_bot()
         seen = self._run(bot, [_text_msg("王", "你好", "m1")], {})
-        self.assertTrue(any(chat == "小明" and skip == 0
-                            for chat, skip in seen),
-                        f"默认 skip_bot=0，实际: {seen}")
+        self.assertTrue(any(skip == 0 for _chat, skip in seen),
+                        f"无占位时应传 skip_bot=0，实际: {seen}")
+        self.assertFalse(any(chat == "小明" for chat, _s in seen),
+                         f"无占位时不该按名重算，实际: {seen}")
 
 
 class TestRouteVisionResultHook(unittest.TestCase):
@@ -859,7 +865,7 @@ class TestWindowFileFloor(unittest.TestCase):
         calls = {"file": [], "text": [], "capture": []}
 
         class Wx(_FakeWx):
-            def analyze_window(self, chat, foreground=True, skip_bot=0):
+            def analyze_window(self, chat, foreground=True, skip_bot=0, assume_switched=False):
                 win = super().analyze_window(chat)
                 win.update(win_extra)
                 return win

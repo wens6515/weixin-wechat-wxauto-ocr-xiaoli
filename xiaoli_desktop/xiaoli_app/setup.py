@@ -29,47 +29,57 @@ FIRST_PROMPT_DEFAULT = """你是天枢，正在为微信 AI 助手「小漓」�
 2. 扫描 {tasks_dir}\\ 下各任务目录，找有 task.json 且没有 result.json 的目录（已有 result.json 的跳过）；
 3. 按 task.json 里的 task 描述、attachments\\ 附件、file_text 内容执行任务；
 4. 完成后在同一任务目录写 result.json（{{"status":"success","reply_text":"...","files":["成果文件..."]}}），成果文件也放该目录；
-5. 处理时间较长的任务，在关键节点覆写任务目录下的 progress.json（{{"stage":"一句通俗中文，说明现在在做什么"}}）——开始动手、大的阶段切换、卡住或需要长时间等待时各写一次；不要写百分比，不要每个工具调用都写（小漓按固定节流转发，写太勤也不会都转发）；
+5. 处理时间较长的任务，在关键节点覆写任务目录下的 progress.json（{{"stage":"一句通俗中文，说明现在在做什么"}}）——开始动手、大的阶段切换、卡住或需要长时间等待时各写一次；不要写百分比；**每写一次小漓就会往微信回传一条进度**，所以只在真正值得打扰用户的节点写（不要每个工具调用都写，也不要用重复或无意义的文本刷屏）；
 6. 不要写 result.json / progress.json 以外的状态文件——小漓检测到 result.json 就会把成果发回微信并把目录归档。
 
 全程无人值守：不要进入 Plan Mode（/plan-mode 保持关闭）、不要提交计划等待审批、不要向用户请求任何确认或补充信息——遇到歧义按最合理的方式执行并在 reply_text 里说明。所有工具调用已在 YOLO 模式下自动放行，直接执行即可。
 
 注意：reply_text 是发给微信用户的回复，请用通俗友好的中文，用户可能不了解技术细节。"""
 
-# 任务桥协议文档（初始化时写入 tasks_dir\\README.md，首次生成、已存在不覆盖）。
-BRIDGE_README = """# 微信任务桥协议（小漓 ↔ 天枢）
+# 任务桥协议文档（初始化时写入 tasks_dir\README.md，首次生成、已存在不覆盖）。
+# 内容与测试区 dist\小漓\wxauto\README.md 逐字一致，唯一差异是末行的扫描范围
+# 路径：模板里写 {tasks_dir}，渲染成用户实际保存的任务目录。JSON 示例的大括号
+# 写成 {{ }}——本模板经 str.format 渲染（见 ensure_bridge_readme）。
+BRIDGE_README = r"""# 微信任务桥协议（小漓 ↔ 天枢）
 
 小漓把微信用户的任务投递到本目录，天枢处理后回传成果。
 
 ## 任务包
 
-每个任务一个子目录 <task_id>\\：
+每个任务一个子目录 <task\_id>\\：
 
-- task.json：任务描述（task 字段）、发送者（sender）、聊天（chat_name）、附件列表（attachments）、文件文本（file_text）、任务 ID（task_id）、创建时间（created_at）
-- attachments\\：附件文件（如有）
+* task.json：任务描述（task 字段）、发送者（sender）、聊天（chat\_name）、附件列表（attachments）、文件文本（file\_text）、任务 ID（task\_id）、创建时间（created\_at）
+* attachments\\：附件文件（如有）
+* 如果未扫描到任务包则默认小漓未投递任务，直接结束本轮轮次，等待小漓重新唤起
 
 ## 成果包
 
 天枢完成任务后，在同一个任务目录写 result.json：
 
-{"status": "success", "reply_text": "给用户的回复", "files": ["成果文件名..."]}
+{{"status": "success", "reply\_text": "给用户的回复", "files": \["成果文件名..."]}}
 
-- reply_text 用通俗友好的中文（用户可能不懂技术细节）
-- 成果文件放在该任务目录下，文件名写入 files 数组
+* reply\_text 用通俗友好的中文（用户可能不懂技术细节）
+* 成果文件放在该任务目录下，文件名写入 files 数组
 
 ## 进度回传（可选）
 
 处理时间较长的任务，可在任务目录写 progress.json 汇报当前阶段：
 
-{"stage": "一句话说明现在在做什么"}
+{{"stage": "一句话说明现在在做什么"}}
 
-- 只在关键节点覆写：开始动手、大的阶段切换、卡住或需要长时间等待；
-- stage 用一句通俗中文（微信用户直接可读），不要写百分比；
-- 不要每个工具调用都写——小漓按固定节流转发，写太勤也不会都转发。
+* 只在关键节点覆写：开始动手、大的阶段切换、卡住或需要长时间等待；
+* stage 用一句通俗中文（微信用户直接可读），不要写百分比；
+* 每写入一次，小漓就会往微信回传一条进度（无节流）——所以不要每个工具
+  调用都写，也不要用重复或无意义的文本刷屏。
 
 ## 归档
 
 小漓检测到 result.json 后，会把任务目录移入 sent\\ 归档，并把成果发回微信。
+
+
+
+！！！！必须注意，你需要扫描的投递任务范围只有{tasks_dir}！！！！
+
 """
 
 
@@ -423,7 +433,7 @@ def ensure_bridge_readme(tasks_dir):
     try:
         os.makedirs(tasks_dir, exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
-            f.write(BRIDGE_README)
+            f.write(BRIDGE_README.format(tasks_dir=tasks_dir))
         return True
     except OSError:
         return False
