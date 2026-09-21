@@ -811,6 +811,27 @@ def _pick_block_near_badge(badge_xy: tuple[int, int],
     return best
 
 
+# 会话名匹配键：引号变体（全半角/弯直）与空白类字符一律剥掉。
+# 与 xiaoli_app.memory_store.memory_key 同口径——但那在上层包，这里内联一份
+# 避免底层（wx_backend）反向依赖上层（分层纪律）。
+_KEY_QUOTE_CHARS = (
+    "\u201c\u201d\u2018\u2019\u201e\u201f"
+    "\u00ab\u00bb\u2039\u203a"
+    "\u300c\u300d\u300e\u300f"
+    "\uff02\u02bc\u0060\u00b4\"'"
+)
+
+
+def _norm_chat_key(name: str) -> str:
+    """会话名归一化：剥引号变体与空白，供「按名找会话」匹配用。
+
+    OCR 对引号半/全角极不稳（真机：「“强盗”集团」会读出「强盗”集团」
+    「"强盗"集团」「“ 强盗 ” 集团」等变体），原样比较会找不到目标会话。
+    """
+    s = str(name or "").translate(str.maketrans("", "", _KEY_QUOTE_CHARS))
+    return re.sub(r"\s+", "", s)
+
+
 # 自学习选中高亮：微信列表选中条目有浅灰高亮背景（浅色主题 ≈ #F0F0F0，
 # 未选中纯白 #FFFFFF，差值 15~25）。PrintWindow 像素稳定（噪声 <3），
 # 容差取 12 夹在两者之间——既能容忍截图噪声，又不会把纯白误判成高亮。
@@ -1342,6 +1363,51 @@ class VisualBackend:
         logger.warning(f"[锚定] 红圈 ({bcx},{bcy}) 点击后未读到顶部标题")
         return None
 
+    def resolve_chat_coord(self, chat: str) -> tuple[int, int] | None:
+        """按会话名现读列表区 OCR，返回该会话的屏幕点击坐标；找不到返回 None。
+
+        供「触发式发送」路径使用（定时/条件到点后要切到指定会话）：目标
+        会话此刻通常**没有红圈**（消息早已读过），既无法靠红圈锚定，也可能
+        不在 _session_coords 缓存里（只有走过的路径才填）。这里现截一帧、
+        读列表区 OCR，按会话名归一化匹配（含双向子串兜底，容忍 OCR 残缺），
+        命中取该块中心。
+
+        为何不用整窗 OCR（iter_sessions）：整窗 ~1.2s，列表区 crop ~0.46s，
+        且列表区本就不含搜索框/消息区，语义更干净（真机实测见
+        .rivet/scratch/bench_ocr.py）。
+        """
+        if self._hwnd is None:
+            return None
+        shot = self._refresh(force=True, foreground=False)
+        if shot is None:
+            return None
+        w, h = shot.size
+        sr = self._session_region
+        sl, st = int(w * sr[0]), int(h * sr[1])
+        srr, sbb = int(w * sr[2]), int(h * sr[3])
+        blocks = ocr_image(shot.crop((sl, st, srr, sbb)))
+        if not blocks:
+            return None
+        target = _norm_chat_key(chat)
+        if not target:
+            return None
+        hit = None
+        for it in blocks:
+            key = _norm_chat_key(it.get("text") or "")
+            if not key:
+                continue
+            # 双向子串：OCR 漏字（「强盗”」vs「“强盗”集团」）也算命中
+            if key == target or key.startswith(target) or target.startswith(key):
+                hit = it
+                break
+        if hit is None:
+            logger.debug(f"[定位] 列表区未找到会话 {chat!r}")
+            return None
+        rect = wt.RECT()
+        u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        return (rect.left + sl + hit["x"] + hit["w"] // 2,
+                rect.top + st + hit["y"] + hit["h"] // 2)
+
     def _switch_chat(self, chat: str, force: bool = False) -> bool:
         """点击会话列表中的目标会话切换聊天。返回是否已切换。
 
@@ -1395,6 +1461,12 @@ class VisualBackend:
             if badge is not None:
                 coord = (badge[0] + _BADGE_CLICK_OFFSET_X, badge[1])
             else:
+                # 缓存两条通道都没有 → 现读列表区 OCR 定位。这条是「触发式
+                # 发送」的主路径：目标会话没有红圈（消息已读），也不一定
+                # 走过整窗 OCR，缓存里就是没它。列表区 crop (~0.46s) 比
+                # 整窗 iter_sessions (~1.2s) 快 2.6 倍。
+                coord = self.resolve_chat_coord(chat)
+            if coord is None:
                 logger.warning(f"[切换] 未找到会话 {chat!r} 的坐标")
                 return False
         try:

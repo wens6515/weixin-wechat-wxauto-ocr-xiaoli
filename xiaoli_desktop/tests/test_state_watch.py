@@ -360,6 +360,11 @@ class TestDrainConditions(unittest.TestCase):
             def __init__(self):
                 self.sent = []
 
+            def read_title(self, foreground=False):
+                # 触发发送前会读标题确认落点（防发错人）；桩返回目标会话
+                # = 窗口已停在它上面 → 直接发送、不触发切换点击。
+                return "王文生"
+
             def send_text(self, chat, text):
                 self.sent.append((chat, text))
         self.bot.wx = _W()

@@ -17,6 +17,8 @@ from wechat_bot import (WeChatBot, Controller, logger,
                         is_group_chat, _extract_file_name_token,
                         VISION_MODEL_DEFAULT)
 from wx_backend.models import MessageType
+from wx_backend.visual_backend import parse_title
+from wechat_bot import _memory_key
 from xiaoli_app.reminders_store import (RemindersStore, GRACE_SECONDS,
                                         WATCH_INTERVAL_MIN, WATCH_DEFAULT_TTL)
 from xiaoli_app.web_search import web_fetch, resolve_redirect
@@ -1598,11 +1600,71 @@ class AgentBot(WeChatBot):
             except Exception as e:
                 logger.error(f"[状态监视] 回递失败 {chat}: {e}")
 
+    @staticmethod
+    def _chat_name_matches(active, target):
+        """当前会话名与目标名是否同一会话（容忍 OCR 差异）。
+
+        口径与 memory 键一致（剥引号变体与空白），并做双向子串兜底——
+        OCR 会漏字（真机「“强盗”集团」被读成「强盗”」），严格相等会
+        把切换判成失败。
+        """
+        a = _memory_key(active)
+        b = _memory_key(target)
+        if not a or not b:
+            return False
+        return a == b or a.startswith(b) or b.startswith(a)
+
+    def _ensure_chat_active(self, chat):
+        """确保微信窗口停在 chat 会话；返回是否已确认（可以发送）。
+
+        触发式发送（定时/条件到点）必须走这里：那一刻窗口停在「最后处理过
+        的会话」上——真机事故 17:40 的拿快递提醒意图发给「王文生」，实际落进
+        了「强盗」集团。判定顺序：
+
+        1. 已在目标会话 → 直接确认（**不点击**：重复点已选中条目会 toggle
+           取消选中，消息区反而变空）
+        2. 交给后端切换（`_switch_to_chat` → `_switch_chat`：内部先查选中
+           高亮/标题，仍缺坐标时现读列表区 OCR 定位）
+        3. 切完**读标题复验**；标题不是目标即返回 False（调用方 fail-closed）
+        """
+        # 1) 已在目标会话：读标题确认，不点击
+        try:
+            title = self.wx.read_title(foreground=False)
+        except Exception:
+            title = None
+        if title and self._chat_name_matches(parse_title(title)[0], chat):
+            return True
+        # 2) 切换
+        try:
+            self._switch_to_chat(chat)
+        except Exception as e:
+            logger.warning(f"[触发回复] 切换 {chat!r} 异常: {e}")
+        # 3) 复验：切完标题必须是目标，否则视为没切成功
+        try:
+            title = self.wx.read_title(foreground=True)
+        except Exception as e:
+            logger.warning(f"[触发回复] 读标题失败，无法验证落点: {e}")
+            return False
+        if not title:
+            return False
+        return self._chat_name_matches(parse_title(title)[0], chat)
+
     def _send_trigger_reply(self, text, chat):
         """触发器回复直发（旁路 _send_text 的占位归零——定时/条件触发消息
         不得破坏 skip_bot/N[chat] 语义：占位挂起时若被归零，占位会被当成
         实质回复，用户其后的消息将被漏读）。拆分规则与 _send_text 一致
-        （按换行分段，空段丢弃）。"""
+        （按换行分段，空段丢弃）。
+
+        **发送前必须先确认窗口在目标会话**，确认不了就不发：触发是异步的
+        （闹钟/状态监视线程入队 → 主循环消费），此刻 visual 后端的
+        `send_text` 只会往「当前窗口」输入框打字，窗口停在哪就发给谁。
+        宁可不发并记错误日志，也不把给 A 的消息发进 B。
+        """
+        if not self._ensure_chat_active(chat):
+            logger.error(
+                f"[触发回复] 未能确认窗口在会话 {chat!r}，放弃本次发送"
+                f"（防发错人）：{str(text or '')[:40]!r}")
+            return
         for part in [p.strip() for p in re.split(r"\n+", text or "") if p.strip()]:
             try:
                 self.wx.send_text(chat, part)
