@@ -260,27 +260,40 @@ class MemoryStore:
     def deep_path(self, chat_id):
         """深层记忆文件路径：聊天名 percent-encode（文件名安全且可逆）。
 
+        文件名用的键先经 _resolve_key 解析——这是本条链路上唯一没有等价
+        匹配的地方：变体名（OCR 把「“强盗”集团」读成「强盗”集团」）若原样
+        建文件，同一会话的深层历史会分裂成两份 jsonl，记忆页的「深层」计数
+        与 recall_memory 都只看到其中一份（症状：记忆看起来丢了）。解析后
+        落到首次写入的那个键上，与 memory.json 的键同源。
+
         兼容升级前的命名（键曾归一化）：那时文件名是归一化名的 encode，
         与新名不同。新名文件不存在、旧名文件存在时返回旧路径，让历史深层
         记忆继续可读可追加（否则「记忆丢了」）。
         """
         from urllib.parse import quote
-        p = os.path.join(self._deep_dir, quote(chat_id, safe="") + ".jsonl")
+        key = self._resolve_key(chat_id)
+        p = os.path.join(self._deep_dir, quote(key, safe="") + ".jsonl")
         if not os.path.exists(p):
-            legacy = memory_key(chat_id)
-            if legacy and legacy != chat_id:
+            legacy = memory_key(key)
+            if legacy and legacy != key:
                 lp = os.path.join(self._deep_dir, quote(legacy, safe="") + ".jsonl")
                 if os.path.exists(lp):
                     return lp
         return p
 
     def _append_deep_unlocked(self, chat_id, msg):
-        """一条消息溢出 recent 时归档进深层文件。调用方负责开关判定与持锁。"""
+        """一条消息溢出 recent 时归档进深层文件。调用方负责开关判定与持锁。
+
+        路径与计数都用解析后的键：变体名必须追加到同一份文件、同一份计数
+        上，否则 deep_count 会分裂成两个键（与 memory.json 的单键不一致，
+        记忆页数字对不上）。
+        """
         try:
             os.makedirs(self._deep_dir, exist_ok=True)
-            with open(self.deep_path(chat_id), "a", encoding="utf-8") as f:
+            key = self._resolve_key(chat_id)
+            with open(self.deep_path(key), "a", encoding="utf-8") as f:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
-            self.deep_count[chat_id] = self.deep_count.get(chat_id, 0) + 1
+            self.deep_count[key] = self.deep_count.get(key, 0) + 1
         except Exception as e:
             logger.error(f"[记忆] 深层写入失败: {e}")
 
@@ -455,8 +468,9 @@ class MemoryStore:
         deep_query 非空：深层全量过滤，deep 截 200 条 + deep_matched 总数；
         否则深层返回第 deep_offset 页（deep_limit 条），deep_matched=None。"""
         with self.lock:
-            st = self.memory_db.get(chat_id) or {}
-            deep_total = int(self.deep_count.get(chat_id, 0))
+            key = self._resolve_key(chat_id)
+            st = self.memory_db.get(key) or {}
+            deep_total = int(self.deep_count.get(key, 0))
             deep_matched = None
             if deep_query:
                 q = str(deep_query).lower()
@@ -505,12 +519,13 @@ class MemoryStore:
         -1（边界按行数推进，少一行必须回退，否则下轮压缩错位跳过一条）。
         返回是否删除。"""
         with self.lock:
-            st = self._state(chat_id)
-            removed, new_count = deep_delete_line(self.deep_path(chat_id),
+            key = self._resolve_key(chat_id)
+            st = self._state(key)
+            removed, new_count = deep_delete_line(self.deep_path(key),
                                                   line_no)
             if removed is None:
                 return False
-            self.deep_count[chat_id] = new_count
+            self.deep_count[key] = new_count
             if line_no - 1 < int(st.get("indexed") or 0):
                 st["indexed"] = int(st["indexed"]) - 1
             self.schedule_save()

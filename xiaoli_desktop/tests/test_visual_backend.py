@@ -1294,17 +1294,19 @@ class TestIterUnreadSessions(unittest.TestCase):
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid_with_badge())
-    @mock.patch("wx_backend.visual_backend.ocr_image",
-                return_value=[
-                    # 红块中心整窗 (30,56)；王文生名中心 (35,50) → 红圈在其左上邻近
-                    {"text": "王文生", "x": 20, "y": 40, "w": 30, "h": 20},
-                    # 杨冬梅名中心 (25, 120)：距红块 (30,56) 太远 → 不匹配
-                    {"text": "杨冬梅", "x": 10, "y": 110, "w": 30, "h": 20},
-                ])
-    def test_yields_only_badged_session(self, _ocr, _refresh):
+    @mock.patch("wx_backend.visual_backend.VisualBackend._is_row_selected",
+                side_effect=[False, True])   # 判定「未选中」→ 点击后复验「已选中」
+    @mock.patch("pyautogui.click")
+    @mock.patch("time.sleep")
+    def test_yields_only_badged_session(self, _sleep, _click, _sel, _refresh):
+        """只产出带红圈的条目；**全程零 OCR**（会话名由下游联合 OCR 给出）。
+
+        语义已从「列表区 OCR + 几何锚定」改为几何驱动（红圈定位 + 点击 +
+        像素复验），断言口径同步——见 iter_unread_sessions 的 docstring。
+        """
         b = self._backend()
-        names = list(b.iter_unread_sessions())
-        self.assertEqual(names, ["王文生"])
+        entries = list(b.iter_unread_sessions())
+        self.assertEqual(entries, [(30, 56)], "产出红圈中心位置条目")
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid((200, 200), (255, 255, 255)))
@@ -1364,21 +1366,19 @@ class TestIterUnreadSessions(unittest.TestCase):
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
                 return_value=_solid_with_badge())
-    @mock.patch("wx_backend.visual_backend.ocr_image",
-                return_value=[
-                    # 红块中心整窗 (30,56)；王文生名中心 (35,50) → 红圈在其左上邻近
-                    {"text": "王文生", "x": 20, "y": 40, "w": 30, "h": 20},
-                ])
-    def test_iter_unread_records_badge_coords(self, _ocr, _refresh):
-        """红圈坐标通道：iter_unread_sessions 匹配红圈与名字后，把红圈中心
-        屏幕坐标记入 _badge_coords——_switch_chat 在 OCR 名漏读/坐标缺失时
-        可直接点红圈右下条目（复用 _anchor_badge 思路），不再依赖 OCR 名坐标。
+    @mock.patch("wx_backend.visual_backend.VisualBackend._is_row_selected",
+                side_effect=[False, True])
+    @mock.patch("pyautogui.click")
+    @mock.patch("time.sleep")
+    def test_iter_unread_records_badge_coords(self, _sleep, _click, _sel, _refresh):
+        """红圈坐标通道：产出条目时把红圈屏幕坐标记入 _badge_coords（此刻已知
+        位置、尚无名字）——供 _switch_chat 直点，不回落到列表区 OCR。
         """
         b = self._backend()
-        names = list(b.iter_unread_sessions())
-        self.assertEqual(names, ["王文生"])
+        entries = list(b.iter_unread_sessions())
+        self.assertEqual(entries, [(30, 56)])
         # 红圈整窗中心 (30,56)，窗口偏移 0 → 屏幕坐标 (30,56)
-        self.assertEqual(b._badge_coords.get("王文生"), (30, 56))
+        self.assertEqual(list(b._badge_coords.values()), [(30, 56)])
 
 
 class TestSelectedRowHighlight(unittest.TestCase):

@@ -43,11 +43,9 @@ TASK_DEFAULTS = {
     "listen_hold_seconds": 2,   # 任务完成后延迟恢复消息监听的秒数（缓冲文件发送，防止切窗打断）
 }
 
-# 任务进度转发节流（progress.json 协议）：投递后前 PROGRESS_SILENCE_SECONDS
-# 静默（短任务 result 很快到，进度是噪音）；此后阶段文本变化才发，且每
-# PROGRESS_MIN_INTERVAL_SECONDS 最多一条——天枢写太勤也不会把微信刷屏
-PROGRESS_SILENCE_SECONDS = 120
-PROGRESS_MIN_INTERVAL_SECONDS = 600
+# 任务进度转发（progress.json 协议）：天枢每**新写一次** progress.json 就
+# 回传一次进度——不再有静默期与最小间隔闸门（用户定案）。轮询重复读到同一
+# 份文件不会重复发；「新写入」的判定见 AgentBot._poll_task_progress。
 
 
 def load_merged_config(path="config.json"):
@@ -1015,7 +1013,7 @@ class AgentBot(WeChatBot):
         self.tianshu_workdir = cfg.get("tianshu_workdir", "")  # CLI（rivet）工作目录，resolve_cli_window 第 3 级启动时使用
         self.tianshu_poll_interval = cfg.get("tianshu_poll_interval", 5)
         self._last_poll_time = 0
-        self._progress_state = {}  # 任务 id -> {stage, last_sent, first_seen}（进度转发节流状态）
+        self._progress_state = {}  # 任务 id -> {mtime, stage}（进度回传去重状态）
         self._sending_lock = False  # 成果回传期间置 True，暂停消息轮询防发错联系人
         self._listen_hold_seconds = cfg.get("listen_hold_seconds", 10)
         self._task_was_active = False  # 是否曾因任务暂停监听（用于任务完成后的缓冲期）
@@ -1415,15 +1413,18 @@ class AgentBot(WeChatBot):
             self._poll_task_progress()
 
     def _poll_task_progress(self):
-        """任务进度转发（progress.json 协议）：扫描活跃任务目录的阶段文本，
-        按节流规则转发到微信。天枢侧约定只在关键节点覆写（见 tasks_dir
-        README 与首轮提示词），bot 侧再兜底三重闸门：投递后前 2 分钟静默、
-        阶段文本变化才发、每 10 分钟最多一条。result.json 出现后由
-        _poll_outbox 负责回传与归档，此处只处理未完成任务；已结束任务的
-        转发状态随之清理。"""
+        """任务进度转发（progress.json 协议）：天枢每新写一次 progress.json，
+        就回传一次进度到微信。
+
+        「新写入」判定 = 文件 mtime 变化 **或** stage 文本变化（二者任一）：
+        轮询重复读到同一份文件不重复发；天枢用同一段文本覆写也算一次新写入
+        （mtime 变了），照发。不再有静默期 / 最小间隔闸门——写多勤就报多勤，
+        天枢侧靠「只在关键节点写」自律（见 tasks_dir 的 README 与首轮提示词）。
+
+        result.json 出现后由 _poll_outbox 负责回传与归档，此处只处理未完成
+        任务；已结束任务的转发状态随之清理。"""
         if not os.path.isdir(self.tasks_dir):
             return
-        now = time.time()
         active = set()
         for name in sorted(os.listdir(self.tasks_dir)):
             task_dir = os.path.join(self.tasks_dir, name)
@@ -1434,24 +1435,21 @@ class AgentBot(WeChatBot):
             if os.path.isfile(os.path.join(task_dir, "result.json")):
                 continue  # 已完成待回传：发送与归档由 _poll_outbox 负责
             active.add(name)
+            pfile = os.path.join(task_dir, "progress.json")
             try:
-                with open(os.path.join(task_dir, "progress.json"),
-                          "r", encoding="utf-8") as f:
+                mtime = os.path.getmtime(pfile)
+                with open(pfile, "r", encoding="utf-8") as f:
                     stage = str(json.load(f).get("stage") or "").strip()
             except (OSError, ValueError):
                 continue
             if not stage:
                 continue
             st = self._progress_state.setdefault(
-                name, {"stage": None, "last_sent": 0.0, "first_seen": now})
-            if now - st["first_seen"] < PROGRESS_SILENCE_SECONDS:
-                continue
-            if stage == st["stage"]:
-                continue  # 阶段没变不发（同内容覆写不刷屏）
-            if now - st["last_sent"] < PROGRESS_MIN_INTERVAL_SECONDS:
-                continue
+                name, {"mtime": None, "stage": None})
+            if st["mtime"] == mtime and st["stage"] == stage:
+                continue  # 文件没被重新写过 → 不重复回传
+            st["mtime"] = mtime
             st["stage"] = stage
-            st["last_sent"] = now
             chat = ""
             try:
                 with open(os.path.join(task_dir, "task.json"),
@@ -1868,40 +1866,58 @@ class AgentBot(WeChatBot):
         try:
             # A: 红圈检测
             if hasattr(self.wx, "iter_unread_sessions"):
+                # 红圈链路由后端在迭代时点击该行并做了选中复验（几何驱动）
+                # → 后续 analyze_window 不必再切一次、再读一次标题
                 sessions = list(self.wx.iter_unread_sessions())
+                switched = True
             else:
                 sessions = list(self.wx.iter_sessions())
+                switched = False
             if not sessions:
                 return
-            for chat_name in sessions:
-                if not chat_name:
+            for entry in sessions:
+                if not entry:
                     continue
-                # 失败退避：上次处理未产出回复（红圈滞留）的会话暂跳过
-                if time.time() - self._chat_fail_at.get(chat_name, 0.0) < self._fail_backoff:
-                    logger.debug(f"[退避] {chat_name} 上次处理失败未满 {self._fail_backoff:.0f}s，跳过")
+                # 退避键：红圈链路给位置条目（坐标，8s 窗口内稳定），
+                # 降级路径给会话名。
+                key = f"{entry[0]},{entry[1]}" if switched else entry
+                # 失败退避：上次处理未产出回复（红圈滞留）的条目暂跳过
+                if time.time() - self._chat_fail_at.get(key, 0.0) < self._fail_backoff:
+                    logger.debug(f"[退避] {key} 上次处理失败未满 {self._fail_backoff:.0f}s，跳过")
                     continue
-                logger.info(f"🔔 发现新消息：{chat_name}")
+                logger.info(f"🔔 发现新消息（未读条目 {key}）"
+                            f"{'，会话名由标题区给出' if switched else ''}")
                 t0 = time.time()  # 端到端回复耗时起点（识别到红圈）
                 try:
-                    handled = self._handle_unread_session(chat_name)
+                    handled = self._handle_unread_session(entry, switched=switched)
                 except Exception as e:
-                    logger.error(f"处理会话 {chat_name} 异常: {e}\n{traceback.format_exc()}")
+                    logger.error(f"处理会话 {key} 异常: {e}\n{traceback.format_exc()}")
                     handled = False
                 if handled:
                     self._record_reply_latency(t0)
-                    self._chat_fail_at.pop(chat_name, None)  # 处理成功，解除退避
+                    self._chat_fail_at.pop(key, None)  # 处理成功，解除退避
                     self.last_reply_time = time.time()
                     return  # 每轮只处理一个会话，回复后回到红点监听
-                self._chat_fail_at[chat_name] = time.time()
+                self._chat_fail_at[key] = time.time()
         except Exception as e:
             logger.error(f"Message processing error: {e}\n{traceback.format_exc()}")
 
-    def _handle_unread_session(self, chat_name):
+    def _handle_unread_session(self, entry, switched=False):
         """处理一个未读会话：窗口边界（bot 最后回复之后的对方消息）+ 分类分发。
+
+        entry：红圈几何链路给的是**位置条目** `(x, y)`（switched=True——此刻
+        窗口已被点过去，会话名还不知道）；降级路径（iter_sessions）给的是
+        会话名（switched=False）。
+
+        会话名统一在 `_window_msgs` 之后取——那一步的 `get_messages` 会做
+        联合 OCR（标题带 + 消息区一次读）并刷新 `_current_title`，名字从那
+        里来。位置模式拿不到名字就放弃本轮（fail-closed，不认错会话）。
 
         返回 True = 已处理（回复/投递）；False = 无待处理（回到红点监听）。
         """
         at_tag = f"@{self.nickname}"
+        entry_is_pos = switched and isinstance(entry, tuple)
+        chat_name = None if entry_is_pos else entry
 
         def _window_msgs(win):
             # assume_switched：analyze_window 刚完成切换+读标题（同一处理
@@ -1930,9 +1946,10 @@ class AgentBot(WeChatBot):
         # 占位回复（_pending_placeholders，占位发送时 +1、实质回复归零），
         # 占位"正在处理中"不顶掉用户的新消息。
         win = self.wx.analyze_window(
-            chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0))
+            chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0),
+            assume_switched=switched)
         if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
-            logger.info(f"[跳过] {chat_name} 窗口空（bot 已回复或无对方消息）")
+            logger.info(f"[跳过] {chat_name or entry} 窗口空（bot 已回复或无对方消息）")
             return False
         # 先读一次窗口内文字，判断是否有文件（OCR 扩展名）。文件卡片在视觉层
         # 被判普通气泡（has_text 而非 has_media），但文件下载/渲染同样需防抖。
@@ -1946,17 +1963,35 @@ class AgentBot(WeChatBot):
         if win.get("has_media") or has_file_initial:
             time.sleep(10)
             win = self.wx.analyze_window(
-                chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0))
+                chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0),
+                assume_switched=switched)
             if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
                 return False
             window_msgs = _window_msgs(win)
-        # 会话身份以标题区读取为主（用户定案）：列表条带名只是锚点，标题
-        # 解析出的权威名统一用于记忆/回复/日志——否则条带 OCR 漏字产生的
-        # 残缺名（真机 '强盗”集'）会落进 memory 键
+        # 会话身份以标题区读取为准（用户定案）：标题解析出的权威名统一用于
+        # 记忆/回复/日志。位置模式（红圈几何链路）下 chat_name 此刻还是 None
+        # ——名字只能从这里拿（`_window_msgs` 的联合 OCR 刚刷新了
+        # `_current_title`）；拿不到就放弃本轮：宁可漏一条，也不能把别的
+        # 会话的消息当目标处理。
         canonical = (getattr(self.wx, "_current_title", "") or "").strip()
-        if canonical and canonical != chat_name:
-            logger.info(f"[身份] 会话名以标题为准: {chat_name!r} -> {canonical!r}")
+        if canonical:
+            if chat_name and canonical != chat_name:
+                logger.info(f"[身份] 会话名以标题为准: {chat_name!r} -> {canonical!r}")
             chat_name = canonical
+            logger.info(f"[身份] 本轮会话: {chat_name!r}（标题区）")
+        elif not chat_name:
+            logger.warning(
+                f"[处理] 条目 {entry} 位置模式下标题区为空，无法确定会话身份 → 放弃本轮")
+            return False
+        # 位置模式：首次分析时还不知道会话名，skip_bot 只能按 0 走；拿到权威名后
+        # 若该会话确实挂着占位回复，再分析一次（纯像素、零 OCR）。占位计数决定
+        # bot_bottom 起点，跳错会漏读/误读对方新消息。
+        skip = self._pending_placeholders.get(chat_name, 0)
+        if skip and entry_is_pos:
+            logger.debug(f"[处理] {chat_name!r} 有 {skip} 条占位回复，按名重算 skip_bot")
+            win = self.wx.analyze_window(chat_name, skip_bot=skip,
+                                         assume_switched=True)
+            window_msgs = _window_msgs(win)
         # 群聊判定（本次会话权威值）：联合 OCR 的标题解析已在 _window_msgs
         # 内刷新 _current_is_group（标题不再在 analyze 阶段单独读——事件内
         # OCR 两次封顶）；缺失时回退名称启发式。

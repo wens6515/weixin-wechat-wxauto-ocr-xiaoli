@@ -367,24 +367,6 @@ class WeChatBot:
         with self._model_lock:
             self.chat_top_p = float(value)
 
-    def _load_memory(self):
-        if os.path.exists(self.memory_file):
-            try:
-                with open(self.memory_file, "r", encoding="utf-8") as f:
-                    self.memory_db = migrate_memory_data(json.load(f))
-            except Exception as e:
-                logger.error(f"加载记忆失败: {e}，将使用空白记忆")
-                self.memory_db = {}
-        # 启动一次性溢出搬运：v1 迁移来的长历史超出 recent 上限的部分
-        # 全部归档进深层文件（永不删除）；同时建立深层行数计数
-        for chat, st in self.memory_db.items():
-            cap = self._recent_cap(chat)
-            if len(st["recent"]) > cap:
-                for msg in st["recent"][:-cap]:
-                    self._append_deep(chat, msg)
-                st["recent"] = st["recent"][-cap:]
-            self._deep_count[chat] = self._count_deep(chat)
-
     def _chat_overrides(self, chat_id):
         """per-chat 角色卡绑定参数（未绑定/未投影返回空 dict）。
 

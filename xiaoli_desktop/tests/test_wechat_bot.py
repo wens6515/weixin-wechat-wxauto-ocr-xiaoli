@@ -234,6 +234,9 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._fail_backoff = 8.0
         bot._pending_placeholders = {}
         bot.wx = wx
+        # 位置模式（红圈几何链路）下会话身份来自标题区：真实后端由
+        # get_messages 的联合 OCR 刷新 _current_title，桩在这里直接给出。
+        wx._current_title = "小王"
         bot.nickname = "小漓"
         return bot
 
@@ -244,7 +247,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         class FakeWx:
             def iter_unread_sessions(self):
                 calls["unread"] += 1
-                return iter(["王文生"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 163)])   # 位置条目（真实后端契约）
 
             def iter_sessions(self):
                 calls["sessions"] += 1
@@ -265,7 +269,8 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         class FakeWx:
             def iter_sessions(self):
                 calls["sessions"] += 1
-                return iter(["王文生"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 163)])   # 位置条目（真实后端契约）
 
             def get_messages(self, chat, assume_switched=False):
                 return []
@@ -292,9 +297,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
 
         class FakeWx:
             def iter_unread_sessions(self):
-                return iter(["王文生"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 163)])   # 位置条目（真实后端契约）
 
-            def analyze_window(self, chat, skip_bot=0):
+            def analyze_window(self, chat, skip_bot=0, assume_switched=False):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False,
                         "is_group": False, "width": 747, "height": 1135}
@@ -355,9 +361,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                 self.read_marks.append(1)
 
             def iter_unread_sessions(self):
-                return iter(["强盗”集团"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 294)])   # 位置条目（真实后端契约）
 
-            def analyze_window(self, chat, skip_bot=0):
+            def analyze_window(self, chat, skip_bot=0, assume_switched=False):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
@@ -412,9 +419,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             _current_is_group = True  # 上一轮群聊残留
 
             def iter_unread_sessions(self):
-                return iter(["王文生"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 163)])   # 位置条目（真实后端契约）
 
-            def analyze_window(self, chat, skip_bot=0):
+            def analyze_window(self, chat, skip_bot=0, assume_switched=False):
                 # 合并后 analyze_window 纯像素（不读标题）
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False,
@@ -466,9 +474,10 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
             _current_is_group = True
 
             def iter_unread_sessions(self):
-                return iter(["强盗”集团"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 294)])   # 位置条目（真实后端契约）
 
-            def analyze_window(self, chat, skip_bot=0):
+            def analyze_window(self, chat, skip_bot=0, assume_switched=False):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
@@ -667,9 +676,10 @@ class TestGroupMultiSenderText(unittest.TestCase):
             _current_is_group = True
 
             def iter_unread_sessions(self):
-                return iter(["强盗”集团"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 294)])   # 位置条目（真实后端契约）
 
-            def analyze_window(self, chat, skip_bot=0):
+            def analyze_window(self, chat, skip_bot=0, assume_switched=False):
                 return {"bot_bottom": None, "other_text": [], "other_media": [],
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
@@ -738,7 +748,8 @@ class TestGroupMultiSenderText(unittest.TestCase):
             _current_is_group = True
 
             def iter_unread_sessions(self):
-                return iter(["强盗”集团"])
+                self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
+                return iter([(100, 294)])   # 位置条目（真实后端契约）
 
             def get_messages(self, chat, assume_switched=False):
                 return [

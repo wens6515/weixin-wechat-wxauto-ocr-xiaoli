@@ -832,6 +832,19 @@ def _norm_chat_key(name: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
+def _same_chat_name(a: str, b: str) -> bool:
+    """两个会话名是否同一会话（容忍 OCR 变体与漏字）。
+
+    归一化后相等，或一方是另一方的前缀。真机 OCR 会把「“强盗”集团」读成
+    「强盗"集团」「强盗”」等残缺形态；严格相等会把"同一会话"判成"不同会话"，
+    于是对已选中的条目白点一下 → toggle 取消选中 → 消息区变空。
+    """
+    ka, kb = _norm_chat_key(a), _norm_chat_key(b)
+    if not ka or not kb:
+        return False
+    return ka == kb or ka.startswith(kb) or kb.startswith(ka)
+
+
 # 自学习选中高亮：微信列表选中条目有浅灰高亮背景（浅色主题 ≈ #F0F0F0，
 # 未选中纯白 #FFFFFF，差值 15~25）。PrintWindow 像素稳定（噪声 <3），
 # 容差取 12 夹在两者之间——既能容忍截图噪声，又不会把纯白误判成高亮。
@@ -839,6 +852,9 @@ _ROW_COLOR_TOL = 12
 # 红圈锚定点击偏移：红圈在头像左上角，条目主体在头像右侧 ~45px
 # （与 _anchor_badge 同一真机标定）。
 _BADGE_CLICK_OFFSET_X = 45
+# 同一行红圈簇的归并容差（像素）：行高约 113px，取 40 足以区分相邻行、又能
+# 合并同一行内被切开的重复簇（不需要会话名就能去重）。
+_BADGE_ROW_TOL = 40
 
 
 def _color_close(a: tuple, b: tuple, tol: int = _ROW_COLOR_TOL) -> bool:
@@ -1245,16 +1261,25 @@ class VisualBackend:
         picked = self._pick_main_name(items)
         return picked[0] if picked else None
 
-    def iter_unread_sessions(self) -> Iterator[str]:
+    def iter_unread_sessions(self) -> Iterator[tuple[int, int]]:
         """仅迭代有未读红圈角标的会话（可选能力，wxauto 等后端可不提供）。
 
-        效率路径（事件热路径 OCR ①）：
-        1. 最小化哨兵 + 截图 force（红圈像素检测毫秒级，无 diff 保护）
-        2. 无红簇 → 直接结束（零 OCR 零点击）
-        3. 有红簇 → 列表区整块 OCR 一次（~0.46s，一次覆盖所有红圈；整块
-           读到的名字不会被条带切碎），再按红圈几何锚定挨个取会话名
-        4. 锚定失败的红圈 → 整表 OCR + 几何匹配旧路径兜底；仍失败 →
-           红圈锚定 fallback（点击红圈右下条目，读顶部标题）
+        **全程零 OCR**（用户定案：会话名在切过去之后，跟消息内容一起读）：
+        1. 最小化哨兵 + 后台静默截图 → 红圈像素检测（毫秒级）
+        2. 逐个红圈（按屏幕 y 自上而下）：
+           a. `_is_row_selected(红圈 y)` 命中 → 该红圈属于当前已选中会话 →
+              **不点击**（微信列表是 toggle：点已选中条目会取消选中、消息区变空）；
+           b. 未命中 → `_click_badge_row()` 按红圈几何点击切过去（y + 45px
+              横向偏移，真机标定），再用**像素复验**该行已选中；复验不过 =
+              点击落空 → **不产出**（fail-closed：宁可不处理，也不认错会话）。
+        3. 产出**位置条目** `(红圈中心 x, 红圈中心 y)`（屏幕坐标）。会话名不在
+           这里取——`_handle_unread_session` 切过去后由 `get_messages` 的**联合
+           OCR**（标题带 + 消息区一次读）给出权威名并刷新 `_current_title`。
+
+        为什么不在迭代期读名字：列表名只是锚点、下游本来就用标题区覆盖它，
+        而在迭代期读标题会白白多一次 OCR——一次处理事件本该只有联合那一次。
+        真机依据：.rivet/scratch/probe_geo_judge.py（要不要切）、probe_geo_click.py
+        （点击落点）、measure_ocr_budget.py（OCR 预算对比）。
         """
         if self._ensure_not_iconic():
             return  # 最小化态截图是占位垃圾（真机 276x45），恢复后下一轮再扫
@@ -1267,72 +1292,45 @@ class VisualBackend:
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
-        # 列表区局部坐标系（红圈锚定的换算基准）
-        w, h = shot.size
-        sr = self._session_region
-        sl, st = int(w * sr[0]), int(h * sr[1])
-        srr, sbb = int(w * sr[2]), int(h * sr[3])
-        seen: set[str] = set()
+        seen_rows: list[int] = []
         self._badge_coords.clear()  # 每轮重建（红圈坐标通道：供 _switch_chat 点击直用）
-        strip_failed = []
-        list_blocks = None  # 列表区 OCR 惰性一次（真出现红圈才付这个成本）
-        for (bl, bt, br, bb) in badges:
+        # 自上而下处理：与列表视觉顺序一致，也让「每轮只处理一个」的推进稳定
+        for (bl, bt, br, bb) in sorted(badges, key=lambda b: (b[1], b[0])):
             bcx = win_l + (bl + br) // 2
             bcy = win_t + (bt + bb) // 2
-            # 命名走「列表区整块 OCR + 红圈几何锚定」：条带裁剪会把
-            # 「“强盗”集团」切成「“强盗”」+「集团」两块，取上半块得到
-            # 残缺名（真机日志 303 次「强盗”」即此因）。
-            if list_blocks is None:
-                list_blocks = ocr_image(shot.crop((sl, st, srr, sbb)))
-            blk = _pick_block_near_badge(
-                (bcx - win_l - sl, bcy - win_t - st), list_blocks)
-            name = blk["text"].strip() if blk else None
-            if name:
-                if name in seen:
-                    logger.debug(f"[未读] {name!r} 已有红圈（重复角标，跳过）")
-                    continue
-                seen.add(name)
-                self._badge_coords[name] = (bcx, bcy)
-                # 点击坐标取名字块中心——比「红圈 + 固定偏移」可靠：真机
-                # 出现过偏移点击落到相邻条目的情形（20:05:38 日志红圈锚定
-                # 「强盗”」切过去，标题读到的是「王文生」）。
-                self._session_coords[name] = (
-                    win_l + sl + blk["x"] + blk["w"] // 2,
-                    win_t + st + blk["y"] + blk["h"] // 2,
-                )
-                logger.debug(f"[未读] {name!r} 红圈屏幕 ({bcx},{bcy})")
-                yield name
-            else:
-                strip_failed.append((bcx, bcy))
-        if not strip_failed:
-            return
-        # 整表 OCR 兜底（旧路径：几何匹配红圈 ↔ 会话名）
-        coords = self._extract_session_names(shot)
-        for (bcx, bcy) in strip_failed:
-            best = None
-            best_d = 1e9
-            for name, (sx, sy) in coords.items():
-                if abs(bcy - sy) >= 60:
-                    continue
-                if bcx >= sx:  # 红簇必须在名字左侧（左上角角标）
-                    continue
-                d = abs(bcy - sy) + (sx - bcx)
-                if d < best_d:
-                    best_d = d
-                    best = name
-            if best is not None and best not in seen:
-                seen.add(best)
-                self._badge_coords[best] = (bcx, bcy)
-                logger.debug(f"[未读] {best!r} 红圈屏幕 ({bcx},{bcy})（整表兜底）")
-                yield best
-            elif best is None:
-                # 红圈锚定 fallback：会话名 OCR 漏读时，点击红圈右下条目，
-                # 读顶部标题拿会话名（根治"王文生漏消息"——红圈可靠，别被 OCR 拖垮）
-                anchored = self._anchor_badge(bcx, bcy)
-                if anchored and anchored not in seen:
-                    seen.add(anchored)
-                    self._badge_coords[anchored] = (bcx, bcy)
-                    yield anchored
+            if any(abs(bcy - y) < _BADGE_ROW_TOL for y in seen_rows):
+                continue  # 同一行的重复红圈簇：按行归并（不需要名字就能去重）
+            seen_rows.append(bcy)
+            if not self._is_row_selected(bcy):
+                if not self._click_badge_row(bcx, bcy):
+                    continue  # 点击后选中未转移 → 放弃该条目
+            self._badge_coords.setdefault(bcy, (bcx, bcy))
+            logger.debug(f"[未读] 红圈屏幕 ({bcx},{bcy}) → 条目（名字稍后由标题区给出）")
+            yield (bcx, bcy)
+
+    def _click_badge_row(self, bcx: int, bcy: int) -> bool:
+        """点击红圈所在条目行，并**用像素复验选中已转移**（全程零 OCR）。
+
+        红圈在头像左上角、条目主体在其右侧约 45px（`_BADGE_CLICK_OFFSET_X`
+        真机标定）。复验依据与 `_is_row_selected` 同一套——微信用背景高亮标出
+        选中条目。复验不过 = 点击落空 → 返回 False，调用方放弃该条目。
+        """
+        try:
+            import pyautogui
+            self._foreground()  # 点击依赖前台，先置前微信窗口
+            pyautogui.click(bcx + _BADGE_CLICK_OFFSET_X, bcy)
+            time.sleep(0.6)     # 等列表选中态与消息区刷新
+        except Exception as e:
+            logger.warning(f"[未读] 红圈 ({bcx},{bcy}) 点击失败: {e}")
+            return False
+        if self._selected_row_color is None:
+            logger.debug("[未读] 无可比对的选中高亮色，信任本次点击")
+            return True
+        if not self._is_row_selected(bcy):
+            logger.warning(
+                f"[未读] 红圈 ({bcx},{bcy}) 点击后选中未转移——放弃该条目，防认错会话")
+            return False
+        return True
 
     def _anchor_badge(self, bcx: int, bcy: int) -> str | None:
         """红圈锚定 fallback：点击红圈右下（联系人条目），读顶部标题拿会话名。
@@ -1417,11 +1415,16 @@ class VisualBackend:
         get_messages 读到 0 条时的 toggle 兜底重试。
 
         已选中判定优先级（force=False）：
-        1. 选中高亮（自学习，_is_row_selected）——最强信号：微信 UI 直接
-           用背景高亮标出选中条目，不受 OCR 全半角/emoji 差异影响。
-        2. UI 标题区 OCR（read_title）——_current_chat 是进程内状态，与
-           微信 UI 实际选中可能失同步（bot 重启清空/用户手动切换）。
-        3. 内存 _current_chat——前两者失败时的兜底。
+        1. UI 标题区 OCR（read_title）——**权威信号**：标题显示哪个会话，
+           微信就停在哪个会话。标题是目标即已选中（不点击）；标题是**别的**
+           会话即"不在目标"，此时不再看低优先级信号，直接走切换。
+        2. 标题读不到时（被遮挡/OCR 空），才退回：选中高亮像素
+           （_is_row_selected）→ 内存 _current_chat。
+           低优先级信号**不得覆盖标题的否定证据**：_current_chat 只在点击
+           成功时更新，用户手动切换微信不会通知本进程，拿它当依据会把
+           "窗口停在别的会话"误判成"已在目标会话"（真机缺陷：小漓在王文生
+           回复完、用户手动切到别的群，王文生再来消息时不切换、读到的是别的
+           会话的消息）。
 
         坐标来源优先级：OCR 会话名坐标 → _badge_coords 红圈坐标直点
         （OCR 名漏读时点红圈右下条目主体，复用 _anchor_badge 标定）。
@@ -1429,28 +1432,39 @@ class VisualBackend:
         自学习缓存选中高亮（_learn_selected_row_color）。
         """
         if not force:
-            # 1) 选中高亮检测（自学习；后台静默截图，不置前打断用户）
-            try:
-                item_y = None
-                if chat in self._session_coords:
-                    item_y = self._session_coords[chat][1]
-                elif chat in self._badge_coords:
-                    item_y = self._badge_coords[chat][1]
-                if item_y is not None and self._is_row_selected(item_y):
-                    self._current_chat = chat
-                    return True
-            except Exception:
-                pass
-            # 2) UI 检测：标题区显示目标会话 = 已选中（后台静默截图，不置前）
+            # 1) 标题区 OCR = 权威信号：它读到什么，微信就停在什么会话上。
+            #    （后台静默截图，不置前打断用户）
+            title = None
             try:
                 title = self.read_title(foreground=False)
-                if title and parse_title(title)[0] == chat:
-                    self._current_chat = chat
-                    return True
             except Exception:
                 pass
-            if self._current_chat == chat:
-                return True  # 已选中（UI 检测失败时退回到内存状态）
+            if title:
+                if _same_chat_name(parse_title(title)[0], chat):
+                    self._current_chat = chat
+                    return True
+                # 标题明确显示的是**别的**会话 → 当前不在目标会话，继续往下
+                # 走切换。**不得**在这里退回 _current_chat：它只在点击成功时
+                # 更新，用户手动切换微信不会通知本进程（真机缺陷：小漓在
+                # 王文生回复完，用户手动切到「“强盗”集团」，王文生再来新消息
+                # 时被判为"已在目标会话"→ 不点击 → 读到的是强盗集团的消息；
+                # 真机探针实测标题='“强盗”集团(5)' 而 _current_chat 仍='王文生'）。
+            else:
+                # 2) 标题读不到（窗口被遮挡 / OCR 空）→ 才退回像素高亮与内存
+                #    状态，用来避免"重复点已选中条目 → toggle 取消选中"。
+                try:
+                    item_y = None
+                    if chat in self._session_coords:
+                        item_y = self._session_coords[chat][1]
+                    elif chat in self._badge_coords:
+                        item_y = self._badge_coords[chat][1]
+                    if item_y is not None and self._is_row_selected(item_y):
+                        self._current_chat = chat
+                        return True
+                except Exception:
+                    pass
+                if self._current_chat == chat:
+                    return True  # 已选中（标题与像素都读不到时的最后兜底）
         if chat not in self._session_coords:
             # 坐标未知：先刷新会话列表
             list(self.iter_sessions())
@@ -1483,8 +1497,7 @@ class VisualBackend:
             try:
                 title = self.read_title(foreground=False)
                 parsed = parse_title(title)[0] if title else ""
-                if title and (parsed == chat or parsed.startswith(chat)
-                              or chat.startswith(parsed)):
+                if title and _same_chat_name(parsed, chat):
                     self._learn_selected_row_color(coord[1])
             except Exception:
                 pass
@@ -1545,7 +1558,7 @@ class VisualBackend:
         self._selected_row_color = rgb
         logger.info(f"[高亮] 采样选中行背景色 {rgb}（y={screen_y}）")
 
-    def get_messages(self, chat: str, limit: int | None = None,
+    def get_messages(self, chat: str | None, limit: int | None = None,
                      assume_switched: bool = False) -> list[WeChatMessage]:
         """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
 
@@ -1559,11 +1572,15 @@ class VisualBackend:
         事件热路径提速的核心）。标题/群聊标记直接用缓存；消息区读空时
         仍会走 force 重切兜底（toggle 取消选中防线保留）。
         """
-        if assume_switched and self._current_chat == chat:
+        if assume_switched and (chat is None or self._current_chat == chat):
             # 诊断行降 DEBUG：每个含文件/媒体的事件跑两遍读取管线（10s 防抖），
             # INFO 级会刷爆前端日志（bot_run.log）；排障看 bot.log 全量
             logger.debug(f"[读取] {chat!r} 标题={self._current_title!r}（复用切换结果）")
         else:
+            if chat is None:
+                logger.warning("[读取] 位置模式下未走联合路径（assume_switched=False），"
+                               "无法确定会话 → 放弃本次读取")
+                return []
             # 先切换到目标会话（visual 通道必须点击切换，无法像 wxauto4 ChatWith 直达）
             self._switch_chat(chat)
             # 读当前会话标题：会话名权威来源 + 群聊判定（标题带括号人数）。
@@ -1599,8 +1616,8 @@ class VisualBackend:
             # 对比无内容丢失，省略号/头像噪声反而更好），消息区联合 OCR
             # 1579ms → 631ms。坐标口径全线 1x，几何阈值线性减半行为不变。
             region = region_1x
-            if assume_switched and self._current_chat == chat:
-                # ---- 联合裁剪 OCR（用户定案：事件内 OCR 两次封顶）----
+            if assume_switched and (chat is None or self._current_chat == chat):
+                # ---- 联合裁剪 OCR（用户定案：事件内 OCR 一次）----
                 # 标题带 + 消息区一次读：联合区 = 标题区 ∪ 消息区，下边框
                 # 钉在标定消息区下沿（输入框永不入镜）。标题行 = 联合区内
                 # 消息区上沿以上（1x 坐标）；消息行平移回消息区 1x 坐标系，
@@ -1622,6 +1639,13 @@ class VisualBackend:
                 # 空标题防线（自 analyze_window 迁入）：标题区读空多为
                 # toggle 取消选中/黑图——force 重切，attempt 循环兜底重试
                 if not title:
+                    if chat is None:
+                        # 位置模式：没有会话名可切，且标题区空说明窗口状态不可信
+                        # （多为 toggle 取消选中）→ 放弃本次读取，让上层下一轮
+                        # 重新按红圈定位。**不得**回落到列表/整窗 OCR 找会话。
+                        logger.warning("[读取] 位置模式下标题区空（疑似取消选中），"
+                                       "放弃本次读取，等下一轮红圈定位")
+                        return []
                     logger.warning(f"[读取] {chat!r} 标题区空（联合 OCR），force 重切")
                     self._switch_chat(chat, force=True)
                 else:
@@ -1629,6 +1653,12 @@ class VisualBackend:
                     name, is_group, _ = parse_title(title)
                     self._current_title = name or chat
                     self._current_is_group = is_group
+                    if chat is None:
+                        # 位置模式（红圈几何链路）：调用方只知道条目位置，会话名
+                        # 正是由这次联合 OCR 给出的——回填 chat，供私聊 sender
+                        # 与每条消息的 chat 字段使用。不回填的话 sender=None 会被
+                        # 上层的「对方消息」过滤整条丢掉（实测：消息读到但被丢）。
+                        chat = self._current_title
                 # 消息行平移回消息区 1x 坐标系（几何检测沿用消息区子图）；
                 # 标题区下沿与消息区上沿夹缝的内容一并归消息带
                 dx = int(w * self._message_region[0]) - u_l
@@ -2071,11 +2101,17 @@ class VisualBackend:
                 for (t, b, l, r) in boxes]
 
     def analyze_window(self, chat: str, foreground: bool = True,
-                       skip_bot: int = 0) -> dict:
+                       skip_bot: int = 0,
+                       assume_switched: bool = False) -> dict:
         """切会话 + 截图 + 气泡/媒体分析，返回窗口内消息结构（不 OCR 文字）。
 
         供上层先判断「窗口内是否只有文字」还是「有图/文件」，再决定
         sleep 10s 防话没说完 / OCR 读文字。
+
+        assume_switched：调用方在**同一次处理事件**里刚切过（红圈几何链路：
+        `iter_unread_sessions` 已点击该行并用像素复验选中）→ 跳过首切，省
+        一次点击与一次标题 OCR。只省首切——分析为空时的 force 重切兜底
+        （toggle 取消选中防线）保留不动。
 
         bot 消息判定：头像几何（右侧窄带非背景块=bot 头像，左侧=对方头像）。
         无需头像模板、无需绿气泡色、无需宽度阈值——头像大小/位置固定，
@@ -2099,12 +2135,13 @@ class VisualBackend:
             "width": int, "height": int,
         }
         """
-        self._switch_chat(chat)
-        # 纯像素分析（不再单独读标题——用户定案：事件内 OCR 两次封顶，
-        # 即列表条带锚定 + 标题/消息联合 OCR）。权威 is_group 由
-        # get_messages(assume_switched=True) 的联合 OCR 标题解析在读取
-        # 消息时刷新 _current_is_group；本返回值的 is_group 仅为缓存快照
-        # （可能来自上一轮事件），调用方必须在 _window_msgs 之后再取缓存。
+        if not assume_switched:
+            self._switch_chat(chat)
+        # 纯像素分析（本函数不读标题）。事件内 OCR 预算：会话身份与群聊标记由
+        # get_messages(assume_switched=True) 的**联合 OCR**（标题带 + 消息区
+        # 一次读）给出——权威 is_group 在那里解析并刷新 _current_is_group；
+        # 本返回值的 is_group 仅为缓存快照（可能来自上一轮事件），调用方必须
+        # 在 _window_msgs 之后再取缓存。
         is_group = bool(getattr(self, "_current_is_group", False))
         empty = {"bot_bottom": None, "other_first_top": None,
                  "other_text": [], "other_media": [],
@@ -2113,8 +2150,14 @@ class VisualBackend:
         for attempt in range(2):
             if attempt > 0:
                 # 第一次分析结果为空：可能 toggle 取消选中（_switch_chat 标题
-                # 检测在微信被遮挡时失败，误点击已选中会话），force 重切恢复选中
-                self._switch_chat(chat, force=True)
+                # 检测在微信被遮挡时失败，误点击已选中会话），force 重切恢复选中。
+                # 位置模式（assume_switched=True，调用方只知道未读条目位置、
+                # 还不知道会话名）下没有名字可切——由上层用红圈位置重新点击。
+                if chat:
+                    self._switch_chat(chat, force=True)
+                else:
+                    logger.warning(
+                        "[分析] 窗口疑似取消选中，但位置模式下无会话名可切，交由上层重试")
             shot = self._refresh(force=True, foreground=foreground)
             if shot is None:
                 continue
