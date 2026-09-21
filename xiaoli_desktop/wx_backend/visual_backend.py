@@ -681,21 +681,37 @@ def region_changed(a: Image.Image, b: Image.Image, region=None,
 
 # 微信未读角标品牌红 ≈ #FA5151 (250,81,81)。容差放宽到 r>=200, g<=130, b<=130：
 # 实测列表区红簇 avg_rgb=(248,80,80)/(249,81,81)，文字/头像红不满足 g/b 上限。
+# 微信未读角标品牌红 #FA5151 ≈ (250,81,81)，特征是 G≈B。
+# 真机实测（.rivet/scratch/red_probe*.py，窗口 1300x1610）：
+#   真角标 518px / 26x27，基色像素 G/B 分布 73~122（median 81）
+#   误报源是消息预览 emoji 边缘的 9 个橙红像素 (237,112,37)——G≫B
+# 旧阈值只卡上限（r>=200, g<=130, b<=130），橙色（b=37）蒙混过关
+# → bot 对同一会话无限循环「发现新消息」。据此补 G/B 双下限。
 _BADGE_R_MIN = 200
+_BADGE_R_MAX = 255
+_BADGE_G_MIN = 60
 _BADGE_G_MAX = 130
+_BADGE_B_MIN = 60
 _BADGE_B_MAX = 130
+# 面积上下限（8 邻接连通域像素数）：微信 PC 角标尺寸固定（约 26x27 ≈ 518px，
+# 不随未读条数变宽）。下限排除零星噪声像素，上限排除红色头像/大块红色图形。
+_BADGE_AREA_MIN = 60
+_BADGE_AREA_MAX = 1000
 
 
 def _detect_red_clusters(shot: Image.Image, grid: int = 20,
                          min_hits: int = 3,
                          region: tuple | None = None,
                          ) -> list[tuple[int, int, int, int]]:
-    """检测会话列表区的红色角标簇，返回整窗图像坐标 [(l, t, r, b), ...]。
+    """检测会话列表区的未读红圈角标，返回整窗图像坐标 [(l, t, r, b), ...]。
 
-    实现：crop 列表区 → 用 PIL point() 生成三通道阈值掩码（C 级，~毫秒级）→
-    收集红色像素 → 按 grid 网格分桶聚合（网格内命中 ≥ min_hits 视为一簇）。
-    相比逐像素 Python 循环（~0.5s），掩码 + 网格分桶约 50ms，且探针实测
-    与 BFS 连通域结果一致（列表区仅角标红为簇，头像/文字红零散不达标）。
+    判定 = 颜色区间（品牌红 G≈B 特征，上下限都卡）+ 连通域面积区间。
+    实现：crop 列表区 → numpy 三通道掩码 → np.where 取命中点 → 只在命中点
+    上跑 8 邻接连通域（真机实测整轮 ~2ms，旧实现的逐像素 Python 扫描整幅
+    图要 ~28ms）。
+
+    grid / min_hits：旧网格分桶参数的兼容保留位，判定已由连通域面积取代，
+    调用方可照旧传（不再影响结果）。
 
     shot 为整窗截图；返回坐标以整窗图像像素为基准（列表区 crop 偏移已加回）。
     region 为列表区相对比例 (l, t, r, b)，缺省用模块默认常量（保持模块级函数可测）。
@@ -708,55 +724,56 @@ def _detect_red_clusters(shot: Image.Image, grid: int = 20,
     st = int(h * sr_region[1])
     sr = int(w * sr_region[2])
     sb = int(h * sr_region[3])
-    region = shot.convert("RGB").crop((sl, st, sr, sb))
-    rw, rh = region.size
+    crop = shot.convert("RGB").crop((sl, st, sr, sb))
+    rw, rh = crop.size
     if rw <= 0 or rh <= 0:
         return []
     try:
-        from PIL import ImageChops
-        r, g, b = region.split()
-        rmask = r.point(lambda v: 255 if v >= _BADGE_R_MIN else 0)
-        gmask = g.point(lambda v: 255 if v <= _BADGE_G_MAX else 0)
-        bmask = b.point(lambda v: 255 if v <= _BADGE_B_MAX else 0)
-        mask = ImageChops.multiply(ImageChops.multiply(rmask, gmask), bmask)
+        import numpy as np
+        arr = np.asarray(crop)
+        r = arr[:, :, 0].astype(np.int16)
+        g = arr[:, :, 1].astype(np.int16)
+        b = arr[:, :, 2].astype(np.int16)
+        mask = ((r >= _BADGE_R_MIN) & (r <= _BADGE_R_MAX)
+                & (g >= _BADGE_G_MIN) & (g <= _BADGE_G_MAX)
+                & (b >= _BADGE_B_MIN) & (b <= _BADGE_B_MAX))
+        ys, xs = np.where(mask)
     except Exception:
         return []
-    data = mask.tobytes()  # 每像素 1 字节（L 模式）
-    # 收集红色像素坐标（20 万像素循环 ~30ms，仅列表区）
-    reds = [(x, y) for y in range(rh) for x in range(rw)
-            if data[y * rw + x]]
-    if not reds:
+    if len(ys) == 0:
         return []
-    # 网格分桶聚合（角标 ~20x20px，网格 20px 内合并为一簇）
-    buckets: dict[tuple[int, int], list[tuple[int, int]]] = {}
-    for x, y in reds:
-        buckets.setdefault((x // grid, y // grid), []).append((x, y))
-    clusters = []
-    for (gx, gy), pts in buckets.items():
-        if len(pts) < min_hits:
+    seen = np.zeros((rh, rw), dtype=bool)
+    out: list[tuple[int, int, int, int]] = []
+    for sy, sx in zip(ys.tolist(), xs.tolist()):
+        if seen[sy, sx]:
             continue
-        minx = min(p[0] for p in pts)
-        maxx = max(p[0] for p in pts)
-        miny = min(p[1] for p in pts)
-        maxy = max(p[1] for p in pts)
-        # 相邻网格合并（角标跨网格边界时）
-        clusters.append((sl + minx, st + miny, sl + maxx, st + maxy))
-    # 合并相邻/重叠簇
-    merged: list[tuple[int, int, int, int]] = []
-    for c in sorted(clusters):
-        if merged and _clusters_overlap(merged[-1], c):
-            p = merged.pop()
-            merged.append((min(p[0], c[0]), min(p[1], c[1]),
-                           max(p[2], c[2]), max(p[3], c[3])))
-        else:
-            merged.append(c)
-    return merged
-
-
-def _clusters_overlap(a: tuple, b: tuple, gap: int = 15) -> bool:
-    """两簇包围盒是否相邻（间隔 ≤ gap 视为同一角标）。"""
-    return not (a[2] + gap < b[0] or b[2] + gap < a[0]
-                or a[3] + gap < b[1] or b[3] + gap < a[1])
+        # 8 邻接连通域（迭代式，避免深图递归爆栈）
+        stack = [(sy, sx)]
+        seen[sy, sx] = True
+        n = 0
+        minx = maxx = sx
+        miny = maxy = sy
+        while stack:
+            cy, cx = stack.pop()
+            n += 1
+            if cx < minx:
+                minx = cx
+            elif cx > maxx:
+                maxx = cx
+            if cy < miny:
+                miny = cy
+            elif cy > maxy:
+                maxy = cy
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    ny, nx = cy + dy, cx + dx
+                    if (0 <= ny < rh and 0 <= nx < rw
+                            and mask[ny, nx] and not seen[ny, nx]):
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+        if _BADGE_AREA_MIN <= n <= _BADGE_AREA_MAX:
+            out.append((sl + minx, st + miny, sl + maxx, st + maxy))
+    return sorted(out)
 
 
 # 自学习选中高亮：微信列表选中条目有浅灰高亮背景（浅色主题 ≈ #F0F0F0，

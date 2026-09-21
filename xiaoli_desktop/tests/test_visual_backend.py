@@ -1194,6 +1194,34 @@ class TestDetectRedClusters(unittest.TestCase):
         d.rectangle([20, 46, 40, 66], fill=(180, 40, 40))  # 深红不达 r>=200
         self.assertEqual(_detect_red_clusters(img), [])
 
+    def test_orange_noise_filtered(self):
+        """emoji 级橙红像素（B 远低于 G）不得判为角标——需 G/B 双下限。
+
+        真机事故根因：列表区消息预览里的 emoji 边缘有 9 个橙红像素
+        (237,112,37)，旧阈值只卡 b<=130 而无下限，橙色（b=37）蒙混过关
+        → bot 对同一会话无限循环「发现新消息」。品牌红特征 G≈B
+        （#FA5151=250,81,81），据此补 G/B 下限。
+        """
+        from wx_backend.visual_backend import _detect_red_clusters
+        from PIL import ImageDraw
+        img = _solid((200, 200), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle([20, 46, 40, 66], fill=(237, 112, 37))  # 橙红：b 远低于 g
+        self.assertEqual(_detect_red_clusters(img), [])
+
+    def test_oversized_red_filtered(self):
+        """整块大红（远超角标尺寸，如红色头像）不得判为角标——需面积上限。
+
+        微信 PC 角标尺寸固定（约 26x27 ≈ 518px，不随未读数变宽），
+        面积上限据此设，用于排除红色头像/大块红色图形。
+        """
+        from wx_backend.visual_backend import _detect_red_clusters
+        from PIL import ImageDraw
+        img = _solid((200, 200), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle([20, 46, 70, 96], fill=(250, 81, 81))  # 51x51 ≈ 2600px
+        self.assertEqual(_detect_red_clusters(img), [])
+
 
 class TestIterUnreadSessions(unittest.TestCase):
     def _backend(self):
