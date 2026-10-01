@@ -25,7 +25,7 @@ from wx_backend.visual_backend import (
     default_right_half_rect,
     position_window_visible,
 )
-from xiaoli_app.config_store import AI_DEFAULTS
+from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
 from xiaoli_app.usage_store import UsageStore
 from xiaoli_app.web_search import (web_search, web_fetch, WebSearchError,
                                    format_search_results)
@@ -113,6 +113,28 @@ VISION_MODEL_DEFAULT = "deepseek-v4-flash-vision-exp"
 # vision 工具循环的补全调用上限：搜索 + 抓取（含换源重试一次）+ 作答（防循环烧钱）
 VISION_TOOL_ROUNDS = 4
 
+# 回复长度的物理上限（两条链路共用：vision 与 chat）。历史默认 10000 ≈ 没有
+# 限制，长回复就是「AI 味」最直接的来源；配合 REPLY_STYLE_RULES 的 1-3 句
+# 纪律一起用。带 reasoning 的模型 max_tokens 包含思考 token，压太狠会出空
+# 回复（空 content 已有降级保护，不会炸），故留 400 起步。
+REPLY_MAX_TOKENS = 400
+
+# 回复分段的段间间隔（秒，用户定案：固定 2s）。注意底层视觉后端「发一条」
+# 本身约 0.6~0.8s（点输入框 / 剪贴板 / 回车），本间隔是在它之上的额外等待；
+# 首段前不等、末段后不等。
+REPLY_SEGMENT_INTERVAL_SECONDS = 2.0
+
+
+def _strip_trailing_period(part):
+    """剥掉段尾的中文句号（只剥**单个**；`。。` 等连续句号一律不动）。
+
+    微信里真人很少打句号，末尾挂着句号最像「写作文」；感叹号/问号保留
+    （用户定案：语气靠它们）。英文句点不处理——避免误伤网址、小数、版本号。
+    """
+    if part.endswith("。") and not part.endswith("。。"):
+        return part[:-1]
+    return part
+
 
 # API 最终失败时的角色内兜底回复（不写入对话历史；池子随机避免机器人复读同句）
 FRIENDLY_API_ERROR_REPLIES = (
@@ -127,11 +149,10 @@ FRIENDLY_API_ERROR_REPLIES = (
 # 曾用旧两段式时代的 vision_prompt（「专业图像描述AI，客观复述图片」），把
 # 复述文本当角色回复原样发出——已废弃统一到角色化链路。
 VISION_IMAGE_PROMPT = (
-    "请严格遵守以上人设（包括不用 emoji、改用颜文字）。用户发来了一张或多张图片"
-    "（没有附带文字；多张时按发送顺序给出，可能相互关联，请结合起来看）。"
-    "请看图后直接以你的身份回复用户（可以评价、接梗、回答图里的问题）；"
-    "如果图片明显是任务材料（如文档截图、带指令的截图、需要处理的内容），"
-    "调用 dispatch_task 工具投递任务，任务描述写在工具参数里。"
+    "有人给你发来了一张或多张图片（没有附带文字；多张时按发送顺序给出，"
+    "可能相互关联，请结合起来看）。照你平时的样子回他——可以评价、接梗、"
+    "回答图里的问题；如果图片明显是任务材料（如文档截图、带指令的截图、"
+    "需要处理的内容），调用 dispatch_task 工具把活交出去，任务描述写在工具参数里。"
 )
 
 
@@ -299,9 +320,11 @@ class WeChatBot:
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
         # 单模型化后视觉调用随聊天链路：模型取 chat_model、温度取
         # chat_temperature、system 取 system_prompt（vision_prompt/vision_temp
-        # 已随「图片复述」路径废弃删除）；vision_max_tokens 保留为视觉
-        # max_tokens 独立上限（数据层已删键，此处 get 内置默认兜底）
-        self.vision_max_tokens = cfg.get("vision_max_tokens", 10000)
+        # 已随「图片复述」路径废弃删除）。vision_max_tokens 保留历史键名，
+        # 现在就是**两条链路共用的回复长度上限**（默认 REPLY_MAX_TOKENS，
+        # 见文件头常量）；chat 链路读 reply_max_tokens——同源赋值，不做两套默认。
+        self.vision_max_tokens = int(cfg.get("vision_max_tokens", REPLY_MAX_TOKENS))
+        self.reply_max_tokens = self.vision_max_tokens
         self.system_prompt = cfg.get("system_prompt", AI_DEFAULTS["system_prompt"])
         self.max_history = cfg.get("max_history", AI_DEFAULTS["max_history"])
         self.cooldown = cfg.get("cooldown", AI_DEFAULTS["cooldown"])
@@ -689,6 +712,10 @@ class WeChatBot:
         persona = (ov.get("system_prompt")
                    or getattr(self, "system_prompt", "") or "").strip()
         messages = [{"role": "system", "content": persona}] if persona else []
+        # 回复风格纪律：运行时统一注入（与角色卡解耦——卡只管「她是谁」）。
+        # 位置紧跟人设、在重要记忆之前：仍属稳定前缀区，不破坏缓存布局。
+        if REPLY_STYLE_RULES:
+            messages.append({"role": "system", "content": REPLY_STYLE_RULES})
         important = self._important_block(chat_id) if chat_id else None
         if important:
             messages.append({"role": "system", "content": important})
@@ -1479,6 +1506,10 @@ class WeChatBot:
             {"role": "system",
              "content": ov.get("system_prompt") or self.system_prompt},
         ]
+        # 回复风格纪律：与 vision 链路同一份运行时常量、同一位置（紧跟人设），
+        # 保证降级/触发器回递时的说话方式不发生突变。
+        if REPLY_STYLE_RULES:
+            messages.append({"role": "system", "content": REPLY_STYLE_RULES})
         important = self._important_block(chat_id)
         if important:
             messages.append({"role": "system", "content": important})
@@ -1515,6 +1546,9 @@ class WeChatBot:
         payload = {
             "model": model,
             "messages": messages,
+            # 回复长度物理上限（历史缺陷：chat 链路完全没有 max_tokens，
+            # 降级/触发器回递时模型可以无限长——与 vision 链路共用同一上限）
+            "max_tokens": int(getattr(self, "reply_max_tokens", REPLY_MAX_TOKENS)),
             "temperature": temp,
             "top_p": top_p
         }
@@ -1537,10 +1571,40 @@ class WeChatBot:
         self._add_history(chat_id, "assistant", reply)
         return reply
 
+    def _split_reply_parts(self, text):
+        """把回复文本切成待发送的段：按换行切 → 丢空段 → 剥段尾单个中文句号。
+
+        拆分口径（用户定案，保持不变）：**任意连续换行都切**（含单 \\n）——
+        人设要求碎句多段，模型用单换行分句时旧逻辑会整段一起发。
+        """
+        parts = []
+        for raw in re.split(r"\n+", text or ""):
+            part = _strip_trailing_period(raw.strip())
+            if part:
+                parts.append(part)
+        return parts
+
+    def _send_parts(self, chat, text):
+        """逐段发送（段间 REPLY_SEGMENT_INTERVAL_SECONDS，首段前/末段后不等）。
+
+        普通回复（_send_text）与触发器旁路（AgentBot._send_trigger_reply）
+        共用本方法——两处各写一遍「拆分 + 间隔」必然漂移。本方法**不碰占位
+        计数**：占位归零是普通回复的语义，触发器路径不走。
+        返回实际发送的段数（0 = 拆不出内容，调用方自行决定兜底）。
+        """
+        parts = self._split_reply_parts(text)
+        for i, part in enumerate(parts):
+            self.wx.send_text(chat, part)
+            preview = part[:50].replace('\n', ' ')
+            logger.info(f"🤖 → [{chat}]: {preview}")
+            if i < len(parts) - 1:
+                time.sleep(REPLY_SEGMENT_INTERVAL_SECONDS)
+        return len(parts)
+
     def _send_text(self, text, chat, placeholder=False):
         """发送文本到指定聊天。placeholder=True 表示这是"处理中"占位消息
-        （永不拆分、计数 +1）；默认 False（普通回复）按"至少一个空行"拆分
-        成多条发送，并把该聊天的占位计数归零。
+        （永不拆分、计数 +1）；默认 False（普通回复）按换行拆成多条发送
+        （段尾单个句号剥掉、段间固定间隔），并把该聊天的占位计数归零。
         计数按 chat_name 隔离（_pending_placeholders），非全局。"""
         try:
             # 占位消息永不拆分，单条发送，计数语义不变
@@ -1552,20 +1616,12 @@ class WeChatBot:
                 self._pending_placeholders[chat] = self._pending_placeholders.get(chat, 0) + 1
                 return
 
-            # 按换行拆分（用户定案：单换行也分次发送——人设要求碎句多段，
-            # 模型用单 \n 分句时旧逻辑会整段一起发）。任意连续换行都拆，
-            # 空段丢弃；拆不出多段时走原单条发送
-            parts = [p.strip() for p in re.split(r'\n+', text) if p.strip()]
-            if len(parts) <= 1:
+            if not self._send_parts(chat, text):
+                # 拆不出任何段（全空白）→ 退回原文单条发送，绝不静默吞消息
                 cleaned_text = text.strip()
                 self.wx.send_text(chat, cleaned_text)
                 preview = cleaned_text[:50].replace('\n', ' ')
                 logger.info(f"🤖 → [{chat}]: {preview}")
-            else:
-                for part in parts:
-                    self.wx.send_text(chat, part)
-                    preview = part[:50].replace('\n', ' ')
-                    logger.info(f"🤖 → [{chat}]: {preview}")
 
             # 实质回复归零占位，只执行一次（pop 对未占位过的 chat 安全）
             self._pending_placeholders.pop(chat, None)

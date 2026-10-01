@@ -86,12 +86,11 @@ CLASSIFY_PROMPT = (
 
 
 VISION_ROUTE_PROMPT = (
-    "请严格遵守以上人设（包括不用 emoji、改用颜文字）。现在判断用户的消息：\n"
-    "如果用户的消息是需要由 AI 代理（天枢）实际执行的任务——例如：根据文档做一个网站、"
-    "做一个 PPT、写一段代码、分析一份数据、整理文件、生成文档等需要动手完成的工作——"
-    "调用 dispatch_task 工具投递任务，任务描述写在工具参数里。\n"
-    "否则（普通的闲聊、打招呼、问问题、要资料等）直接以你的身份回复用户，"
-    "不需要调用任何工具。"
+    "有人给你发了条消息，照你平时的样子回他。\n"
+    "只有当这件事确实需要动手做出来时才调用 dispatch_task 把活交出去"
+    "（例如：根据文档做一个网站、做一个 PPT、写一段代码、分析一份数据、"
+    "整理文件、生成文档）；普通的闲聊、打招呼、问问题、要资料都直接回他，"
+    "不要调用任何工具。"
 )
 
 
@@ -1650,8 +1649,9 @@ class AgentBot(WeChatBot):
     def _send_trigger_reply(self, text, chat):
         """触发器回复直发（旁路 _send_text 的占位归零——定时/条件触发消息
         不得破坏 skip_bot/N[chat] 语义：占位挂起时若被归零，占位会被当成
-        实质回复，用户其后的消息将被漏读）。拆分规则与 _send_text 一致
-        （按换行分段，空段丢弃）。
+        实质回复，用户其后的消息将被漏读）。拆分与段间间隔统一走基类的
+        `_send_parts`（与普通回复同一套规则：换行切段、段尾单句号剥离、
+        段间固定间隔），避免两处各写一遍造成漂移。
 
         **发送前必须先确认窗口在目标会话**，确认不了就不发：触发是异步的
         （闹钟/状态监视线程入队 → 主循环消费），此刻 visual 后端的
@@ -1663,12 +1663,10 @@ class AgentBot(WeChatBot):
                 f"[触发回复] 未能确认窗口在会话 {chat!r}，放弃本次发送"
                 f"（防发错人）：{str(text or '')[:40]!r}")
             return
-        for part in [p.strip() for p in re.split(r"\n+", text or "") if p.strip()]:
-            try:
-                self.wx.send_text(chat, part)
-                logger.info(f"🤖 → [{chat}]: {part[:50]}")
-            except Exception as e:
-                logger.error(f"[触发回复] 发送失败: {e}")
+        try:
+            self._send_parts(chat, text)
+        except Exception as e:
+            logger.error(f"[触发回复] 发送失败: {e}")
 
     def _record_reply_latency(self, t0):
         """记录一次端到端回复耗时（识别到红圈 → 产出回复），供用量页

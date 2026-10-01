@@ -11,6 +11,7 @@ from unittest import mock
 
 import wechat_bot as wb
 from xiaoli_bot import MemoryCompressor, parse_compress_json
+from xiaoli_app.config_store import REPLY_STYLE_RULES
 
 
 def make_bot(tmp, **over):
@@ -340,14 +341,16 @@ class TestMessageLayout(unittest.TestCase):
             bot.call_chat_ai("小明", "考研的事怎么样了")
             msgs = captured[0]["messages"]
             self.assertEqual(msgs[0], {"role": "system", "content": "你是小漓"})
-            self.assertIn("对花生过敏", msgs[1]["content"])
-            self.assertEqual(msgs[2]["content"], "[{ts}] 我在准备考研".format(
+            self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
+                             "风格纪律紧跟人设（运行时注入，仍在稳定前缀区）")
+            self.assertIn("对花生过敏", msgs[2]["content"])
+            self.assertEqual(msgs[3]["content"], "[{ts}] 我在准备考研".format(
                 ts=bot.memory_db["小明"]["recent"][0]["time"]))
-            self.assertIn("相关记忆", msgs[3]["content"])
-            self.assertIn("准备考研", msgs[3]["content"])
-            self.assertIn("当前时间：", msgs[4]["content"])
-            self.assertEqual(msgs[5]["role"], "user")
-            self.assertIn("考研的事怎么样了", msgs[5]["content"])
+            self.assertIn("相关记忆", msgs[4]["content"])
+            self.assertIn("准备考研", msgs[4]["content"])
+            self.assertIn("当前时间：", msgs[5]["content"])
+            self.assertEqual(msgs[6]["role"], "user")
+            self.assertIn("考研的事怎么样了", msgs[6]["content"])
 
     def test_call_vision_api_layout_and_recall_tool(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,11 +376,12 @@ class TestMessageLayout(unittest.TestCase):
             self.assertEqual(out, {"kind": "text", "content": "想起啦"})
             msgs = payloads[0]["messages"]
             self.assertEqual(msgs[0]["content"], "你是小漓")
-            self.assertIn("对花生过敏", msgs[1]["content"])     # 重要记忆
-            self.assertIn("准备考研", msgs[2]["content"])         # 历史
-            self.assertIn("准备考研", msgs[3]["content"])        # 相关记忆
-            self.assertIn("当前时间：", msgs[4]["content"])      # 时间紧贴消息
-            self.assertEqual(msgs[5]["role"], "user")
+            self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES)  # 风格纪律
+            self.assertIn("对花生过敏", msgs[2]["content"])     # 重要记忆
+            self.assertIn("准备考研", msgs[3]["content"])         # 历史
+            self.assertIn("准备考研", msgs[4]["content"])        # 相关记忆
+            self.assertIn("当前时间：", msgs[5]["content"])      # 时间紧贴消息
+            self.assertEqual(msgs[6]["role"], "user")
             names = [t["function"]["name"] for t in payloads[0]["tools"]]
             self.assertIn("recall_memory", names)
             tool_msgs = [m for m in payloads[1]["messages"]
@@ -397,8 +401,8 @@ class TestMessageLayout(unittest.TestCase):
             bot.call_chat_ai("小明", "在吗")
             msgs = captured[0]["messages"]
             roles = [m["role"] for m in msgs]
-            self.assertEqual(roles, ["system", "user", "system", "user"])
-            self.assertIn("当前时间：", msgs[2]["content"])
+            self.assertEqual(roles, ["system", "system", "user", "system", "user"])
+            self.assertIn("当前时间：", msgs[3]["content"])
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wechat_bot import WeChatBot, is_group_chat, models_endpoint
+from xiaoli_app.config_store import REPLY_STYLE_RULES
 
 
 class TestIsGroupChat(unittest.TestCase):
@@ -627,14 +628,18 @@ class TestCallChatAiGroupNameFormat(unittest.TestCase):
         self.assertEqual(content, "私聊：豆包有学生优惠了",
                          "私聊无发送者名时保持现状退化分支不变")
 
-    def test_immersion_baked_into_default_template(self):
-        """沉浸要求改为默认人设内置（运行时注入机制已删）：AI_DEFAULTS 与
-        CARD_TEMPLATE 的人设必须自带【角色沉浸要求】全文。"""
-        from xiaoli_app.config_store import AI_DEFAULTS, CARD_TEMPLATE
+    def test_style_rules_moved_out_of_default_template(self):
+        """回复纪律已迁出角色卡：AI_DEFAULTS 与 CARD_TEMPLATE 的人设只含人设
+        本体，说话纪律改由运行时 REPLY_STYLE_RULES 注入——改一次对所有
+        （含老用户的）角色卡生效，用户编辑卡也不会把纪律删掉。"""
+        from xiaoli_app.config_store import (AI_DEFAULTS, CARD_TEMPLATE,
+                                             REPLY_STYLE_RULES)
         for prompt in (AI_DEFAULTS["system_prompt"], CARD_TEMPLATE["system_prompt"]):
-            self.assertIn("【角色沉浸要求】", prompt)
-            self.assertIn("禁止用emoji", prompt)
-            self.assertIn("永远热爱探索", prompt)
+            self.assertNotIn("【角色沉浸要求】", prompt,
+                             "纪律不得再烘焙进卡模板")
+            self.assertNotIn("回复风格纪律", prompt)
+            self.assertIn("永远热爱探索", prompt, "人设本体必须保留")
+        self.assertIn("【回复风格纪律】", REPLY_STYLE_RULES)
 
     def test_reply_strips_private_chat_prefix(self):
         """模型复读 [私聊 - 名字] 前缀 → call_chat_ai 返回前剥除（不污染历史）。"""
@@ -1144,15 +1149,17 @@ class TestCallVisionApi(unittest.TestCase):
             bot.call_vision_api(content)
 
         msgs = captured["json"]["messages"]
-        self.assertEqual(len(msgs), 2,
-                         "messages 应为 [当前时间 system, user]（当前时间无条件注入）")
+        self.assertEqual(len(msgs), 3,
+                         "messages 应为 [风格纪律 system, 当前时间 system, user]")
         self.assertEqual(msgs[0]["role"], "system")
-        self.assertIn("当前时间：", msgs[0]["content"],
-                      "persona 为空时当前时间 system 仍注入（messages 不空）")
-        self.assertEqual(msgs[1]["role"], "user")
-        self.assertEqual(msgs[1]["content"], content,
+        self.assertEqual(msgs[0]["content"], REPLY_STYLE_RULES,
+                         "回复风格纪律由运行时注入（persona 为空时它是第一条）")
+        self.assertIn("当前时间：", msgs[1]["content"],
+                      "当前时间 system 无条件注入（messages 不空），紧贴当前消息")
+        self.assertEqual(msgs[2]["role"], "user")
+        self.assertEqual(msgs[2]["content"], content,
                          "content 应为调用方传入的块列表原样透传")
-        blocks = msgs[1]["content"]
+        blocks = msgs[2]["content"]
         self.assertEqual([b["type"] for b in blocks], ["text", "image_url"],
                          "content 块顺序应为 [text, image_url]")
         self.assertEqual(blocks[0]["text"], "描述这张图片")
@@ -1176,16 +1183,19 @@ class TestCallVisionApi(unittest.TestCase):
         with patcher:
             bot.call_vision_api(content)
         msgs = captured["json"]["messages"]
-        self.assertEqual(len(msgs), 3,
-                         "messages 应为 [system(人设), system(当前时间), user(块列表)]")
+        self.assertEqual(len(msgs), 4,
+                         "messages 应为 [system(人设), system(风格纪律), "
+                         "system(当前时间), user(块列表)]")
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你叫小漓，是蓝色大肥鱼。",
                          "system 只放纯文本人设")
-        self.assertEqual(msgs[1]["role"], "system")
-        self.assertIn("当前时间：", msgs[1]["content"],
-                      "当前时间 system 紧跟人设之后")
-        self.assertEqual(msgs[2]["role"], "user")
-        self.assertEqual(msgs[2]["content"], content, "user 块列表原样透传（含图片）")
+        self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
+                         "风格纪律紧跟人设（稳定前缀区，缓存不受影响）")
+        self.assertEqual(msgs[2]["role"], "system")
+        self.assertIn("当前时间：", msgs[2]["content"],
+                      "当前时间 system 紧贴当前消息")
+        self.assertEqual(msgs[3]["role"], "user")
+        self.assertEqual(msgs[3]["content"], content, "user 块列表原样透传（含图片）")
 
     def test_payload_declares_dispatch_task_tool(self):
         """payload 必须声明 dispatch_task 工具 + tool_choice=auto：
@@ -1284,9 +1294,11 @@ class TestCallVisionApi(unittest.TestCase):
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
-        hist_msgs = msgs[1:-2]
+        self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
+                         "风格纪律紧跟人设")
+        hist_msgs = msgs[2:-2]
         self.assertEqual([m["role"] for m in hist_msgs], ["user", "assistant"],
-                         "历史紧跟人设（稳定前缀区），保持 _get_history 原序")
+                         "历史紧跟风格纪律（稳定前缀区），保持 _get_history 原序")
         self.assertIn("当前时间：", msgs[-2]["content"],
                       "当前时间 system 紧贴当前消息（历史之后，缓存前缀不断）")
         self.assertEqual(hist_msgs[0]["content"],
@@ -1345,9 +1357,11 @@ class TestCallVisionApi(unittest.TestCase):
         msgs = captured["json"]["messages"]
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "人设仍为第一条 system")
-        self.assertEqual(msgs[1]["content"],
+        self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
+                         "风格纪律紧跟人设")
+        self.assertEqual(msgs[2]["content"],
                          "[2026-06-14 10:00:00] 我上一条说的什么",
-                         "历史紧跟 persona（稳定前缀区），[ts] 前缀行为不变")
+                         "历史跟在风格纪律之后（稳定前缀区），[ts] 前缀行为不变")
         self.assertTrue(re.match(r"^当前时间：\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$",
                                  msgs[-2]["content"]),
                         "当前时间 system 紧贴当前消息（历史之后），格式对齐 "
@@ -1367,8 +1381,10 @@ class TestCallVisionApi(unittest.TestCase):
         with patcher:
             bot.call_vision_api(self.TEXT_ONLY, chat_id="林小满")
         msgs = captured["json"]["messages"]
-        # 无 persona → 历史为第一条，当前时间 system 紧贴当前消息
-        self.assertEqual(msgs[0]["content"], "没时间戳的历史",
+        # 无 persona → 风格纪律为第一条，历史紧随，当前时间 system 紧贴当前消息
+        self.assertEqual(msgs[0]["content"], REPLY_STYLE_RULES,
+                         "空人设时风格纪律仍是第一条 system")
+        self.assertEqual(msgs[1]["content"], "没时间戳的历史",
                          "无 time 字段的历史原样注入，不加前缀")
         self.assertIn("当前时间：", msgs[-2]["content"],
                       "无 persona 时当前时间 system 仍无条件注入")
@@ -1430,8 +1446,10 @@ class TestCallVisionApi(unittest.TestCase):
                          "budget 取 getattr(self, 'max_context_tokens', 100000)")
         self.assertEqual(msgs[0]["role"], "system")
         self.assertEqual(msgs[0]["content"], "你是小漓", "裁剪收到 system 人设")
-        self.assertEqual([m["role"] for m in msgs[1:-2]], ["user", "assistant"],
-                         "裁剪收到历史（人设之后、时间 system 之前）")
+        self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
+                         "裁剪收到风格纪律 system（紧跟人设）")
+        self.assertEqual([m["role"] for m in msgs[2:-2]], ["user", "assistant"],
+                         "裁剪收到历史（风格纪律之后、时间 system 之前）")
         self.assertEqual(msgs[-2]["role"], "system")
         self.assertIn("当前时间：", msgs[-2]["content"],
                       "当前时间 system 紧贴当前消息（历史之后，缓存前缀不断）")
@@ -1691,7 +1709,7 @@ class TestVisionRoutePersona(unittest.TestCase):
 
     def test_persona_goes_to_system_message(self):
         """人设进 call_vision_api 的 messages[0]（system 角色，content 含人设）；
-        user 消息仍含路由指令 + 用户文本，且不重复注入人设（不变量）。"""
+        风格纪律紧随其后；user 消息含路由指令 + 用户文本，且不重复注入人设。"""
         bot = self._agent("你叫小漓，是蓝色大肥鱼。不要用 emoji，用颜文字。")
         bot._apply_vision_result = lambda *a, **k: True
         captured, patcher = self._capture_payload(bot)
@@ -1703,12 +1721,16 @@ class TestVisionRoutePersona(unittest.TestCase):
         self.assertIn("你叫小漓", msgs[0]["content"], "system content 含人设")
         self.assertIn("不要用 emoji，用颜文字", msgs[0]["content"],
                       "颜文字指令必须在 system 人设里")
-        self.assertEqual(msgs[1]["role"], "system")
-        self.assertIn("当前时间：", msgs[1]["content"],
-                      "当前时间 system 紧跟人设之后（逐字对齐 call_chat_ai）")
-        self.assertEqual(msgs[2]["role"], "user")
-        user_text = msgs[2]["content"][0]["text"]
-        self.assertIn("判断用户的消息", user_text, "user 消息仍含路由指令")
+        self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
+                         "风格纪律紧跟人设（运行时注入，不随卡落盘）")
+        self.assertEqual(msgs[2]["role"], "system")
+        self.assertIn("当前时间：", msgs[2]["content"],
+                      "当前时间 system 紧贴当前消息（逐字对齐 call_chat_ai）")
+        self.assertEqual(msgs[3]["role"], "user")
+        user_text = msgs[3]["content"][0]["text"]
+        self.assertIn("有人给你发了条消息", user_text,
+                      "user 消息用收信人视角的路由指令（不再以「判断用户的消息」开场）")
+        self.assertIn("dispatch_task", user_text, "任务工具口子必须保留")
         self.assertIn("用户消息：\n私聊 - 林小满：你好呀", user_text,
                       "sender 必须进 prompt（修复：vision 单调用分流丢失发送者信息）")
         self.assertNotIn("你叫小漓", user_text,
@@ -1725,14 +1747,16 @@ class TestVisionRoutePersona(unittest.TestCase):
 
         self.assertTrue(result, "空人设时调用链路不报错、正常返回")
         msgs = captured["json"]["messages"]
-        self.assertEqual(len(msgs), 2,
-                         "空人设时注入当前时间 system（messages 不空），user 紧随")
-        self.assertEqual(msgs[0]["role"], "system")
-        self.assertIn("当前时间：", msgs[0]["content"],
+        self.assertEqual(len(msgs), 3,
+                         "空人设时 messages 为 [风格纪律, 当前时间, user]")
+        self.assertEqual(msgs[0]["content"], REPLY_STYLE_RULES,
+                         "空人设时风格纪律仍注入（且不是空 system）")
+        self.assertEqual(msgs[1]["role"], "system")
+        self.assertIn("当前时间：", msgs[1]["content"],
                       "persona 为空时当前时间 system 仍注入")
-        self.assertEqual(msgs[1]["role"], "user")
-        user_text = msgs[1]["content"][0]["text"]
-        self.assertIn("判断用户的消息", user_text, "路由指令必须保留")
+        self.assertEqual(msgs[2]["role"], "user")
+        user_text = msgs[2]["content"][0]["text"]
+        self.assertIn("有人给你发了条消息", user_text, "路由指令必须保留")
         self.assertIn("用户消息：\n私聊 - 林小满：你好", user_text,
                       "私聊 decorated 带 sender（空人设不破坏 sender 分流）")
 
@@ -1746,7 +1770,7 @@ class TestVisionRoutePersona(unittest.TestCase):
             bot._vision_route("摸鱼\"集团", "林小满", "我是谁",
                               is_group=True, multi_sender=False)
         msgs = captured["json"]["messages"]
-        user_text = msgs[1]["content"][0]["text"]
+        user_text = msgs[-1]["content"][0]["text"]
         self.assertIn("用户消息：\n群聊：摸鱼\"集团 林小满：我是谁", user_text,
                       "群聊名与发送者必须都进 prompt")
 
@@ -1761,7 +1785,7 @@ class TestVisionRoutePersona(unittest.TestCase):
                 "摸鱼\"集团", "林小满", "林小满：内容A\n李四：内容B",
                 is_group=True, multi_sender=True)
         msgs = captured["json"]["messages"]
-        user_text = msgs[1]["content"][0]["text"]
+        user_text = msgs[-1]["content"][0]["text"]
         self.assertIn("用户消息：\n群聊：摸鱼\"集团 林小满：内容A\n李四：内容B",
                       user_text, "多发送者只包群名前缀")
         self.assertNotIn("林小满：林小满", user_text,
