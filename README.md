@@ -2,15 +2,15 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v2.8.2「会话判定修复与链路提速」** · 适配微信 PC **4.x** · 会话判定全面改权威信号（红圈防误报 · 名字保留原样 · 切换看标题 · 发送前复验）· 一次处理事件仅一次 OCR
+> **v2.8.3「回复精简与拟人化」** · 适配微信 PC **4.x** · 回复纪律内置运行时（默认只回一条 · 短叹词独立成行 · 段间 2 秒节奏 · 段尾句号自动去掉 · 收信人视角）
 
 ---
 
 ## ⬇️ 下载安装（桌面版）
 
-**v2.8.2 完整桌面版安装包**（PySide6 图形界面 + 19 套主题 + 壁纸库 + 托盘常驻）：
+**v2.8.3 完整桌面版安装包**（PySide6 图形界面 + 19 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v2.8.2.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.8.2/xiaoli-setup-v2.8.2.exe)
+👉 [点击下载 `xiaoli-setup-v2.8.3.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.8.3/xiaoli-setup-v2.8.3.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -24,6 +24,7 @@
 ## 功能一览
 
 - **微信自动回复**：监听微信消息，用 LLM（默认 DeepSeek）生成回复；私聊/群聊语境区分，群聊仅响应 `@小漓`
+- **拟人化回复**：回复纪律内置在运行时（不随角色卡走）——默认只回一条、最多两条（短叹词独立成行是唯一例外），跟着对方长度走，段间 2 秒节奏，段尾句号自动去掉，禁 emoji 只用颜文字；角色卡只管人设，改动一次对所有卡生效
 - **图片识别**：收到一张或多张图片，全部图片随文字放进同一次视觉调用识别回复（多图不再只认最新一张）；判定为任务时全部图片随任务投递
 - **文件消息处理**：定位微信接收目录中的文件并处理（Word/Excel 等提取文字）
 - **任务桥**：识别任务型请求（如"根据文档做一个网站"）→ 投递到任务目录 → 唤起天枢 CLI 处理 → 轮询回传文本 + 成果文件 → 自动归档；长任务处理中每写一次阶段进度就回传一条（天枢只在关键节点写）
@@ -196,6 +197,7 @@ tools/                       # 配套标定/调试工具
 
 ## 更新记录
 
+- [v2.8.3 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.3.md)（回复纪律迁运行时/默认只回一条/长度物理上限/段间 2 秒节奏/句尾句号去掉/收信人视角）
 - [v2.8.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.2.md)（会话切换判定修复/红圈防误报/触发发送防发错人/一次事件一次 OCR/进度回传无节流）
 - [v2.8.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.1.md)（任务桥窗口复用修复/界面日志瘦身/首页与用量页版面调整）
 - [v2.8.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.0.md)（OCR 引擎升级提速/天枢 CLI 窗口识别修复/任务进度回传/联网搜索代理）

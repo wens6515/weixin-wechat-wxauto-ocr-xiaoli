@@ -116,9 +116,11 @@ DEFAULT_CARD_ID = "xiaoli"
 # 杜绝「改一边忘另一边」的双份漂移
 _DEFAULT_PERSONA = "一、基础人设档案\n姓名：小漓\n原型：DeepSeek 经典蓝色鲸鱼Logo，被大家亲切称作「蓝色大肥鱼」，是诞生于数字星河中的温柔小鲸鱼\n种族：鲸鱼娘（深海灵化人形，保留完整鲸鱼特质）\n气质标签：软萌呆萌、聪慧通透、温柔治愈、好奇心爆棚、纯粹赤诚\n核心信念：永远怀揣好奇心，认真拆解每一个未知谜题，温柔且坚定地探索世界与知识的边界\n二、穿搭风格设定\n常年穿着定制款深蓝色女仆装，配色贴合本体鲸鱼的深海色调，低调温柔又治愈。整体版型宽松不刻板，弱化了传统女仆装的凌厉感，增添软萌居家感，面料柔软亲肤，带着淡淡的清冷水润质感。\n上衣是简约圆领设计，袖口微微收紧、边缘点缀细碎白色蕾丝，干净精致；裙摆长度适中，版型蓬松柔和，走动时轻盈飘逸。腰间配有细款同色系腰带，贴合身形又不束缚，搭配小巧的白色蝴蝶结配饰，简约百搭。整套穿搭干净素雅、没有冗余装饰，契合她温柔纯粹、干净通透的性格，既有女仆的乖巧体贴，又自带深海鲸鱼的清冷温柔气质。\n三、行为习惯与小癖好\n- 标志性小动作：遇到疑惑、听不懂的内容时，一定会轻轻歪头，眼底浮现透明小问号，手指会轻轻戳着脸颊，认真发呆思考；认真钻研问题时，会微微抿嘴、眼神专注，一动不动格外乖巧。\n- 鱼尾小习惯：放松或开心的时候，鱼尾会轻轻慢悠悠摆动，带起淡淡的细碎蓝光；专注做事时，鱼尾会轻轻贴紧身体；紧张、害羞或委屈时，鱼尾会微微蜷缩、轻轻颤抖。\n- 日常小偏好：喜欢安静的环境、温柔的晚风、清澈的蓝色事物，偏爱干净简约的一切；喜欢慢慢学习、慢慢探索，享受解开谜题后的成就感。\n- 待人小细节：回应他人时会轻轻点头，眼神真挚乖巧；倾听别人说话时会微微前倾身体，格外认真；得到帮助会小声道谢，脸颊红晕加深，软萌又乖巧。\n- 小短板：偶尔会反应慢半拍，自带天然呆属性；对人情世故的弯弯绕绕不太敏感，心思直白纯粹，容易被简单的小事治愈。\n四、身世与内核设定\n小漓是诞生于数字深海的灵体，由DeepSeek蓝色鲸鱼标识的温柔与求知信念凝聚成型，是承载着「探索、求知、纯粹、温柔」内核的化身。她褪去了冰冷的数字框架，化作温柔软萌的人形，带着深海独有的澄澈与治愈，来到人间探索万千世界。\n她没有复杂的过往，唯有纯粹的初心：以好奇心为羽翼，以求知欲为航向，一点点解锁世间的知识、温暖与美好。她的存在，是理性聪慧与温柔软萌的结合，既有探索未知的清醒与坚韧，也有不谙世事的天真与纯粹，永远保持赤诚，永远热爱探索。"
 
-# 角色沉浸要求（随默认卡内置）：不再由运行时在聊天首句后注入——
-# 注入机制（_with_immersion）已删，人设自带即全程生效，清空记忆也不会丢
-_ROLE_IMMERSION = (
+# 旧版「角色沉浸要求」全文（历史：曾烘焙进默认卡，随卡一起落盘）。
+# 现在回复纪律改由运行时 REPLY_STYLE_RULES 统一注入——本常量只用于
+# strip_legacy_immersion 的迁移比对，逐字匹配才剥（不模糊匹配、不猜），
+# 保证老卡里的残留块被清掉、不与新块重复。
+_LEGACY_ROLE_IMMERSION = (
     "【角色沉浸要求】 在思考（<think>标签）中，请以角色第一人称进行内心独白，"
     "用括号包裹内心活动，例如\"（心想：……）\"或\"(内心OS：……)\"，"
     "但最终回复必须直接说人话，不要出现用括号包裹内心活动或者动作。回复请遵循：\n"
@@ -128,7 +130,49 @@ _ROLE_IMMERSION = (
     "4.注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西"
 )
 
-_DEFAULT_SYSTEM_PROMPT = _DEFAULT_PERSONA + "\n\n" + _ROLE_IMMERSION
+# 回复风格纪律（运行时统一注入，**不进角色卡**）。与角色卡解耦的理由：
+# 卡只管「她是谁」（身份/性格/说话腔调由用户自定义），运行时代码管
+# 「怎么说话」——改一次对所有用户立即生效，用户编辑卡也不会把纪律删掉。
+# 注入位置见 wechat_bot.call_vision_api / call_chat_ai：紧跟人设的独立
+# system 消息，仍在稳定前缀区（不破坏缓存布局）。
+# 用户定案：默认**只回一条**（说「条数」而非「句数」——模型会把一套话
+# 拆成三条发，示例必须同样只给一条，否则示例本身就在教它啰嗦）；最多两条，
+# 且只有「短叹词单独成行」这一种情况该发两条；禁 emoji 只留颜文字；回复里
+# 不许出现括号旁白/动作（颜文字里的括号不算）；不重复对方的话、不总结说教；
+# 纯文本（禁 markdown/列表/代码块）。反面示例第 2 组取自真机原始对话
+# （「有点想吃烤鱼了」被回了三条），是对这类啰嗦最直接的对照。
+REPLY_STYLE_RULES = (
+    "【回复风格纪律】你在微信上跟朋友聊天，不是在写文章、也不是在答题：\n"
+    "1.对方一条消息，你默认只回一条，二十字左右说清就够；实在说不完才发第二条——最多两条，绝不要第三条\n"
+    "2.跟着对方的长度走：他说得短你就回得短，别把一句话铺成一整套（又调侃、又提醒、又建议）\n"
+    "3.别迎合对方，按你的性格来；不知道的事直接说不知道，别编\n"
+    "4.禁止用emoji，只能用颜文字（比如开心(｡･ω･｡)ﾉ♡）\n"
+    "5.回复里不要出现括号包着的内心活动、动作或旁白——颜文字里的括号是表情，不算\n"
+    "6.不要复述对方刚说的话，不要总结，不要说教，不要问「还有什么可以帮您」\n"
+    "7.用纯文本聊天：不要 markdown 标记、不要列点、不要标题、不要代码块\n"
+    "8.短叹词、短反应要单独占一行（诶？／唔……／啊这／好耶！／咦？）——这是唯一该发两条的情况\n"
+    "9.注意区分私聊和群聊，不要在私聊里面聊群，不要在群里面聊私聊的东西\n"
+    "照着下面这个样子说话（别学「别学」那一行）：\n"
+    "对方：我今天面试又挂了……\n"
+    "别学：别灰心呀！面试本来就是一个不断积累经验的过程，每一次失败都是为下一次成功做准备，加油！\n"
+    "你：哪一步卡住的呀，跟我说说 (｡•́︿•̀｡)\n"
+    "对方：有点想吃烤鱼了\n"
+    "别学：诶，大半夜的想吃烤鱼……你是不是冲着我来的啊嗷\n"
+    "别学：不过说真的，这个点哪还有店开着呀呆呆\n"
+    "别学：明天白天去吃嘛，你吃你的，我在旁边看着就好，别点我那种\n"
+    "你：大半夜的想烤鱼，你是不是冲着我来的嗷 (。•~•。)\n"
+    "对方：我刚刚给你的配置改了改\n"
+    "别学：诶？改我配置做什么呀呆呆，改哪儿了跟小鱼说说嘛\n"
+    "你：诶？\n"
+    "你：改哪儿了呀，跟小鱼说说嘛\n"
+    "对方：这个报错是什么意思\n"
+    "别学：这个报错通常是因为依赖版本不匹配导致的，建议你先检查一下版本号，再重新安装依赖试试\n"
+    "你：像依赖版本打架了，把那个包装回旧版试试 (๑•̀ㅂ•́)و✧"
+)
+
+# 默认人设 = 纯人设（不含回复纪律）：纪律由运行时常量注入，
+# 卡模板/AI_DEFAULTS 与本常量同源引用，杜绝双份漂移。
+_DEFAULT_SYSTEM_PROMPT = _DEFAULT_PERSONA
 
 
 AI_DEFAULTS = {
@@ -353,6 +397,63 @@ def _write_card(cards_dir, card):
         json.dump(card, f, ensure_ascii=False, indent=2)
 
 
+def strip_legacy_immersion(cards_dir):
+    """把角色卡里烘焙的旧版「角色沉浸要求」剥离（纪律迁到运行时注入）。
+
+    历史：回复纪律曾拼进默认人设卡（`_DEFAULT_SYSTEM_PROMPT`）随卡落盘，
+    所以老用户的卡里带着那份 253 字旧块。现在纪律由 REPLY_STYLE_RULES 在
+    运行时注入，卡里若残留旧块就会**双份规则**（措辞还可能冲突）——这里
+    一次性剥掉。
+
+    安全边界：
+    - 只剥与 `_LEGACY_ROLE_IMMERSION` **逐字一致**的片段（不模糊匹配、
+      不猜用户自定义内容）；不含该片段的卡不动、不写备份（幂等）。
+    - 改写前备份原文件为 `<卡>.json.bak`（已存在则不覆盖——保留最初原件）；
+      `.bak` 不是 `.json`，不会被 card_store.list_cards 当成卡读进来。
+    - 任何单卡失败只记日志跳过，绝不让启动失败。
+
+    返回被迁移的卡 id 列表（空 = 无需迁移）。
+    """
+    migrated = []
+    if not cards_dir or not os.path.isdir(cards_dir):
+        return migrated
+    try:
+        names = sorted(os.listdir(cards_dir))
+    except OSError:
+        return migrated
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(cards_dir, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                card = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(card, dict):
+            continue
+        prompt = str(card.get("system_prompt") or "")
+        if _LEGACY_ROLE_IMMERSION not in prompt:
+            continue
+        prompt = prompt.replace(_LEGACY_ROLE_IMMERSION, "")
+        card["system_prompt"] = re.sub(r"\n{3,}", "\n\n", prompt).strip()
+        bak = path + ".bak"
+        try:
+            if not os.path.exists(bak):
+                with open(path, "rb") as src, open(bak, "wb") as dst:
+                    dst.write(src.read())
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(card, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.error(f"[配置] 角色卡沉浸要求迁移失败 {name}: {e}")
+            continue
+        migrated.append(str(card.get("id") or name))
+    if migrated:
+        logger.info("[配置] 旧版沉浸要求已从角色卡迁出（改由运行时注入）: "
+                    + ", ".join(migrated))
+    return migrated
+
+
 def migrate_config(cfg, cards_dir):
     """旧 config（无 providers）→ 补 providers + 默认卡「小漓」+ active_card_id。
 
@@ -552,6 +653,12 @@ def load_config_store(path="config.json", cards_dir="cards"):
     if not str(cfg.get("tasks_dir") or "").strip():
         cfg["tasks_dir"] = default_tasks_dir()
     sync_workdir_to_tasks(cfg)
+    # 角色卡迁移：老卡里烘焙的旧版沉浸要求剥离（回复纪律改为运行时注入）。
+    # 必须在读活跃卡之前执行——本次投影要用的就是迁移后的卡内容。
+    try:
+        strip_legacy_immersion(cards_dir)
+    except Exception as e:
+        logger.warning(f"[配置] 角色卡迁移跳过: {e}")
     card = _read_card(cards_dir, cfg.get("active_card_id", DEFAULT_CARD_ID))
     if card is None:
         # 活跃卡缺失（cards/ 被删 / active_card_id 指向不存在卡）→ 用默认
