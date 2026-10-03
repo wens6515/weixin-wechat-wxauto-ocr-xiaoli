@@ -40,7 +40,7 @@ class _FakeWx:
         self._current = chat          # 切换成功 → 标题变成目标会话
         return True
 
-    def send_text(self, chat, text):
+    def send_text(self, chat, text, hold_after_paste=0.0):
         self.sent.append((chat, text))
         return True
 

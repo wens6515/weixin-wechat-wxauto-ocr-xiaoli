@@ -27,6 +27,8 @@ from wx_backend.visual_backend import (
 )
 from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
 from xiaoli_app.usage_store import UsageStore
+from xiaoli_app.tts import (GptSovitsClient, TtsError, strip_unspeakable,
+                            synthesize_with_emotion, wav_duration_seconds)
 from xiaoli_app.web_search import (web_search, web_fetch, WebSearchError,
                                    format_search_results)
 
@@ -118,6 +120,16 @@ VISION_TOOL_ROUNDS = 4
 # 纪律一起用。带 reasoning 的模型 max_tokens 包含思考 token，压太狠会出空
 # 回复（空 content 已有降级保护，不会炸），故留 400 起步。
 REPLY_MAX_TOKENS = 400
+
+# always 语音模式纪律（用户定案：模型**必须**经 send_voice 回复——工具是
+# 模型挑情绪的唯一通道）。模型偶尔仍会直接输出文字：_deliver_reply 的通用
+# 音色自动转语音兜底不撤，回复不丢。
+ALWAYS_VOICE_RULES = (
+    "【语音模式】你现在的回复会以语音消息发出：每一条回复都必须调用 "
+    "send_voice 工具来发——text 写要说出口的内容（口语化、适合念出来，"
+    "不要用颜文字/emoji/符号），emotion 按当前语境从可用情绪里挑一个。"
+    "不要直接输出文字回复。"
+)
 
 # 回复分段的段间间隔（秒，用户定案：固定 2s）。注意底层视觉后端「发一条」
 # 本身约 0.6~0.8s（点输入框 / 剪贴板 / 回车），本间隔是在它之上的额外等待；
@@ -358,6 +370,17 @@ class WeChatBot:
         # 决定（默认关）。关闭时工具分支直接友好告知，不降级普通聊天
         # （降级会让模型凭空答应没做到的提醒）。
         self.state_watch_enabled = bool(cfg.get("state_watch_enabled", False))
+        # 语音发送（音源接口化）：voice_mode off/auto/always。端点与音色档案
+        # 由用户配置（模型/参考音频在用户自部署的服务端），配置不全时语音
+        # 链路整体不激活（工具不注入、回复走文本）。
+        self.voice_mode = str(cfg.get("voice_mode", "off") or "off").strip().lower()
+        self.tts_endpoint = str(cfg.get("tts_endpoint", "") or "").strip()
+        self.tts_timeout = max(10, int(cfg.get("tts_timeout_seconds", 120)))
+        self.voice_max_seconds = max(5, int(cfg.get("voice_max_seconds", 55)))
+        self.voice_profiles = list(cfg.get("voice_profiles") or [])
+        self.active_voice_profile_id = str(
+            cfg.get("active_voice_profile_id", "") or "")
+        self.web_search_enabled = bool(cfg.get("web_search_enabled", True))
         # per-chat 角色卡绑定：绑定表（聊天名 -> 卡 id）+ 解析后的运行时参数表
         # （config_store 加载/重投影时从 cards/ 生成）。设置页/记忆页改动经
         # AppContext.reproject_and_push 热推送，无需重启。
@@ -400,6 +423,73 @@ class WeChatBot:
         params = getattr(self, "chat_card_params", None) or {}
         # 先按名字原文查（新口径），再退回归一化键（兼容升级前保存的绑定）
         return params.get(chat_id) or params.get(_memory_key(chat_id)) or {}
+
+    # ---------- 语音发送（音源接口化，实现在 xiaoli_app.tts + 后端 send_voice）----------
+
+    def _voice_profile(self):
+        """激活音色档案；配置不全返回 None（语音链路整体不激活）。
+
+        校验：voice_mode 已开 + 端点已配 + 激活档案存在 + 「通用」参考齐全
+        （ref_audio_path 与 prompt_text 均非空——GPT-SoVITS 合成的最低要求）。
+        每次现读 bot 属性——设置页热改即时生效。"""
+        if getattr(self, "voice_mode", "off") not in ("auto", "always"):
+            return None
+        if not getattr(self, "tts_endpoint", ""):
+            return None
+        pid = getattr(self, "active_voice_profile_id", "")
+        for p in (getattr(self, "voice_profiles", None) or []):
+            if not isinstance(p, dict) or p.get("id") != pid:
+                continue
+            base = (p.get("refs") or {}).get("通用") or {}
+            if str(base.get("ref_audio_path") or "").strip() \
+                    and str(base.get("prompt_text") or "").strip():
+                return p
+            return None
+        return None
+
+    def _send_voice_tool(self, profile):
+        """send_voice 工具 schema（auto / always 模式注入，描述按模式区分）。
+
+        emotion 枚举从档案 refs 键动态生成——用户配了哪些情绪参考，模型
+        就能选哪些（不硬编码任何模型包的情绪集）；档案只有「通用」时视为
+        没配情绪，工具不带 emotion 参数。
+        - auto：工具是「何时发语音」的开关——仅对方要语音等明确语境才调
+        - always：语音模式纪律——每一条回复都**必须**经本工具发出，emotion
+          是模型挑情绪的唯一通道
+        """
+        refs = profile.get("refs") or {}
+        emotions = [str(k) for k in refs if str(k) != "通用"]
+        props = {
+            "text": {"type": "string",
+                     "description": "要说出口的内容（语音条里念的话）"},
+        }
+        if emotions:
+            props["emotion"] = {
+                "type": "string",
+                "enum": ["通用"] + emotions,
+                "description": "用哪种情绪说话（对应不同的参考音频），"
+                               "按消息语境挑一个，不确定就用「通用」",
+            }
+        if getattr(self, "voice_mode", "off") == "always":
+            description = (
+                "语音发送（当前为语音模式：你的每一条回复都必须通过调用"
+                "本工具发出）。text 填要说出口的内容（口语化、适合念出来，"
+                "不要用颜文字/emoji/符号），emotion 按消息语境挑一个，"
+                "一次只发一条")
+        else:
+            description = (
+                "把要说的话用语音消息发给对方。仅当对方要求你发语音、念"
+                "一段东西、唱歌等明确语境时调用，一次只发一条；普通聊天"
+                "不要调用")
+        return {
+            "type": "function",
+            "function": {
+                "name": "send_voice",
+                "description": description,
+                "parameters": {"type": "object", "properties": props,
+                               "required": ["text"]},
+            },
+        }
 
     def _recent_cap(self, chat_id=None):
         """近期记忆保留条数：memory_keep_recent 与 max_history 取小
@@ -737,6 +827,12 @@ class WeChatBot:
         # 一条 system，消除空 messages 隐患。
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
         messages.append({"role": "system", "content": f"当前时间：{current_time}"})
+        # always 语音模式纪律：每条回复必须经 send_voice 发出（模型挑情绪的
+        # 唯一通道）。放当前时间之后、user 之前——它不随轮次变化，且位于
+        # 每秒变化的时间消息之后，不影响缓存前缀。
+        voice_profile = self._voice_profile()
+        if voice_profile is not None and self.voice_mode == "always":
+            messages.append({"role": "system", "content": ALWAYS_VOICE_RULES})
         messages.append({"role": "user", "content": content})
         with self._model_lock:
             # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
@@ -765,6 +861,12 @@ class WeChatBot:
                 },
             },
         }]
+        # 语音发送工具（voice_mode=auto/always 且配置齐全时注入）。auto 下
+        # 工具决定「何时发语音」；always 下工具是**强制回复通道**——每条
+        # 回复都必须经它发出（纪律见 ALWAYS_VOICE_RULES system 消息），
+        # 模型借 emotion 挑情绪。off 或配置不全时不注入。
+        if voice_profile is not None and self.voice_mode in ("auto", "always"):
+            tools.append(self._send_voice_tool(voice_profile))
         if getattr(self, "reminders", None) is not None:
             # 统一触发器工具（kind=time 定时 / kind=condition 状态监视）：
             # 模型依据 system 的「当前时间」消息把相对表达换算成绝对时间。
@@ -851,51 +953,53 @@ class WeChatBot:
                 },
             })
         # 联网搜索工具（零配置：百度/必应/搜狗并发合并，见 xiaoli_app/web_search）。
-        # query 描述写明真机校准的措辞规则：多个主体用空格分开（百度/搜狗对
-        # 「机构 人名」式查询精准命中，cn.bing 反而会分词失败）；并给出结果
-        # 无关时的换措辞重试策略——模型拿到垃圾结果只会硬答或放弃是此前
-        # 搜索「不精确」的主因之一。
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "web_search",
-                "description": "联网搜索（搜狗/必应/百度多引擎并发）。需要实时信息"
-                               "（天气/新闻/价格/赛事结果等）或拿不准的事实时调用。"
-                               "query 一次只查一个主题，用简短中文短语，多个主体用"
-                               "空格分开（如「云溪天气」「某高校教师名」），不要堆"
-                               "修饰词。若返回结果与查询主题明显无关（如搜人名得到"
-                               "无关实体），换措辞再搜一次：调整词序、增删限定词"
-                               "（如加「教授」「简介」）或改用更具体的表述",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string",
-                                  "description": "简短中文短语，一次一个主题，"
-                                                 "多个主体用空格分开"
-                                                 "（如「云溪天气」「某高校教师名」）"},
+        # web_search_enabled 关闭（设置页开关）时整体不声明——模型看不到就
+        # 不会调用。query 描述写明真机校准的措辞规则：多个主体用空格分开
+        # （百度/搜狗对「机构 人名」式查询精准命中，cn.bing 反而会分词失败）；
+        # 并给出结果无关时的换措辞重试策略——模型拿到垃圾结果只会硬答或放弃
+        # 是此前搜索「不精确」的主因之一。
+        if getattr(self, "web_search_enabled", True):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "联网搜索（搜狗/必应/百度多引擎并发）。需要实时信息"
+                                   "（天气/新闻/价格/赛事结果等）或拿不准的事实时调用。"
+                                   "query 一次只查一个主题，用简短中文短语，多个主体用"
+                                   "空格分开（如「云溪天气」「某高校教师名」），不要堆"
+                                   "修饰词。若返回结果与查询主题明显无关（如搜人名得到"
+                                   "无关实体），换措辞再搜一次：调整词序、增删限定词"
+                                   "（如加「教授」「简介」）或改用更具体的表述",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string",
+                                      "description": "简短中文短语，一次一个主题，"
+                                                     "多个主体用空格分开"
+                                                     "（如「云溪天气」「某高校教师名」）"},
+                        },
+                        "required": ["query"],
                     },
-                    "required": ["query"],
                 },
-            },
-        })
-        # 网页正文抓取（与 web_search 成对）：搜索摘要只有站点介绍，实时数据
-        # 在网页正文里——模型从搜索结果挑来源后抓正文自己读
-        tools.append({
-            "type": "function",
-            "function": {
-                "name": "web_fetch",
-                "description": "抓取网页正文全文。搜索结果里挑最相关的来源"
-                               "（如天气网页面）后调用，读取其中具体的数据"
-                               "（气温/天气/比分等）",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {"type": "string", "description": "要抓取的网页 URL"},
+            })
+            # 网页正文抓取（与 web_search 成对）：搜索摘要只有站点介绍，实时数据
+            # 在网页正文里——模型从搜索结果挑来源后抓正文自己读
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "web_fetch",
+                    "description": "抓取网页正文全文。搜索结果里挑最相关的来源"
+                                   "（如天气网页面）后调用，读取其中具体的数据"
+                                   "（气温/天气/比分等）",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "url": {"type": "string", "description": "要抓取的网页 URL"},
+                        },
+                        "required": ["url"],
                     },
-                    "required": ["url"],
                 },
-            },
-        })
+            })
         # 深层记忆检索工具：仅启用深层记忆且有聊天上下文时声明——模型在
         # 「用户提到过去的事但自己记不清」时主动调用，避免凭空编造
         if chat_id and getattr(self, "memory_deep_enabled", False):
@@ -1585,8 +1689,12 @@ class WeChatBot:
         return parts
 
     def _send_parts(self, chat, text):
-        """逐段发送（段间 REPLY_SEGMENT_INTERVAL_SECONDS，首段前/末段后不等）。
+        """逐段发送（段间节奏 REPLY_SEGMENT_INTERVAL_SECONDS）。
 
+        节奏口径（用户定案）：间隔发生在**下一段粘贴进输入框之后、回车
+        之前**——对方端在这段停留里看到「对方正在输入…」，多条消息有活人
+        感；首段之前不停（hold=0）。由后端 send_text 的 hold_after_paste
+        参数承载，本方法不再自己 sleep。
         普通回复（_send_text）与触发器旁路（AgentBot._send_trigger_reply）
         共用本方法——两处各写一遍「拆分 + 间隔」必然漂移。本方法**不碰占位
         计数**：占位归零是普通回复的语义，触发器路径不走。
@@ -1594,11 +1702,10 @@ class WeChatBot:
         """
         parts = self._split_reply_parts(text)
         for i, part in enumerate(parts):
-            self.wx.send_text(chat, part)
+            hold = 0.0 if i == 0 else REPLY_SEGMENT_INTERVAL_SECONDS
+            self.wx.send_text(chat, part, hold_after_paste=hold)
             preview = part[:50].replace('\n', ' ')
             logger.info(f"🤖 → [{chat}]: {preview}")
-            if i < len(parts) - 1:
-                time.sleep(REPLY_SEGMENT_INTERVAL_SECONDS)
         return len(parts)
 
     def _send_text(self, text, chat, placeholder=False):
@@ -1627,6 +1734,92 @@ class WeChatBot:
             self._pending_placeholders.pop(chat, None)
         except Exception as e:
             logger.error(f"发送失败: {e}")
+
+    def _send_voice_reply(self, chat, text, emotion=None, text_fallback=None):
+        """语音回复：按回复分段逐段合成、逐段发送（段间无额外间隔——语音条
+        自带录音时长与尾音节奏）。
+
+        fail-closed 语义（用户定案）：
+        - 合成阶段任一段失败 / 单段时长超 voice_max_seconds → **整条**回退
+          文本（此刻什么都还没发出，绝不发半截语音 + 半截文字）
+        - 发送阶段某段 send_voice 返回 False（= 该段确认未发出，质检/切换/
+          胶囊闸门任一未过）→ 剩余段回退文本，已发出的语音段保持
+        - 无语音能力（后端不支持/配置不全）→ 整条回退文本，回复永不丢
+        - 颜文字/emoji 先经 strip_unspeakable 剥除（TTS 读它们是乱语），
+          剥完整条无内容（纯颜文字回复）→ 原文回退文本
+
+        emotion：情绪键（auto 模式由模型从档案 refs 枚举里选；always 模式
+        不传 = 固定「通用」参考）。
+        text_fallback：回退发送 callable(text)——触发器路径传 _send_parts
+        语义（旁路占位归零），缺省走 _send_text（普通回复语义）。
+        语音内容**以纯文本写记忆**由调用方负责（这里只管发送）。
+        返回 True = 全部段已按语音发出；False = 已（部分）回退文本。
+        """
+        profile = self._voice_profile()
+        if profile is None:
+            return False
+        parts = [strip_unspeakable(p)
+                 for p in self._split_reply_parts(text)]
+        parts = [p for p in parts if p]
+        if not parts:
+            # 剥完颜文字后无可读文本（纯颜文字回复）→ 原文回退文本：
+            # 念不出来，但对方至少能「看到」这个表情
+            logger.info("[语音] 剥除颜文字后无可读文本，整条回退文本")
+            self._voice_text_fallback(chat, text, text_fallback)
+            return False
+        client = GptSovitsClient(self.tts_endpoint, timeout=self.tts_timeout)
+        wavs = []
+        try:
+            for part in parts:
+                wav = synthesize_with_emotion(client, profile, part, emotion)
+                dur = wav_duration_seconds(wav)
+                if dur > self.voice_max_seconds:
+                    # 微信语音条 60s 硬上限前的保险丝（回复纪律下单段一般
+                    # 3~15s，超限属异常长文）——整条回退文本
+                    raise TtsError(f"单段语音 {dur:.1f}s 超上限 "
+                                   f"{self.voice_max_seconds}s")
+                wavs.append((wav, dur))
+        except TtsError as e:
+            logger.error(f"[语音] 合成失败，整条回退文本: {e}")
+            self._voice_text_fallback(chat, text, text_fallback)
+            return False
+        send_voice = getattr(self.wx, "send_voice", None)
+        if send_voice is None:
+            logger.warning("[语音] 后端不支持语音发送，整条回退文本")
+            self._voice_text_fallback(chat, text, text_fallback)
+            return False
+        tmp_files = []
+        try:
+            for i, (wav, dur) in enumerate(wavs):
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+                    tf.write(wav)
+                    path = tf.name
+                tmp_files.append(path)
+                if not send_voice(chat, path):
+                    remaining = "\n".join(parts[i:])
+                    logger.error(f"[语音] 第 {i + 1}/{len(wavs)} 段发送未确认"
+                                 "（该段未发出），剩余段回退文本")
+                    self._voice_text_fallback(chat, remaining, text_fallback)
+                    return False
+                logger.info(f"🎤 → [{chat}]: 语音条 {i + 1}/{len(wavs)}"
+                            f"（{dur:.1f}s）{parts[i][:30]}")
+            return True
+        finally:
+            for p in tmp_files:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def _voice_text_fallback(self, chat, text, text_fallback):
+        """语音失败后的文本兜底发送（text_fallback 为触发器语义时旁路占位归零）。"""
+        try:
+            if text_fallback is not None:
+                text_fallback(text)
+            else:
+                self._send_text(text, chat)
+        except Exception as e:
+            logger.error(f"[语音] 文本回退发送失败: {e}")
 
     def fetch_models(self):
         url = models_endpoint(self.api_url)

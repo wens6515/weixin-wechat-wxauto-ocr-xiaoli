@@ -86,7 +86,7 @@ class _FakeWx:
         # 表示窗口已停在它上面 → 直接发送、不点击。
         return "林小满"
 
-    def send_text(self, chat, text):
+    def send_text(self, chat, text, hold_after_paste=0.0):
         self.sent.append((chat, text))
 
 

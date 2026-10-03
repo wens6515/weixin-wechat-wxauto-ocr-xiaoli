@@ -1207,6 +1207,9 @@ class AgentBot(WeChatBot):
         if kind == "tool_call" and result.get("name") == "set_reminder":
             # 定时提醒工具（与 dispatch_task 并列的节点 I 出口）
             return self._handle_set_reminder(chat_name, sender, result, user_text)
+        if kind == "tool_call" and result.get("name") == "send_voice":
+            # 语音发送工具（voice_mode=auto）
+            return self._handle_send_voice(chat_name, result, user_text)
         if kind == "tool_call":
             # 契约：name 必须为 dispatch_task；task 从 arguments JSON 解析
             # （json.loads 后取 task 字段；解析失败降级用原文）
@@ -1239,7 +1242,7 @@ class AgentBot(WeChatBot):
             if user_text:
                 self._add_history(chat_name, "user", user_text)
             self._add_history(chat_name, "assistant", reply)
-            self._send_text(reply, chat_name)
+            self._deliver_reply(chat_name, reply)
             return True
         logger.warning(f"[vision] 未知响应 kind={kind!r}，降级")
         return None
@@ -1521,7 +1524,7 @@ class AgentBot(WeChatBot):
             f"请根据文件内容和用户的要求，以{self.nickname}的身份回复用户。"
         )
         final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
-        self._send_text(final_reply, chat_name)
+        self._deliver_reply(chat_name, final_reply)
         return True
 
     def _drain_reminders(self):
@@ -1551,7 +1554,7 @@ class AgentBot(WeChatBot):
                            f"这条触发器创建时的对话就在历史里，"
                            f"请按人设自然地主动回复。")
                 reply = self.call_chat_ai(chat, trigger)
-                self._send_trigger_reply(reply, chat)
+                self._deliver_reply(chat, reply, trigger=True)
                 logger.info(f"[定时] 已触发 -> {chat}: {reply[:40]}")
             except Exception as e:
                 logger.error(f"[定时] 触发失败 {rid}: {e}")
@@ -1592,7 +1595,7 @@ class AgentBot(WeChatBot):
                            f"请按人设向用户说明情况并致歉。")
             try:
                 reply = self.call_chat_ai(chat, trigger)
-                self._send_trigger_reply(reply, chat)
+                self._deliver_reply(chat, reply, trigger=True)
                 logger.info(f"[状态监视] 已回递 -> {chat} ({kind})")
             except Exception as e:
                 logger.error(f"[状态监视] 回递失败 {chat}: {e}")
@@ -1667,6 +1670,50 @@ class AgentBot(WeChatBot):
             self._send_parts(chat, text)
         except Exception as e:
             logger.error(f"[触发回复] 发送失败: {e}")
+
+    def _handle_send_voice(self, chat_name, result, user_text):
+        """send_voice 工具分支（voice_mode=auto/always）：解析 {text, emotion}
+        → 语音发送（任一环节失败内部已回退文本，回复不丢）。
+
+        auto 下工具由模型按语境触发「发语音」；always 下工具是模型选情绪
+        的通道（普通回复不走工具、自动转语音走通用音色）。语音内容以
+        **纯文本**写记忆（用户定案：记忆存的是说了什么，不是用什么形式
+        说的，不加 [语音] 之类标记）。text 缺失返回 None 交上层降级普通聊天。"""
+        try:
+            args = json.loads(result.get("arguments") or "{}")
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(args, dict):
+            return None
+        text = str(args.get("text") or "").strip()
+        if not text:
+            logger.warning("[语音] send_voice 缺 text，降级")
+            return None
+        emotion = str(args.get("emotion") or "").strip() or None
+        if user_text:
+            self._add_history(chat_name, "user", user_text)
+        self._add_history(chat_name, "assistant", text)
+        self._send_voice_reply(chat_name, text, emotion=emotion)
+        return True
+
+    def _deliver_reply(self, chat, text, trigger=False):
+        """模型生成的对话回复统一出口。always 语音模式先试语音（任一环节
+        失败内部已回退文本）；其余模式/语音未启用直接文本发送。
+
+        程序固定文案（占位「正在处理中」「文件已收到」、任务进度、错误
+        兜底）不走这里，保持文字——always 语义只覆盖模型说出口的话。
+        trigger=True 用触发器文本语义（旁路占位归零），语音回退同样旁路。
+        """
+        if getattr(self, "voice_mode", "off") == "always" and \
+                self._send_voice_reply(
+                    chat, text,
+                    text_fallback=(lambda t: self._send_trigger_reply(t, chat))
+                    if trigger else None):
+            return
+        if trigger:
+            self._send_trigger_reply(text, chat)
+        else:
+            self._send_text(text, chat)
 
     def _record_reply_latency(self, t0):
         """记录一次端到端回复耗时（识别到红圈 → 产出回复），供用量页
@@ -1827,7 +1874,7 @@ class AgentBot(WeChatBot):
                 return True
             # vision 降级（None）：API 失败默认非任务，回退普通聊天（与现状一致）
         reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
-        self._send_text(reply, chat_name)
+        self._deliver_reply(chat_name, reply)
         return True
 
     # ---------- 消息处理（改造） ----------
