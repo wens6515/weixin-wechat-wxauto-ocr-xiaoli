@@ -18,6 +18,11 @@ onnxruntime==1.30.0
 PyAutoGUI==0.9.54
 pywin32==312            # config_store DPAPI 加密（win32crypt）
 
+# --- 语音发送（TTS 客户端 + VB-CABLE 虚拟声卡路由，懒加载；缺失时语音停用、回退文本）---
+sounddevice==0.5.6      # 持久渲染流（桥保温）+ 环回质检实采
+soundfile==0.14.0       # wav 读写与重采样
+pycaw==20260927         # 默认录音设备切换/恢复（IPolicyConfig）
+
 # --- 文件内容提取（Office 文档转文字喂 AI）---
 comtypes==1.4.16        # Office COM
 openpyxl==3.1.5         # Excel

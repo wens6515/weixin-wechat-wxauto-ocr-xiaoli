@@ -42,7 +42,7 @@ class _OkBackend:
     def get_messages(self, chat, limit=None):
         return []
 
-    def send_text(self, chat, text):
+    def send_text(self, chat, text, hold_after_paste=0.0):
         return True
 
     def send_file(self, chat, file_path):
@@ -142,7 +142,7 @@ class TestProtocol(unittest.TestCase):
             def get_messages(self, chat, limit=None):
                 return []
 
-            def send_text(self, chat, text):
+            def send_text(self, chat, text, hold_after_paste=0.0):
                 return True
 
             def send_file(self, chat, file_path):
@@ -163,7 +163,7 @@ class TestProtocol(unittest.TestCase):
             def get_messages(self, chat, limit=None):
                 return []
 
-            def send_text(self, chat, text):
+            def send_text(self, chat, text, hold_after_paste=0.0):
                 return True
 
             def send_file(self, chat, file_path):

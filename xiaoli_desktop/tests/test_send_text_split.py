@@ -13,7 +13,7 @@ class _CaptureWx:
     """捕获 send_text 的假后端"""
     def __init__(self):
         self.sent = []
-    def send_text(self, chat, text):
+    def send_text(self, chat, text, hold_after_paste=0.0):
         self.sent.append((chat, text))
 
 

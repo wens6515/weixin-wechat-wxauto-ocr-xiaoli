@@ -200,6 +200,21 @@ AI_DEFAULTS = {
     # 每轮一次小调用 + 触发回递，会产生额外 API 调用——是否开启由用户在
     # 设置页决定（默认关）。定时提醒（kind=time）不受此开关影响。
     "state_watch_enabled": False,
+    # 语音发送（音源接口化）：voice_mode off=关闭 / auto=模型自主
+    # （send_voice 工具按语境调用）/ always=模型对话回复一律转语音。
+    # 端点指向用户自部署的 GPT-SoVITS api_v2 /tts；音色档案 refs 键即
+    # 情绪枚举（「通用」必填）。出厂不带任何音色——ref_audio_path 是
+    # TTS 服务端路径，各用户环境不同；端点/档案为空时语音链路整体不激活
+    # （工具不注入，回复走文本）。
+    "voice_mode": "off",
+    "tts_endpoint": "",
+    "tts_timeout_seconds": 120,
+    "voice_max_seconds": 55,
+    "voice_profiles": [],
+    "active_voice_profile_id": "",
+    # 联网搜索工具开关：关闭后 call_vision_api 不再声明 web_search/web_fetch
+    # （模型看不到就不会调用）；已开启时的搜索行为不受影响。
+    "web_search_enabled": True,
 }
 
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。

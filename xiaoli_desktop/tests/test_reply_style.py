@@ -8,7 +8,9 @@
    根本没有 max_tokens，降级/触发器回递时模型可以无限长）；
 3. 分段规则：换行切段 + 段尾**单个**中文句号剥离（`。。`、`！`、`？`、
    英文句点一律不动）；
-4. 段间固定间隔 2s：只有中间才等，首段前、末段后不等。
+4. 段间固定节奏 2s：发生在**下一段粘贴进输入框之后、回车之前**
+   （hold_after_paste，对方端看到「对方正在输入…」），首段 hold=0，
+   发送循环本身不再 sleep。
 另覆盖老角色卡的旧沉浸要求迁移（逐字剥离 + 备份 + 幂等）。
 """
 import json
@@ -29,13 +31,15 @@ from xiaoli_app import config_store
 
 
 class _CaptureWx:
-    """捕获 send_text 的假后端"""
+    """捕获 send_text 的假后端（含粘贴后停留参数）"""
 
     def __init__(self):
         self.sent = []
+        self.holds = []
 
-    def send_text(self, chat, text):
+    def send_text(self, chat, text, hold_after_paste=0.0):
         self.sent.append((chat, text))
+        self.holds.append(hold_after_paste)
 
 
 def _build_bot(memory_dir, persona="你是小漓，蓝色大肥鱼。"):
@@ -261,23 +265,21 @@ class TestSplitReplyParts(_BotCase):
 
 class TestSegmentInterval(_BotCase):
     def test_interval_only_between_parts(self):
-        """3 段 → 2 次等待，且都发生在两段之间（首段前/末段后不等）。"""
+        """3 段 → 首段 hold=0，后续段 hold=2s（粘贴后回车前），循环零 sleep。"""
         bot = self.bot()
         order = []
 
-        def fake_send(chat, text):
-            order.append(("send", text))
-
-        def fake_sleep(seconds):
-            order.append(("sleep", seconds))
+        def fake_send(chat, text, hold_after_paste=0.0):
+            order.append(("send", text, hold_after_paste))
 
         bot.wx.send_text = fake_send
-        with mock.patch("wechat_bot.time.sleep", side_effect=fake_sleep):
+        with mock.patch("wechat_bot.time.sleep") as sleeper:
             bot._send_parts("小明", "甲。\n乙\n丙。")
 
-        self.assertEqual(order, [("send", "甲"), ("sleep", 2.0),
-                                 ("send", "乙"), ("sleep", 2.0),
-                                 ("send", "丙")])
+        self.assertEqual(order, [("send", "甲", 0.0),
+                                 ("send", "乙", REPLY_SEGMENT_INTERVAL_SECONDS),
+                                 ("send", "丙", REPLY_SEGMENT_INTERVAL_SECONDS)])
+        sleeper.assert_not_called()
 
     def test_single_part_no_wait(self):
         bot = self.bot()
@@ -287,11 +289,13 @@ class TestSegmentInterval(_BotCase):
         sleeper.assert_not_called()
 
     def test_send_text_waits_between_parts(self):
+        """两段发送：间隔落在下一段的 hold_after_paste（首段 0、次段 2s）。"""
         bot = self.bot()
         with mock.patch("wechat_bot.time.sleep") as sleeper:
             bot._send_text("甲。\n乙", "小明")
         self.assertEqual(bot.wx.sent, [("小明", "甲"), ("小明", "乙")])
-        sleeper.assert_called_once_with(REPLY_SEGMENT_INTERVAL_SECONDS)
+        self.assertEqual(bot.wx.holds, [0.0, REPLY_SEGMENT_INTERVAL_SECONDS])
+        sleeper.assert_not_called()
 
     def test_placeholder_single_send_no_wait(self):
         bot = self.bot()
