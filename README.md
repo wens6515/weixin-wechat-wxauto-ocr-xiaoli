@@ -1,8 +1,8 @@
 <div align="center">
-  <img src="assets/mascot.png" width="150" alt="小漓">
+  <img src="assets/mascot.png" width="120" alt="小漓">
   <h1>小漓 · 蓝色大肥鱼</h1>
   <p><b>微信 AI 机器人 · 视觉版</b></p>
-  <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x —— 会聊天、会看图、会发语音、会把复杂任务丢给 AI 代理做完再回传</sub></p>
+  <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x</sub></p>
   <p>
     <img src="https://img.shields.io/badge/version-2.9.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
     <img src="https://img.shields.io/badge/WeChat_PC-4.x-35C48D?style=flat-square&amp;labelColor=0B2540" alt="WeChat PC 4.x">
@@ -15,10 +15,6 @@
   </p>
 </div>
 
-小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
-
-> **v2.9.0「语音发送」** · 适配微信 PC **4.x** · 音源接口化（接自己部署的 TTS 服务，如 GPT-SoVITS）· 音色档案支持情绪参考 · 语音模式三态（关闭 / 模型自主 / 始终语音）· 任何环节失败自动回退文本
-
 ## 效果展示
 
 <p align="center">
@@ -28,6 +24,10 @@
 <p align="center">
   <sub>语音条由<strong>你自己部署的 TTS 服务</strong>合成（音色、情绪都在音色档案里配）——环回质检不过、设备切换未确认、合成失败，一律自动回退文本，回复永不丢</sub>
 </p>
+
+小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
+
+> **v2.9.0「语音发送」** · 适配微信 PC **4.x** · 音源接口化（接自己部署的 TTS 服务，如 GPT-SoVITS）· 音色档案支持情绪参考 · 语音模式三态（关闭 / 模型自主 / 始终语音）· 任何环节失败自动回退文本
 
 ## 目录
 
