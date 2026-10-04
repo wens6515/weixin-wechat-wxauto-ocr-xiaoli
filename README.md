@@ -4,7 +4,7 @@
   <p><b>微信 AI 机器人 · 视觉版</b></p>
   <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x</sub></p>
   <p>
-    <img src="https://img.shields.io/badge/version-2.9.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
+    <img src="https://img.shields.io/badge/version-2.9.1-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
     <img src="https://img.shields.io/badge/WeChat_PC-4.x-35C48D?style=flat-square&amp;labelColor=0B2540" alt="WeChat PC 4.x">
     <img src="https://img.shields.io/badge/Windows-10+-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=windows&amp;logoColor=white" alt="Windows 10+">
     <img src="https://img.shields.io/badge/Python-3.12-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=python&amp;logoColor=white" alt="Python 3.12">
@@ -31,7 +31,7 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v2.9.0「语音发送」** · 适配微信 PC **4.x** · 音源接口化（接自己部署的 TTS 服务，如 GPT-SoVITS）· 音色档案支持情绪参考 · 语音模式三态（关闭 / 模型自主 / 始终语音）· 任何环节失败自动回退文本
+> **v2.9.1「性能焕新」** · 适配微信 PC **4.x** · 背景静态化风扇静音 · 页面切换提速 · 主题 19 收 7（每套专属氛围装饰）· 按聊天三态功能开关 · 用量上 SQLite · 聊天记录导出 · 触发器可视管理
 
 ## 目录
 
@@ -49,9 +49,9 @@
 
 ## 下载安装（桌面版）
 
-**v2.9.0 完整桌面版安装包**（PySide6 图形界面 + 19 套主题 + 壁纸库 + 托盘常驻）：
+**v2.9.1 完整桌面版安装包**（PySide6 图形界面 + 7 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v2.9.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.9.0/xiaoli-setup-v2.9.0.exe)
+👉 [点击下载 `xiaoli-setup-v2.9.1.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.9.1/xiaoli-setup-v2.9.1.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -244,6 +244,7 @@ assets/                      # README 展示图（mascot / showcase-voice / soci
 
 ## 更新记录
 
+- [v2.9.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.1.md)（背景静态化风扇静音/页面切换提速/主题 19 收 7/按聊天三态功能开关/用量上 SQLite/聊天记录导出/触发器可视管理）
 - [v2.9.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.0.md)（语音发送·音源接口化/音色档案情绪参考/语音模式三态/环回质检 fail-closed/颜文字乱语修复/功能开关区/粘贴后停顿节奏）
 - [v2.8.3 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.3.md)（回复纪律迁运行时/默认只回一条/长度物理上限/段间 2 秒节奏/句尾句号去掉/收信人视角）
 - [v2.8.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.2.md)（会话切换判定修复/红圈防误报/触发发送防发错人/一次事件一次 OCR/进度回传无节流）

@@ -463,35 +463,34 @@ def _near_color(arr, color, tol):
 def _connected_boxes(mask, min_h=20, min_w=40, x_gap=8, y_gap=6):
     """把布尔掩码聚合成连通域边界框 [(top, bottom, left, right)]（像素坐标）。
 
-    逐行找连续段，跨行按「y 连续 + x 重叠」合并。过滤掉小噪声（气泡至少
-    高 20px、宽 40px）。"""
+    行内切段语义 = 相邻 True 像素列差 >x_gap 切段——一次 np.nonzero 全图
+    向量化取全部 True 像素后直接切分（np.nonzero 按 C 序返回：行升序、
+    行内列升序），替代旧的逐行 np.where + Python 切段循环；跨行合并保持
+    流式贪心（y 隙 ≤y_gap 且 x 重叠，并入首个命中框）。真机消息区尺寸
+    （747x1135）基准较旧逐行循环快 3.4~6.2 倍、输出逐场景一致
+    （tools/bench_connected_boxes.py）。过滤掉小噪声（气泡至少高 20px、
+    宽 40px）。"""
     import numpy as np
-    h, w = mask.shape
+    rows, cols = np.nonzero(mask)
+    if len(rows) == 0:
+        return []
+    brk = (rows[1:] != rows[:-1]) | (cols[1:] - cols[:-1] > x_gap)
+    cut = np.flatnonzero(brk) + 1
+    starts = np.concatenate(([0], cut))
+    ends = np.concatenate((cut, [len(rows)]))  # exclusive
     boxes = []
-    for y in range(h):
-        xs = np.where(mask[y])[0]
-        if len(xs) == 0:
-            continue
-        segs = []
-        start = xs[0]
-        prev = xs[0]
-        for x in xs[1:]:
-            if x - prev > x_gap:
-                segs.append((start, prev))
-                start = x
-            prev = x
-        segs.append((start, prev))
-        for (l, r) in segs:
-            merged = False
-            for b in boxes:
-                if b[1] >= y - y_gap and not (r < b[2] or l > b[3]):
-                    b[1] = y
-                    b[2] = min(b[2], l)
-                    b[3] = max(b[3], r)
-                    merged = True
-                    break
-            if not merged:
-                boxes.append([y, y, l, r])
+    for y, l, r in zip(rows[starts].tolist(), cols[starts].tolist(),
+                       (cols[ends - 1]).tolist()):
+        merged = False
+        for b in boxes:
+            if b[1] >= y - y_gap and not (r < b[2] or l > b[3]):
+                b[1] = y
+                b[2] = min(b[2], l)
+                b[3] = max(b[3], r)
+                merged = True
+                break
+        if not merged:
+            boxes.append([y, y, l, r])
     return [(t, b, l, r) for (t, b, l, r) in boxes
             if (b - t) >= min_h and (r - l) >= min_w]
 

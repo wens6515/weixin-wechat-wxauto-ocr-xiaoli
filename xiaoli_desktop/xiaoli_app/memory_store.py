@@ -75,6 +75,47 @@ def deep_count_lines(path):
     return n
 
 
+def render_export_markdown(data):
+    """把 export_chat_data 的结构渲染成 Markdown（人读全量流）。
+
+    角色显示：user→用户、assistant→小漓；时间戳原样。纯文本组装，无
+    外部依赖，单测直测。"""
+    role_label = {"user": "用户", "assistant": "小漓"}
+
+    def _line(m):
+        # 消息内容里的换行替换为全角空格：列表项内换行会打断 Markdown 行
+        return (f"- [{m.get('time', '')}] "
+                f"{role_label.get(m.get('role'), m.get('role') or '未知')}: "
+                f"{str(m.get('content', '')).replace(chr(10), '　')}")
+
+    lines = [f"# 小漓聊天记忆导出 · {data.get('chat', '')}", ""]
+    lines.append(f"- 近期窗口：{len(data.get('recent') or [])} 条")
+    lines.append(f"- 重要记忆：{len(data.get('important') or [])} 条")
+    lines.append(f"- 关键词索引：{len(data.get('index') or [])} 条")
+    lines.append(f"- 深层存档：{data.get('deep_count', 0)} 条")
+    lines.append("")
+    lines.append("## 近期对话")
+    lines.append("")
+    lines.extend(_line(m) for m in (data.get("recent") or []))
+    lines.append("")
+    lines.append("## 重要记忆（常驻上下文，压缩模型提炼）")
+    lines.append("")
+    for x in (data.get("important") or []):
+        lines.append(f"- {x.get('content', '')}")
+    lines.append("")
+    lines.append("## 关键词索引（命中自动注入）")
+    lines.append("")
+    for e in (data.get("index") or []):
+        kws = "、".join(str(k) for k in (e.get("kw") or []))
+        lines.append(f"- {kws}：{e.get('mem', '')}")
+    lines.append("")
+    lines.append("## 深层存档（全量，按时间序，永不删除的历史）")
+    lines.append("")
+    lines.extend(_line(m) for m in (data.get("deep") or []))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def deep_read_page(path, offset=0, limit=200, query=None):
     """深层 jsonl 分页/过滤读取。
 
@@ -337,6 +378,27 @@ class MemoryStore:
             if len(out) >= count:
                 break
         return out, start + len(out)
+
+    # ---------- 全量导出（记忆管理页「导出」入口的数据组装层） ----------
+
+    def export_chat_data(self, chat_id):
+        """全量导出该聊天记忆：近期窗口 + 重要记忆 + 关键词索引 + 深层存档。
+
+        返回 {chat(存储键原文), recent, important, index, deep, deep_count}；
+        近期条目与深层行结构同构（{role, content, time}）。近期/索引取锁内
+        快照，深层经 iter_deep 全量读（bot 未运行时 UI 也可构造 MemoryStore
+        直调——文件为事实源）。"""
+        with self.lock:
+            key = self._resolve_key(chat_id)
+            st = self.memory_db.get(key) or {}
+            recent = [dict(m) for m in (st.get("recent") or [])]
+            important = [dict(x) for x in (st.get("important") or [])
+                         if isinstance(x, dict)]
+            index = [dict(e) for e in (st.get("index") or [])
+                     if isinstance(e, dict)]
+        deep = list(self.iter_deep(chat_id))
+        return {"chat": key, "recent": recent, "important": important,
+                "index": index, "deep": deep, "deep_count": len(deep)}
 
     def clear_deep(self, chat_id=None):
         """删除深层记忆文件（清空记忆时联动；chat_id=None 清全部）。"""

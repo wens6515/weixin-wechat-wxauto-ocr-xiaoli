@@ -109,7 +109,9 @@ class TestSendVoiceReply(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def test_voice_off_returns_false_without_synth(self):
-        bot = _make_bot(mode="off")
+        """无语音能力（配置缺）→ False 零合成。模式把关在调用方
+        voice_state（能力层只认配置——per-chat 强制开时全局 mode 可 off）。"""
+        bot = _make_bot(mode="off", profile=False)
         self.assertFalse(bot._send_voice_reply("小明", "你好"))
         self.assertEqual(FakeClient.instances, [])
         self.assertEqual(bot.wx.sent, [])
@@ -215,6 +217,13 @@ class TestVoiceMemory(unittest.TestCase):
         bot.memory_keep_recent = 30
         bot._deep_count = {}
         bot._deep_dir = ""
+        # 语音能力齐全 + auto：_handle_send_voice 的 voice_state 闸要求有效
+        # 模式非 off 才走到记忆写入（本组测试只钉记忆语义）
+        bot.voice_mode = "auto"
+        bot.tts_endpoint = "http://127.0.0.1:9880/tts"
+        bot.voice_profiles = [PROFILE]
+        bot.active_voice_profile_id = "p1"
+        bot.chat_feature_overrides = {}
         return bot
 
     def test_handle_send_voice_writes_plain_text_memory(self):

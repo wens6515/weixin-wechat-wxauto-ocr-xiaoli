@@ -28,6 +28,36 @@ from xiaoli_app.memory_store import memory_key
 
 logger = logging.getLogger("xiaoli")
 
+# per-chat 功能覆盖的三态例外：功能名白名单（voice 语音发送 / web_search
+# 联网搜索 / task 任务桥 / state_watch 状态监视）。存储结构
+# {memory_key(聊天): {功能名: bool}}——缺省/无条目 = 跟随全局，true = 强制开，
+# false = 强制关。全局开关（task_enabled 等）仍是总闸，语义见
+# WeChatBot.feature_enabled / voice_state。
+FEATURE_KEYS = ("voice", "web_search", "task", "state_watch")
+
+
+def sanitize_feature_overrides(cfg):
+    """清洗 per-chat 功能覆盖表（就地修改并返回 cfg）。
+
+    聊天键走 memory 口径归一化（memory_key：剥引号变体与空白，与
+    chat_card_params / 记忆键同口径——OCR 差异不分裂覆盖条目）；功能名
+    仅接受 FEATURE_KEYS 白名单，值仅接受 bool；无效条目丢弃，空条目
+    删除（跟随全局无需占位）。非 dict 整体重置为空表。"""
+    raw = cfg.get("chat_feature_overrides")
+    if not isinstance(raw, dict):
+        raw = {}
+    clean = {}
+    for chat, feats in raw.items():
+        key = memory_key(str(chat or ""))
+        if not key or not isinstance(feats, dict):
+            continue
+        entry = {str(f): bool(v) for f, v in feats.items()
+                 if f in FEATURE_KEYS and isinstance(v, bool)}
+        if entry:
+            clean[key] = entry
+    cfg["chat_feature_overrides"] = clean
+    return cfg
+
 # API Key 落盘加密（DPAPI，Windows 用户级）：
 # - 内存态 cfg 保持明文（引擎/UI 使用）；加密只发生在 save_config 的落盘副本上
 # - 读盘时解密回明文（dpapi: 前缀检测，兼容旧明文 config）
@@ -649,13 +679,17 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "font_scale": "small",  # 全局字号档位：small/medium/large（用户指定：启动默认小字号）
         "wallpaper_path": "小漓主题.jpg",  # 背景壁纸（裸文件名 → 启动时按壁纸库解析绝对路径；配套 abyss 主题）
         "web_proxy": "",  # 联网搜索/网页抓取代理（http/https/socks5；空 = 直连；不影响模型 API）
+        "chat_feature_overrides": {},  # per-chat 功能覆盖三态例外 {memory_key(聊天): {voice/web_search/task/state_watch: bool}}；空 = 全部跟随全局
     }.items():
         if k not in cfg:
             cfg[k] = v
-    # UI 新默认迁移：旧出厂默认主题 blue/tokyonight →
-    # abyss、壁纸空 → 小漓主题.jpg（配套「深海小漓」套）。仅当值仍是「出厂
-    # 默认」时迁移——用户已手动换过其他主题/壁纸的不覆盖，尊重用户选择。
-    if cfg.get("theme") in ("blue", "tokyonight", None):
+    # UI 新默认迁移：主题不在保留名单（ui.THEMES 的 7 套）→ abyss、壁纸空
+    # → 小漓主题.jpg（配套「深海小漓」套）。历史出厂默认 blue 与已砍掉的
+    # 12 套模板主题（tokyonight 曾在此误伤：用户手选也被迁走，现已在名单内
+    # 不再覆盖）统一落到 abyss；渲染层对未知主题本就回退 abyss，这里落盘
+    # 让设置页选中态与实际渲染一致。
+    if cfg.get("theme") not in ("abyss", "neon", "tokyonight", "stellar",
+                                "moxin", "cream", "mint"):
         cfg["theme"] = "abyss"
     if cfg.get("font_scale") in ("medium", None):
         cfg["font_scale"] = "small"
@@ -668,6 +702,9 @@ def load_config_store(path="config.json", cards_dir="cards"):
     if not str(cfg.get("tasks_dir") or "").strip():
         cfg["tasks_dir"] = default_tasks_dir()
     sync_workdir_to_tasks(cfg)
+    # per-chat 功能覆盖清洗：结构/键口径/白名单不合规条目静默剔除
+    # （fail-closed：脏数据不会流到运行时查询）
+    sanitize_feature_overrides(cfg)
     # 角色卡迁移：老卡里烘焙的旧版沉浸要求剥离（回复纪律改为运行时注入）。
     # 必须在读活跃卡之前执行——本次投影要用的就是迁移后的卡内容。
     try:

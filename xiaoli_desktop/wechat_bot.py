@@ -386,6 +386,11 @@ class WeChatBot:
         # AppContext.reproject_and_push 热推送，无需重启。
         self.chat_card_bindings = dict(cfg.get("chat_card_bindings") or {})
         self.chat_card_params = dict(cfg.get("chat_card_params") or {})
+        # per-chat 功能覆盖（三态例外）：{memory_key(聊天): {功能名: bool}}，
+        # 缺省 = 跟随全局。设置页保存后整体替换热生效；查询走
+        # feature_enabled（web_search/task/state_watch）与 voice_state（voice）
+        self.chat_feature_overrides = dict(
+            cfg.get("chat_feature_overrides") or {})
         # 文件处理配置
         self.file_model = strip_model_prefix(cfg.get("file_model", self.chat_model))
         self.file_temp = cfg.get("file_temp", 1.0)
@@ -424,16 +429,66 @@ class WeChatBot:
         # 先按名字原文查（新口径），再退回归一化键（兼容升级前保存的绑定）
         return params.get(chat_id) or params.get(_memory_key(chat_id)) or {}
 
+    # ---------- per-chat 功能开关（三态覆盖，查询口径唯一入口） ----------
+
+    def _feature_override(self, chat_id, feature):
+        """该聊天对该功能的覆盖值：None=未设置（跟随全局）/ True / False。"""
+        ov = (getattr(self, "chat_feature_overrides", None) or {}).get(
+            _memory_key(chat_id or "")) or {}
+        v = ov.get(feature)
+        return None if v is None else bool(v)
+
+    def feature_enabled(self, chat_id, feature):
+        """该聊天的功能有效开关（feature ∈ web_search/task/state_watch）。
+
+        per-chat 三态覆盖优先，缺省跟随全局；强制开优先于全局关（覆盖
+        语义是「这个聊天单独放开」，投递/声明链路自足，无能力缺口）。"""
+        override = self._feature_override(chat_id, feature)
+        if override is not None:
+            return override
+        base = {"web_search": bool(getattr(self, "web_search_enabled", True)),
+                "task": bool(getattr(self, "task_enabled", True)),
+                "state_watch": bool(getattr(self, "state_watch_enabled", False)),
+                }.get(feature, False)
+        return base
+
+    def voice_state(self, chat_id):
+        """该聊天的语音有效模式："off" / "auto" / "always"。
+
+        全局 voice_mode 为基线；per-chat 覆盖：强制关 → off（任何基线）；
+        强制开 → 基线为 off 且 TTS 配置齐全（_voice_profile_ready 非空，
+        不含模式检查）时升为 auto——给特定聊天单独开语音；配置不齐开不
+        出能力，维持 off。"""
+        override = self._feature_override(chat_id, "voice")
+        base = str(getattr(self, "voice_mode", "off") or "off").lower()
+        if override is False:
+            return "off"
+        if override is True:
+            if base in ("auto", "always"):
+                return base
+            if self._voice_profile_ready() is not None:
+                return "auto"
+            return "off"
+        return base if base in ("auto", "always") else "off"
+
+    def _state_watch_polling_active(self):
+        """状态监视线程是否应轮询：全局开关开，或存在条件监视条目
+        （全局关 + 有条目 = 用户按聊天单独开的，条目本身就是事实源）。"""
+        if getattr(self, "state_watch_enabled", False):
+            return True
+        try:
+            return bool(self.reminders.list_conditions())
+        except Exception:
+            return False
+
     # ---------- 语音发送（音源接口化，实现在 xiaoli_app.tts + 后端 send_voice）----------
 
-    def _voice_profile(self):
-        """激活音色档案；配置不全返回 None（语音链路整体不激活）。
-
-        校验：voice_mode 已开 + 端点已配 + 激活档案存在 + 「通用」参考齐全
-        （ref_audio_path 与 prompt_text 均非空——GPT-SoVITS 合成的最低要求）。
-        每次现读 bot 属性——设置页热改即时生效。"""
-        if getattr(self, "voice_mode", "off") not in ("auto", "always"):
-            return None
+    def _voice_profile_ready(self):
+        """TTS 配置是否齐全（**不含模式检查**）：端点已配 + 激活档案存在 +
+        「通用」参考齐全（ref_audio_path 与 prompt_text 均非空——GPT-SoVITS
+        合成的最低要求）。返回档案 dict 或 None。每次现读 bot 属性——设置页
+        热改即时生效。per-chat 强制开语音（voice_state）用它判断能否在全局
+        mode=off 时单聊启用。"""
         if not getattr(self, "tts_endpoint", ""):
             return None
         pid = getattr(self, "active_voice_profile_id", "")
@@ -447,8 +502,16 @@ class WeChatBot:
             return None
         return None
 
-    def _send_voice_tool(self, profile):
+    def _voice_profile(self):
+        """激活音色档案；模式未开启或配置不全返回 None（语音链路整体不激活）。"""
+        if getattr(self, "voice_mode", "off") not in ("auto", "always"):
+            return None
+        return self._voice_profile_ready()
+
+    def _send_voice_tool(self, profile, state=None):
         """send_voice 工具 schema（auto / always 模式注入，描述按模式区分）。
+
+        state：该聊天语音有效模式（voice_state），缺省回退全局 voice_mode。
 
         emotion 枚举从档案 refs 键动态生成——用户配了哪些情绪参考，模型
         就能选哪些（不硬编码任何模型包的情绪集）；档案只有「通用」时视为
@@ -470,7 +533,7 @@ class WeChatBot:
                 "description": "用哪种情绪说话（对应不同的参考音频），"
                                "按消息语境挑一个，不确定就用「通用」",
             }
-        if getattr(self, "voice_mode", "off") == "always":
+        if (state or getattr(self, "voice_mode", "off")) == "always":
             description = (
                 "语音发送（当前为语音模式：你的每一条回复都必须通过调用"
                 "本工具发出）。text 填要说出口的内容（口语化、适合念出来，"
@@ -829,9 +892,12 @@ class WeChatBot:
         messages.append({"role": "system", "content": f"当前时间：{current_time}"})
         # always 语音模式纪律：每条回复必须经 send_voice 发出（模型挑情绪的
         # 唯一通道）。放当前时间之后、user 之前——它不随轮次变化，且位于
-        # 每秒变化的时间消息之后，不影响缓存前缀。
-        voice_profile = self._voice_profile()
-        if voice_profile is not None and self.voice_mode == "always":
+        # 每秒变化的时间消息之后，不影响缓存前缀。模式取该聊天的语音有效
+        # 状态（voice_state：per-chat 覆盖优先，缺省跟随全局）；配置校验用
+        # _voice_profile_ready（不含模式——单聊强制开时全局可为 off）。
+        voice_profile = self._voice_profile_ready()
+        v_state = self.voice_state(chat_id)
+        if voice_profile is not None and v_state == "always":
             messages.append({"role": "system", "content": ALWAYS_VOICE_RULES})
         messages.append({"role": "user", "content": content})
         with self._model_lock:
@@ -847,26 +913,31 @@ class WeChatBot:
         # 逐字对齐 call_chat_ai：从最旧历史开始丢弃，保证单次请求不超模型上下文。
         messages = fit_messages_in_budget(
             messages, budget=getattr(self, "max_context_tokens", 100000))
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "dispatch_task",
-                "description": "判断用户消息是否为任务，是则投递天枢处理",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task": {"type": "string", "description": "任务描述"},
+        # 任务投递工具：按聊天有效开关声明（全局关 + 单聊强制开 = 该聊天
+        # 仍可投；关闭 = 不声明，模型看不到就不会调用）
+        tools = []
+        if self.feature_enabled(chat_id, "task"):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "dispatch_task",
+                    "description": "判断用户消息是否为任务，是则投递天枢处理",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task": {"type": "string", "description": "任务描述"},
+                        },
+                        "required": ["task"],
                     },
-                    "required": ["task"],
                 },
-            },
-        }]
-        # 语音发送工具（voice_mode=auto/always 且配置齐全时注入）。auto 下
-        # 工具决定「何时发语音」；always 下工具是**强制回复通道**——每条
-        # 回复都必须经它发出（纪律见 ALWAYS_VOICE_RULES system 消息），
-        # 模型借 emotion 挑情绪。off 或配置不全时不注入。
-        if voice_profile is not None and self.voice_mode in ("auto", "always"):
-            tools.append(self._send_voice_tool(voice_profile))
+            })
+        # 语音发送工具（voice_mode=auto/always 且配置齐全时注入；模式取
+        # 该聊天有效状态）。auto 下工具决定「何时发语音」；always 下工具
+        # 是**强制回复通道**——每条回复都必须经它发出（纪律见
+        # ALWAYS_VOICE_RULES system 消息），模型借 emotion 挑情绪。
+        # off 或配置不全时不注入。
+        if voice_profile is not None and v_state in ("auto", "always"):
+            tools.append(self._send_voice_tool(voice_profile, v_state))
         if getattr(self, "reminders", None) is not None:
             # 统一触发器工具（kind=time 定时 / kind=condition 状态监视）：
             # 模型依据 system 的「当前时间」消息把相对表达换算成绝对时间。
@@ -953,12 +1024,12 @@ class WeChatBot:
                 },
             })
         # 联网搜索工具（零配置：百度/必应/搜狗并发合并，见 xiaoli_app/web_search）。
-        # web_search_enabled 关闭（设置页开关）时整体不声明——模型看不到就
-        # 不会调用。query 描述写明真机校准的措辞规则：多个主体用空格分开
-        # （百度/搜狗对「机构 人名」式查询精准命中，cn.bing 反而会分词失败）；
-        # 并给出结果无关时的换措辞重试策略——模型拿到垃圾结果只会硬答或放弃
-        # 是此前搜索「不精确」的主因之一。
-        if getattr(self, "web_search_enabled", True):
+        # 有效开关按聊天取（feature_enabled：per-chat 覆盖优先）——关闭时
+        # 整体不声明，模型看不到就不会调用。query 描述写明真机校准的措辞
+        # 规则：多个主体用空格分开（百度/搜狗对「机构 人名」式查询精准命中，
+        # cn.bing 反而会分词失败）；并给出结果无关时的换措辞重试策略——模型
+        # 拿到垃圾结果只会硬答或放弃是此前搜索「不精确」的主因之一。
+        if self.feature_enabled(chat_id, "web_search"):
             tools.append({
                 "type": "function",
                 "function": {
@@ -1755,7 +1826,11 @@ class WeChatBot:
         语音内容**以纯文本写记忆**由调用方负责（这里只管发送）。
         返回 True = 全部段已按语音发出；False = 已（部分）回退文本。
         """
-        profile = self._voice_profile()
+        # 配置齐全即可发送（不含模式检查）：调用方（_deliver_reply 的
+        # always 分支 / send_voice 工具注入）已按该聊天 voice_state 把过
+        # 关——per-chat 强制开时全局 mode 可为 off，这里若再查模式会把
+        # 已注入工具的语音回复静默丢掉
+        profile = self._voice_profile_ready()
         if profile is None:
             return False
         parts = [strip_unspeakable(p)
