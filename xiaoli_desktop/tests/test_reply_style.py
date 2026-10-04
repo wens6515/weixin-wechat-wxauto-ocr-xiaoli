@@ -26,7 +26,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from wechat_bot import (REPLY_MAX_TOKENS, REPLY_SEGMENT_INTERVAL_SECONDS,
-                        WeChatBot, _strip_trailing_period)
+                        WeChatBot, _strip_trailing_period, strip_reply_prefix)
 from xiaoli_app import config_store
 
 
@@ -238,6 +238,44 @@ class TestTrailingPeriodStrip(unittest.TestCase):
 
     def test_period_only_part(self):
         self.assertEqual(_strip_trailing_period("。"), "")
+
+
+class TestStripReplyPrefix(unittest.TestCase):
+    """回复前缀剥除：段首时间戳/私聊群聊标记。
+
+    真机缺陷：模型把时间标注当「段首标记」复读进多段回复的第二段
+    （'诶？\\n\\n[2026-10-04 17:23:04] 这张图哪来的呀'）——旧正则只锚
+    字符串开头（^\\s*），段首不在开头会整段漏网原样发给用户。
+    """
+
+    def test_segment_leading_timestamp_stripped(self):
+        # 真机漏网场景：时间戳在第二段段首
+        self.assertEqual(
+            strip_reply_prefix("诶？\n\n[2026-10-04 17:23:04] 这张图哪来的呀"),
+            "诶？\n\n这张图哪来的呀")
+
+    def test_leading_timestamp_stripped(self):
+        self.assertEqual(strip_reply_prefix("[2026-10-04 17:23:04] 你好"), "你好")
+
+    def test_inline_timestamp_kept(self):
+        # 行中（正文里的时间表达）不剥，避免误伤用户要 AI 写的带时间正文
+        self.assertEqual(strip_reply_prefix("我记住 [2026-10-04 17:23:04] 了"),
+                         "我记住 [2026-10-04 17:23:04] 了")
+
+    def test_chat_markers_still_stripped(self):
+        self.assertEqual(strip_reply_prefix("[私聊 - 林小满]你好"), "你好")
+
+    def test_stacked_prefixes_stripped(self):
+        self.assertEqual(
+            strip_reply_prefix("[2026-10-04 17:23:04]\n[私聊 - 林小满]\n好"), "好")
+
+    def test_ocr_variant_no_space_stripped(self):
+        # 模型可能抄 OCR 丢空格变体（日期与时刻直接相连）
+        self.assertEqual(strip_reply_prefix("[2026-10-0417:23:04] x"), "x")
+
+    def test_timestamp_own_line_consumes_newline(self):
+        self.assertEqual(strip_reply_prefix("你好\n[2026-10-04 17:23:04]\n内容"),
+                         "你好\n内容")
 
 
 class TestSplitReplyParts(_BotCase):
