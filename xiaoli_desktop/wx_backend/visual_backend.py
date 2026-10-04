@@ -2211,6 +2211,22 @@ class VisualBackend:
                         else:
                             sender = "self" if _is_self(first_x, first_y) \
                                 else (block_sender or chat)
+                        # 归属判定诊断（DEBUG 轨——只进 bot.log 全量日志、
+                        # 不进前端 bot_run.log）：记录气泡判定/头像划块/
+                        # 头像坐标全现场。"⚠不一致" = 气泡判定与最终归属
+                        # 矛盾（间歇性归属错配的错误现场，排障 grep "[归属]"
+                        # 即得：若出现 ⚠ 行，其字段足以还原当时错配原因）。
+                        _mismatch = (bubble_self is not None
+                                     and (sender == "self") != bool(bubble_self))
+                        logger.debug(
+                            f"[归属]{' ⚠不一致' if _mismatch else ''} "
+                            f"{text[:24]!r} -> {sender!r}"
+                            f" bubble_self={bubble_self}"
+                            f" bubble={cur_lines[0].get('_bubble')}"
+                            f" bucket={bucket_hit} first_y={first_y_1x}"
+                            f" right_tops={right_tops_1x}"
+                            f" left_tops={other_tops_1x}"
+                            f" media_self={media_self_flag}")
                         seq += 1
                         msgs.append(WeChatMessage(
                             id=f"visual_{seq}",
