@@ -256,13 +256,15 @@ class TestConditionWatcher(unittest.TestCase):
         w.run()
 
     def test_disabled_not_polled(self):
-        """开关关闭：run 循环只等待，零抓取零判定。"""
-        self._add()
+        """全局开关关且无监视条目：run 循环只等待，零抓取零判定。
+        （轮询闸 = 开关 or 存在条目——per-chat 强制开创建的条目本身就是
+        事实源，见 _state_watch_polling_active。）"""
         self.bot.state_watch_enabled = False
         with mock.patch("xiaoli_bot.web_fetch") as mf:
             self._run_briefly(self.bot)
         mf.assert_not_called()
         # 手动驱动 _scan_once（绕过 run 的闸门）确认数据本身可扫
+        self._add()
         with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_RAIN):
             self.w._scan_once()
         self.assertEqual(len(self.bot.reminders.list_conditions()), 1)

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""用量统计存储单测：落盘/坏行容错/按天与按模型聚合/时间窗过滤。"""
+"""用量统计存储单测（SQLite 后端）：落盘/旧 JSONL 迁移/按天与按模型聚合/
+时间窗过滤/清空。"""
 import json
 import os
 import tempfile
@@ -12,7 +13,8 @@ from xiaoli_app.usage_store import UsageStore
 class TestUsageStore(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.dir, "usage.jsonl")
+        self.path = os.path.join(self.dir, "usage.db")
+        self.legacy = os.path.join(self.dir, "usage.jsonl")
         self.store = UsageStore(self.path)
 
     def test_record_appends_and_loads(self):
@@ -28,19 +30,20 @@ class TestUsageStore(unittest.TestCase):
         self.assertEqual(rec["latency_ms"], 123)
         self.assertIsInstance(rec["ts"], float)
 
-    def test_clear_removes_file_and_allows_rerecord(self):
+    def test_clear_empties_and_allows_rerecord(self):
+        """清空 = DELETE 全表（库文件保留），清空后可继续记录。"""
         self.store.record(kind="chat", model="m1", ok=True)
         self.assertTrue(self.store.clear())
-        self.assertFalse(os.path.exists(self.path))
         self.assertEqual(self.store._load(), [])
-        # 清空后继续记录（record 自动重建文件）
         self.store.record(kind="chat", model="m2", ok=True)
         self.assertEqual(len(self.store._load()), 1)
 
     def test_clear_missing_file_returns_false(self):
-        self.assertFalse(self.store.clear())
+        self.store.clear()
+        # 库被外部删除后再 clear：连接会重建库文件（空表 DELETE 成功）
+        self.assertTrue(self.store.clear())
 
-    def test_missing_file_summary_empty(self):
+    def test_missing_store_summary_empty(self):
         s = self.store.summary(days=7)
         self.assertEqual(s["total"]["calls"], 0)
         self.assertEqual(s["by_day"], {})
@@ -64,10 +67,8 @@ class TestUsageStore(unittest.TestCase):
              "prompt_tokens": 999, "completion_tokens": 999, "ok": True,
              "status": 200, "latency_ms": 1},
         ]
-        with open(self.path, "w", encoding="utf-8") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            f.write("这不是JSON\n")
+        for r in rows:
+            self.store.record(**r)
         s = self.store.summary(days=7)
         self.assertEqual(s["total"]["calls"], 3)      # 30 天前那行被时间窗滤掉
         self.assertEqual(s["total"]["ok"], 2)
@@ -134,6 +135,56 @@ class TestUsageStore(unittest.TestCase):
         from xiaoli_app.config_store import default_data_dir
         self.assertEqual(os.path.dirname(default_usage_path()),
                          default_data_dir())
+
+    # ---------- 旧 JSONL 一次性迁移 ----------
+
+    def test_legacy_jsonl_imported_and_archived(self):
+        """构造时发现同目录 usage.jsonl → 导入 → 改名 .imported 留档。"""
+        now = time.time()
+        rows = [
+            {"ts": now, "kind": "chat", "model": "m1", "prompt_tokens": 10,
+             "completion_tokens": 2, "ok": True, "latency_ms": 100},
+            {"ts": now - 86400, "kind": "vision", "model": "m2",
+             "prompt_tokens": 5, "ok": False, "status": 500},
+        ]
+        with open(self.legacy, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+            f.write("这不是JSON\n")   # 坏行跳过（与旧读取侧容错一致）
+        store = UsageStore(self.path)   # 新实例构造即迁移
+        recs = store._load()
+        self.assertEqual(len(recs), 2)  # 坏行不导入
+        self.assertEqual({r["model"] for r in recs}, {"m1", "m2"})
+        self.assertFalse(os.path.exists(self.legacy))
+        self.assertTrue(os.path.exists(self.legacy + ".imported"))
+        s = store.summary(days=7)
+        self.assertEqual(s["total"]["calls"], 2)
+        self.assertEqual(s["total"]["fail"], 1)
+
+    def test_migration_idempotent_no_double_import(self):
+        """库已有数据 + jsonl 残留（上次归档改名失败）→ 只归档不再导入。"""
+        now = time.time()
+        with open(self.legacy, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": now, "kind": "chat", "model": "m1",
+                                "prompt_tokens": 10, "ok": True}) + "\n")
+        store = UsageStore(self.path)
+        self.assertEqual(len(store._load()), 1)
+        # 模拟归档失败：再写一份同名 jsonl（内容不同），库中已有数据
+        with open(self.legacy, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": now, "kind": "chat", "model": "mX",
+                                "prompt_tokens": 999, "ok": True}) + "\n")
+        store2 = UsageStore(self.path)
+        recs = store2._load()
+        self.assertEqual(len(recs), 1)            # 不重复导入
+        self.assertEqual(recs[0]["model"], "m1")  # 原数据未被动
+        self.assertFalse(os.path.exists(self.legacy))  # 残留被归档
+
+    def test_load_records_days_window(self):
+        now = time.time()
+        self.store.record(kind="chat", model="m1", ok=True, ts=now)
+        self.store.record(kind="chat", model="m2", ok=True, ts=now - 10 * 86400)
+        self.assertEqual(len(self.store.load_records()), 2)
+        self.assertEqual(len(self.store.load_records(days=7)), 1)
 
 
 if __name__ == "__main__":

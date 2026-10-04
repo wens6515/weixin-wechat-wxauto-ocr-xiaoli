@@ -94,6 +94,15 @@ VISION_ROUTE_PROMPT = (
 )
 
 
+# 任务桥按聊天关闭（feature_enabled(task)=False）时的纯聊天 prompt 变体：
+# 文字里完全不提 dispatch_task，与「工具不声明」配套——提示词提一个没声明
+# 的工具会诱导模型幻觉调用。
+VISION_CHAT_PROMPT = (
+    "有人给你发了条消息，照你平时的样子回他。\n"
+    "普通的闲聊、打招呼、问问题、要资料都直接回他，不要调用任何工具。"
+)
+
+
 def generate_task_id():
     """时间戳 + 4 位随机：YYYYmmddHHMMSSxxxx"""
     return time.strftime("%Y%m%d%H%M%S") + uuid.uuid4().hex[:4]
@@ -705,7 +714,10 @@ class ConditionWatcher(threading.Thread):
     def run(self):
         while not self._stop_evt.is_set():
             try:
-                if self.bot.state_watch_enabled and not self.bot.paused:
+                # 轮询闸：全局开关开，或存在条件监视条目（全局关 + 有条目 =
+                # 用户按聊天单独开的强制开覆盖，条目即事实源）
+                if self.bot._state_watch_polling_active() \
+                        and not self.bot.paused:
                     self._scan_once()
             except Exception as e:
                 logger.error(f"[状态监视] 扫描异常: {e}")
@@ -1123,9 +1135,9 @@ class AgentBot(WeChatBot):
         )
 
     def _classify_task(self, text):
-        if not self.task_enabled:
-            return {"is_task": False, "task": ""}
-        # 单模型化后任务判断统一用 chat_model（无独立 classify_model）
+        # 任务有效开关由调用方按聊天判断（feature_enabled），此处只负责
+        # LLM 分类本身——全局 task_enabled 闸放在这里会拦掉「全局关 +
+        # 单聊强制开」的降级路径
         return classify_task_with_llm(self.api_url, self.api_key, self.chat_model, text)
 
     def _vision_route(self, chat_name, sender, text, img_paths=None, msg_id=None,
@@ -1165,7 +1177,13 @@ class AgentBot(WeChatBot):
                 decorated = f"群聊：{chat_name}：{text}"
         else:
             decorated = f"私聊 - {sender}：{text}" if sender else f"私聊：{text}"
-        prompt = f"{VISION_ROUTE_PROMPT}\n\n用户消息：\n{decorated}"
+        # 任务桥按聊天取有效开关：关闭时用纯聊天 prompt 变体（不提
+        # dispatch_task，与「工具不声明」配套，防模型幻觉调用未声明工具）
+        if self.feature_enabled(chat_name, "task"):
+            route_prompt = VISION_ROUTE_PROMPT
+        else:
+            route_prompt = VISION_CHAT_PROMPT
+        prompt = f"{route_prompt}\n\n用户消息：\n{decorated}"
         content = [{"type": "text", "text": prompt}]
         # 关键词记忆索引：用原始用户消息（非装饰串）匹配，命中的相关记忆
         # 由 call_vision_api 注入到历史之后
@@ -1208,13 +1226,19 @@ class AgentBot(WeChatBot):
             # 定时提醒工具（与 dispatch_task 并列的节点 I 出口）
             return self._handle_set_reminder(chat_name, sender, result, user_text)
         if kind == "tool_call" and result.get("name") == "send_voice":
-            # 语音发送工具（voice_mode=auto）
+            # 语音发送工具（该聊天语音有效模式 auto/always 时注入）
             return self._handle_send_voice(chat_name, result, user_text)
         if kind == "tool_call":
             # 契约：name 必须为 dispatch_task；task 从 arguments JSON 解析
             # （json.loads 后取 task 字段；解析失败降级用原文）
             if result.get("name") != "dispatch_task":
                 logger.warning(f"[vision] 未知工具调用 name={result.get('name')!r}，降级")
+                return None
+            if not self.feature_enabled(chat_name, "task"):
+                # fail-closed：该聊天任务桥已关（全局关 + 强制开未覆盖/强制
+                # 关）——模型幻觉调用未声明工具时拒绝投递，降级普通聊天
+                logger.warning(
+                    f"[任务桥] {chat_name!r} 任务桥已按聊天关闭，忽略投递工具调用")
                 return None
             task_desc = user_text or ""
             raw_args = result.get("arguments") or "{}"
@@ -1488,7 +1512,7 @@ class AgentBot(WeChatBot):
         # '把这个做成网页' 缺少对象，单独看会被误判闲聊）：
         #   '[文件]部门简介+纳新宣传(6).docx 把这个做成一个赛博朋克风格的网页'
         classify_input = f"[文件]{filename} {instruction}"
-        if self.task_enabled:
+        if self.feature_enabled(chat_name, "task"):
             resp = self._vision_route(
                 chat_name, sender, classify_input,
                 msg_id=None, raw_message=filename,
@@ -1689,6 +1713,11 @@ class AgentBot(WeChatBot):
         if not text:
             logger.warning("[语音] send_voice 缺 text，降级")
             return None
+        if self.voice_state(chat_name) == "off":
+            # fail-closed：该聊天语音已关（强制关覆盖 / 全局关闭且未放开）
+            # ——模型幻觉调用未声明工具时拒绝发语音，降级普通聊天
+            logger.warning(f"[语音] {chat_name!r} 语音已按聊天关闭，降级普通聊天")
+            return None
         emotion = str(args.get("emotion") or "").strip() or None
         if user_text:
             self._add_history(chat_name, "user", user_text)
@@ -1697,14 +1726,15 @@ class AgentBot(WeChatBot):
         return True
 
     def _deliver_reply(self, chat, text, trigger=False):
-        """模型生成的对话回复统一出口。always 语音模式先试语音（任一环节
-        失败内部已回退文本）；其余模式/语音未启用直接文本发送。
+        """模型生成的对话回复统一出口。该聊天语音有效模式为 always
+        （voice_state：per-chat 覆盖优先）时先试语音（任一环节失败内部已
+        回退文本）；其余模式/语音未启用直接文本发送。
 
         程序固定文案（占位「正在处理中」「文件已收到」、任务进度、错误
         兜底）不走这里，保持文字——always 语义只覆盖模型说出口的话。
         trigger=True 用触发器文本语义（旁路占位归零），语音回退同样旁路。
         """
-        if getattr(self, "voice_mode", "off") == "always" and \
+        if self.voice_state(chat) == "always" and \
                 self._send_voice_reply(
                     chat, text,
                     text_fallback=(lambda t: self._send_trigger_reply(t, chat))
@@ -1781,18 +1811,20 @@ class AgentBot(WeChatBot):
 
         条件监视不再依赖 content（提醒事项）——达成后是回递 API 让其根据
         条件与页面状况自行回复（用户定案），content 仅作备注存档可缺省。
-        校验失败返回 None 降级普通聊天；功能未开启（state_watch_enabled，
-        用户在设置页决定——会产生额外 API 调用）→ 发提示并返回 True。"""
+        校验失败返回 None 降级普通聊天；功能有效开关关闭（全局开关 + 按
+        聊天覆盖均未放开，会产生额外 API 调用）→ 发提示并返回 True。"""
         if getattr(self, "reminders", None) is None:
             return None
-        if not getattr(self, "state_watch_enabled", False):
-            logger.info("[状态监视] 未开启（设置页开关），已告知用户")
+        if not self.feature_enabled(chat_name, "state_watch"):
+            logger.info(f"[状态监视] {chat_name!r} 未开启（全局开关与按聊天"
+                        "覆盖均未放开），已告知用户")
             if user_text:
                 self._add_history(chat_name, "user", user_text)
             self._add_history(chat_name, "assistant",
                               "[状态监视未开启，已告知用户到设置页打开]")
-            self._send_text("这个「盯着状态提醒我」的功能还没有开启呢～"
-                            "请先在小漓的设置页里打开「状态监视」，再让我试一次好不好",
+            self._send_text("这个「盯着状态提醒我」的功能在我们这个聊天还没有"
+                            "开启呢～请先在小漓的设置页里打开「状态监视」"
+                            "（全局或本聊天的例外里放开），再让我试一次好不好",
                             chat_name)
             return True
         url = str(args.get("url") or "").strip()
@@ -1865,7 +1897,7 @@ class AgentBot(WeChatBot):
                 content = "你好呀～"  # 与基类 process_new_messages 群聊空内容文案一致
         question = content.strip()
         logger.info(f"[MSG] [{chat_name}] {sender}: {question[:80]}")
-        if self.task_enabled:
+        if self.feature_enabled(chat_name, "task"):
             resp = self._vision_route(
                 chat_name, sender, question,
                 msg_id=msg_id, raw_message=content,
