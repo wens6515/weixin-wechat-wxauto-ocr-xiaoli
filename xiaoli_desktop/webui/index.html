@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="abyss" data-fs="medium">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小漓 · 控制面板</title>
+<link rel="stylesheet" href="assets/fonts/zcool.css">
+<link rel="stylesheet" href="assets/fonts/baloo2.css">
+<link rel="stylesheet" href="assets/fonts/mashan.css">
+<link rel="stylesheet" href="assets/fonts/xiaowei.css">
+<link rel="stylesheet" href="assets/fonts/jbmono.css">
+<link rel="stylesheet" href="assets/fonts/orbitron.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- SVG 图标雪碧图（Lucide 风格线条，stroke=currentColor） -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M9.5 21v-6h5v6"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-3.8 4.4-6 8-6s6.5 2.2 8 6"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="10" y="10" width="4" height="4"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20V4"/><path d="M4 20h16"/><path d="M8 16v-5M13 16V8M18 16v-8"/></symbol>
+    <symbol id="i-brain" viewBox="0 0 24 24"><path d="M9.5 3A2.5 2.5 0 0 1 12 5.5v13a2.5 2.5 0 0 1-4.96.44A2.5 2.5 0 0 1 4.5 15a2.5 2.5 0 0 1-.6-4.93A2.5 2.5 0 0 1 6 6.6 2.5 2.5 0 0 1 9.5 3Z"/><path d="M14.5 3A2.5 2.5 0 0 0 12 5.5v13a2.5 2.5 0 0 0 4.96.44A2.5 2.5 0 0 0 19.5 15a2.5 2.5 0 0 0 .6-4.93A2.5 2.5 0 0 0 18 6.6 2.5 2.5 0 0 0 14.5 3Z"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path d="M12 2.6l1.1 2.2a2 2 0 0 0 1.8 1.1c.3 0 .7-.1 1-.2l2.3-.9 2 2-.9 2.3a2 2 0 0 0 1 2.5l2.2 1.1v2.8l-2.2 1.1a2 2 0 0 0-1 2.5l.9 2.3-2 2-2.3-.9a2 2 0 0 0-2.5 1L13.4 22h-2.8l-1.1-2.2a2 2 0 0 0-2.5-1l-2.3.9-2-2 .9-2.3a2 2 0 0 0-1-2.5L.4 12v-2.8l2.2-1.1a2 2 0 0 0 1-2.5l-.9-2.3 2-2 2.3.9a2 2 0 0 0 2.5-1L10.6.4h2.8Z" transform="translate(1.2 0.8) scale(.92)"/><circle cx="12" cy="12" r="3.4"/></symbol>
+    <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v9"/><path d="M6.6 6.6a8 8 0 1 0 10.8 0"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="7" y="5" width="3.5" height="14" rx="1.2"/><rect x="13.5" y="5" width="3.5" height="14" rx="1.2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m4.5 12.5 5 5 10-11"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+    <symbol id="i-square" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    <symbol id="i-wechat" viewBox="0 0 24 24"><path d="M9.5 4C5.9 4 3 6.4 3 9.4c0 1.7 1 3.2 2.4 4.2L4.8 16l2.6-1.3c.7.2 1.4.3 2.1.3"/><path d="M9.5 4c3.6 0 6.5 2.4 6.5 5.4M21 14.6c0-2.5-2.4-4.6-5.3-4.6s-5.3 2.1-5.3 4.6 2.4 4.6 5.3 4.6c.6 0 1.2-.1 1.8-.3L19.8 20l-.5-1.9c1-.8 1.7-2.1 1.7-3.5Z"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12.5 15H17"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3 10.5 13.5"/><path d="M21 3 14 21l-3.5-7.5L3 10Z"/></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18M12 3a14.5 14.5 0 0 0 0 18"/></symbol>
+    <symbol id="i-bridge" viewBox="0 0 24 24"><path d="M3 17c3-6 7-9 9-9s6 3 9 9"/><path d="M3 17h4M17 17h4M8 17c1-4 2.5-6 4-6s3 2 4 6"/></symbol>
+    <symbol id="i-radar" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor"/><path d="M12 12 18 6"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 3v4h-4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v11M7.5 9.5 12 14l4.5-4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4Z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8Z"/></symbol>
+    <symbol id="i-broom" viewBox="0 0 24 24"><path d="M19 3 12.5 9.5"/><path d="M12.5 9.5 9 6 3.5 11.5 10 18l5.5-5.5Z" transform="translate(3 3)"/></symbol>
+    <symbol id="i-fish" viewBox="0 0 24 24"><path d="M3 12c3-4.5 7.5-6 11-4.5 2.5 1 4 3 5 4.5-1 1.5-2.5 3.5-5 4.5-3.5 1.5-8 0-11-4.5Z"/><path d="M19 12l2.5-3v6Z" fill="currentColor" stroke="none"/><circle cx="8" cy="11" r="0.6" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 13h9l1-13"/><path d="M10 11v5M14 11v5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17Z"/><path d="m13.5 6.5 3 3"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4M7.5 8.5 12 4l4.5 4.5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.5"/><path d="m11.5 11.5 8-8M17 4l3 3M14 7l2.5 2.5"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m4 18 5-5 3.5 3.5L16 13l4 5"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 5.5v13l11-6.5Z"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4 11 13"/><path d="M19 14v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5"/></symbol>
+  </defs>
+</svg>
+
+<!-- 深海背景装饰层 -->
+<div class="deep-bg" aria-hidden="true">
+  <div class="beam beam-1"></div>
+  <div class="beam beam-2"></div>
+  <div class="bokeh b1"></div>
+  <div class="bokeh b2"></div>
+  <div class="bokeh b3"></div>
+  <div class="wallpaper" id="wallpaperLayer"></div>
+  <div id="bubbleField"></div>
+  <div class="caustics"></div>
+
+  <!-- 主题专属装饰层（对应源码 backdrop 各套签名装饰，按主题显隐） -->
+  <div class="tdeco t-neon" aria-hidden="true">
+    <svg class="cyber-grid" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMax slice">
+      <g stroke="#00F0FF" stroke-width="1" fill="none" opacity=".55">
+        <line x1="0" y1="560" x2="1440" y2="560" opacity=".9"/>
+        <line x1="0" y1="582" x2="1440" y2="582"/>
+        <line x1="0" y1="608" x2="1440" y2="608"/>
+        <line x1="0" y1="640" x2="1440" y2="640"/>
+        <line x1="0" y1="678" x2="1440" y2="678"/>
+        <line x1="0" y1="724" x2="1440" y2="724"/>
+        <line x1="0" y1="780" x2="1440" y2="780"/>
+        <line x1="0" y1="848" x2="1440" y2="848"/>
+        <line x1="0" y1="899" x2="1440" y2="899"/>
+        <line x1="720" y1="560" x2="720" y2="900"/>
+        <line x1="720" y1="560" x2="480" y2="900"/>
+        <line x1="720" y1="560" x2="240" y2="900"/>
+        <line x1="720" y1="560" x2="0" y2="900"/>
+        <line x1="720" y1="560" x2="960" y2="900"/>
+        <line x1="720" y1="560" x2="1200" y2="900"/>
+        <line x1="720" y1="560" x2="1440" y2="900"/>
+        <line x1="720" y1="560" x2="-180" y2="900" opacity=".5"/>
+        <line x1="720" y1="560" x2="1620" y2="900" opacity=".5"/>
+      </g>
+      <line x1="0" y1="560" x2="1440" y2="560" stroke="#FF2EC4" stroke-width="2" opacity=".8"/>
+    </svg>
+    <div class="scanlines"></div>
+  </div>
+  <div class="tdeco t-tokyo" aria-hidden="true"><div class="rain"></div></div>
+  <div class="tdeco t-stellar" id="starField" aria-hidden="true">
+    <div class="shooting"></div>
+  </div>
+  <div class="tdeco t-moxin" aria-hidden="true">
+    <svg class="mountains" viewBox="0 0 1440 420" preserveAspectRatio="xMidYMax slice">
+      <path d="M0 420 L0 300 Q140 210 260 268 Q340 300 430 250 Q560 190 690 262 Q760 300 850 262 Q990 200 1120 268 Q1230 320 1320 280 Q1390 250 1440 282 L1440 420 Z"
+            fill="#7A5C3E" opacity=".13"/>
+      <path d="M0 420 L0 352 Q180 282 330 330 Q470 372 620 322 Q780 268 930 330 Q1080 388 1230 336 Q1350 296 1440 330 L1440 420 Z"
+            fill="#5A4632" opacity=".16"/>
+    </svg>
+    <div class="ink-blob ib1"></div>
+    <div class="ink-blob ib2"></div>
+    <div class="ink-blob ib3"></div>
+  </div>
+  <div class="tdeco t-cream" aria-hidden="true"><div class="polka"></div></div>
+  <div class="tdeco t-mint" aria-hidden="true">
+    <svg class="waves" viewBox="0 0 1440 260" preserveAspectRatio="none">
+      <path d="M0 120 C 180 70 360 70 540 120 C 720 170 900 170 1080 120 C 1230 78 1350 78 1440 108 L1440 260 L0 260 Z"
+            fill="#2EC4A0" opacity=".12"/>
+      <path d="M0 168 C 200 118 400 118 600 168 C 800 218 1000 218 1200 168 C 1320 138 1400 140 1440 156 L1440 260 L0 260 Z"
+            fill="#2EC4A0" opacity=".2"/>
+    </svg>
+  </div>
+</div>
+
+<div class="app">
+  <!-- ======== 自绘标题栏 ======== -->
+  <header class="titlebar">
+    <!-- 拖拽区：pywebview 官方机制 = pywebview-drag-region 类（Electron 的
+         -webkit-app-region 在 WebView2 壳里无效）；窗口按钮放拖拽区外防误拖 -->
+    <div class="tb-drag pywebview-drag-region">
+      <div class="tb-left">
+        <img class="tb-logo" src="assets/mascot.png" alt="小漓">
+        <div class="tb-title">
+          <span class="tb-name">小漓</span>
+          <span class="tb-sub">控制面板</span>
+        </div>
+      </div>
+      <div class="tb-fill"></div>
+    </div>
+    <div class="tb-right">
+      <div class="run-pill" id="runPill"><span class="dot"></span><span id="runPillText">就绪</span></div>
+      <button class="win-btn" id="btnMin" title="最小化"><svg class="ic"><use href="#i-minus"/></svg></button>
+      <button class="win-btn" id="btnMax" title="最大化"><svg class="ic"><use href="#i-square"/></svg></button>
+      <button class="win-btn win-close" id="btnClose" title="隐藏到托盘"><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+  </header>
+
+  <div class="body-row">
+    <!-- ======== 左侧导航 ======== -->
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-page="home"><svg class="ic"><use href="#i-home"/></svg><span>首页</span></button>
+      <button class="nav-item" data-page="cards"><svg class="ic"><use href="#i-user"/></svg><span>角色卡</span></button>
+      <button class="nav-item" data-page="models"><svg class="ic"><use href="#i-cpu"/></svg><span>模型</span></button>
+      <button class="nav-item" data-page="usage"><svg class="ic"><use href="#i-chart"/></svg><span>用量</span></button>
+      <button class="nav-item" data-page="memory"><svg class="ic"><use href="#i-brain"/></svg><span>记忆</span></button>
+      <button class="nav-item" data-page="logs"><svg class="ic"><use href="#i-file"/></svg><span>日志</span></button>
+      <button class="nav-item" data-page="settings"><svg class="ic"><use href="#i-gear"/></svg><span>设置</span></button>
+      <div class="nav-indicator" id="navInd"></div>
+    </nav>
+
+    <!-- ======== 内容区 ======== -->
+    <main class="content home-fit" id="content">
+
+      <!-- ================= 首页 ================= -->
+      <section class="page active" data-page="home">
+        <div class="home-grid">
+          <div class="col-main">
+            <div class="greet-row">
+              <div>
+                <h1 class="greet">晚上好呀，我在听哦 <span class="wave">(｡･ω･｡)</span></h1>
+                <p class="greet-sub">普通文字消息从收到到回复最长 <b>8 秒</b> · 红圈监听 0.5s 恒定快档</p>
+              </div>
+            </div>
+
+            <!-- 主控卡 -->
+            <div class="glass master-card">
+              <div class="master-left">
+                <button class="power-btn" id="powerBtn">
+                  <span class="power-ring"></span>
+                  <svg class="ic power-ic" id="powerIc"><use href="#i-power"/></svg>
+                </button>
+                <div class="power-label" id="powerLabel">初始化引擎</div>
+              </div>
+              <div class="master-right">
+                <div class="stat-line"><span class="stat-k">引擎状态</span><span class="stat-v" id="engineState">尚未初始化</span></div>
+                <div class="stat-line"><span class="stat-k">监听方式</span><span class="stat-v">未读红圈驱动 · 零 OCR 几何链路</span></div>
+                <div class="stat-line"><span class="stat-k">活跃触发器</span><span class="stat-v" id="statTriggers">—</span></div>
+                <div class="stat-line"><span class="stat-k">启动策略</span><span class="stat-v" id="statPaused">—</span></div>
+              </div>
+            </div>
+
+            <!-- 环境检查三卡 -->
+            <div class="env-row">
+              <div class="glass env-card" id="envWechat">
+                <div class="env-head"><svg class="ic"><use href="#i-wechat"/></svg><span>微信 PC 版</span><span class="env-dot"></span></div>
+                <p class="env-detail" id="envWechatDetail">正在检测…</p>
+                <button class="mini-btn ghost" data-env="wechat">重新检查</button>
+              </div>
+              <div class="glass env-card" id="envTianshu">
+                <div class="env-head"><svg class="ic"><use href="#i-terminal"/></svg><span>天枢 CLI</span><span class="env-dot"></span></div>
+                <p class="env-detail" id="envTianshuDetail">正在检测…</p>
+                <div class="env-actions">
+                  <button class="mini-btn ghost" id="btnInstallTianshu" hidden>一键安装</button>
+                  <button class="mini-btn ghost" data-env="tianshu">重新检查</button>
+                </div>
+                <div class="install-bar" id="installBar" hidden><span></span></div>
+              </div>
+              <div class="glass env-card" id="envPrompt">
+                <div class="env-head"><svg class="ic"><use href="#i-send"/></svg><span>首轮提示词</span><span class="env-dot"></span></div>
+                <p class="env-detail" id="envPromptDetail">正在检测…</p>
+                <button class="mini-btn ghost" id="btnSendPrompt">重发一次</button>
+              </div>
+            </div>
+
+            <!-- 运行日志 -->
+            <div class="glass log-card">
+              <div class="log-head">
+                <svg class="ic"><use href="#i-file"/></svg><span>运行日志</span>
+                <span class="log-live"><span class="live-dot"></span>实时</span>
+                <button class="mini-btn ghost" id="btnLogClear"><svg class="ic"><use href="#i-broom"/></svg>清空</button>
+              </div>
+              <div class="log-body" id="logBody"></div>
+              <div class="log-fade"></div>
+            </div>
+          </div>
+
+          <!-- 右列 -->
+          <div class="col-side">
+            <!-- 吉祥物卡 -->
+            <div class="glass mascot-card">
+              <div class="mascot-halo"></div>
+              <img class="mascot-img" src="assets/mascot.png" alt="小漓立绘">
+              <div class="mascot-bubble" id="mascotBubble">我在听哦，随时喊我～</div>
+            </div>
+
+            <!-- 触发器入口 -->
+            <div class="glass trig-card">
+              <div class="card-title"><svg class="ic"><use href="#i-bell"/></svg>触发器</div>
+              <div class="trig-row"><span class="trig-name">定时提醒</span><span class="trig-num" id="trigTimeNum">—</span></div>
+              <div class="trig-bar"><span id="trigTimeBar" style="width:0%"></span></div>
+              <div class="trig-row"><span class="trig-name">状态监视</span><span class="trig-num" id="trigCondNum">—</span></div>
+              <div class="trig-bar"><span id="trigCondBar" style="width:0%"></span></div>
+              <button class="mini-btn wide" id="btnTriggers">管理触发器</button>
+            </div>
+
+            <!-- 版本卡 -->
+            <div class="glass ver-card">
+              <div class="ver-line">
+                <span class="ver-badge" id="verBadge">v—</span>
+                <span class="ver-name">微信 AI 机器人</span>
+              </div>
+              <p class="ver-sub" id="verSub">检查更新中…</p>
+              <button class="mini-btn wide ghost" id="btnCheckUpdate"><svg class="ic"><use href="#i-refresh"/></svg>检查更新</button>
+              <button class="mini-btn wide" id="btnGotoRelease" hidden><svg class="ic"><use href="#i-ext"/></svg>前往下载</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 角色卡页 ================= -->
+      <section class="page" data-page="cards">
+        <h1 class="page-title">角色卡</h1>
+        <div class="cards-grid">
+          <div class="glass cards-list-card">
+            <div class="card-title"><svg class="ic"><use href="#i-user"/></svg>卡片列表
+              <span class="title-hint" id="cardsCount"></span></div>
+            <div class="cards-actions">
+              <button class="mini-btn" id="btnCardNew"><svg class="ic"><use href="#i-plus"/></svg>新建</button>
+              <button class="mini-btn ghost" id="btnCardDuplicate"><svg class="ic"><use href="#i-copy"/></svg>复制</button>
+              <button class="mini-btn ghost" id="btnCardImport"><svg class="ic"><use href="#i-upload"/></svg>导入</button>
+            </div>
+            <div class="cards-list" id="cardsList"></div>
+          </div>
+          <div class="glass card-editor-card">
+            <div class="card-title"><svg class="ic"><use href="#i-edit"/></svg>编辑卡片
+              <span class="title-hint" id="cardEditorHint"></span></div>
+            <div class="form-grid">
+              <label class="form-item"><span>名称 *</span><input id="cardName" type="text" placeholder="角色名"></label>
+              <label class="form-item slim"><span>表情</span><input id="cardEmoji" type="text" placeholder="🐟" maxlength="4"></label>
+              <label class="form-item"><span>微信昵称</span><input id="cardNickname" type="text" placeholder="小漓"></label>
+            </div>
+            <label class="form-item block"><span>人格设定（system prompt）*</span>
+              <textarea id="cardPrompt" rows="7" placeholder="角色人格设定…"></textarea></label>
+            <div class="form-grid three">
+              <label class="form-item"><span>温度 0~2</span><input id="cardTemp" type="number" min="0" max="2" step="0.1"></label>
+              <label class="form-item"><span>top_p 0~1</span><input id="cardTopP" type="number" min="0" max="1" step="0.05"></label>
+              <label class="form-item"><span>历史条数</span><input id="cardHistory" type="number" min="10" max="10000" step="50"></label>
+            </div>
+            <div class="editor-actions">
+              <button class="mini-btn" id="btnCardSave"><svg class="ic"><use href="#i-check"/></svg>保存</button>
+              <button class="mini-btn" id="btnCardActivate"><svg class="ic"><use href="#i-play"/></svg>激活此卡</button>
+              <button class="mini-btn ghost" id="btnCardExport"><svg class="ic"><use href="#i-download"/></svg>导出</button>
+              <button class="mini-btn ghost danger" id="btnCardDelete"><svg class="ic"><use href="#i-trash"/></svg>删除</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 模型页 ================= -->
+      <section class="page" data-page="models">
+        <h1 class="page-title">模型</h1>
+        <div class="glass sec-card">
+          <div class="card-title"><svg class="ic"><use href="#i-cpu"/></svg>Provider 路由表
+            <span class="title-hint">API Key 仅本机保存（DPAPI 加密落盘）</span></div>
+          <div class="prov-grid-head">
+            <button class="mini-btn" id="btnProvAdd"><svg class="ic"><use href="#i-plus"/></svg>添加 Provider</button>
+            <div class="preset-chips" id="presetChips"></div>
+          </div>
+          <div class="prov-table-wrap">
+            <table class="model-table prov-table">
+              <thead><tr><th style="width:110px">名称</th><th>Base URL</th><th style="width:150px">API Key</th><th style="width:220px">模型（逗号分隔）</th><th style="width:70px">ID</th><th style="width:44px"></th></tr></thead>
+              <tbody id="provTbody"></tbody>
+            </table>
+          </div>
+          <div class="editor-actions">
+            <button class="mini-btn" id="btnProvSave"><svg class="ic"><use href="#i-check"/></svg>保存并应用</button>
+            <button class="mini-btn ghost" id="btnProvTest"><svg class="ic"><use href="#i-refresh"/></svg>测试第一行连接</button>
+            <span class="test-result" id="provTestResult"></span>
+          </div>
+        </div>
+        <div class="glass sec-card">
+          <div class="card-title"><svg class="ic"><use href="#i-key"/></svg>当前对话模型
+            <span class="title-hint">写入活跃角色卡（模型页统一管理）</span></div>
+          <div class="form-grid">
+            <label class="form-item"><span>Provider</span><select id="cmbProv"></select></label>
+            <label class="form-item grow"><span>模型</span><input id="cmbModel" type="text" list="modelList" placeholder="deepseek:deepseek-chat">
+              <datalist id="modelList"></datalist></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnModelSave">保存模型配置</button></div>
+        </div>
+      </section>
+
+      <!-- ================= 用量页 ================= -->
+      <section class="page" data-page="usage">
+        <h1 class="page-title">用量统计</h1>
+        <div class="sum-grid">
+          <div class="glass sum-card"><span class="sum-k">今日调用</span><span class="sum-v baloo" id="uTodayCalls">—</span><span class="sum-delta">全部模型</span></div>
+          <div class="glass sum-card"><span class="sum-k">今日消费</span><span class="sum-v">¥ <b class="baloo" id="uTodayCost">—</b></span><span class="sum-delta">按内置价目估算</span></div>
+          <div class="glass sum-card"><span class="sum-k">今日 tokens</span><span class="sum-v baloo" id="uTodayTokens">—</span><span class="sum-delta">提示 + 补全</span></div>
+          <div class="glass sum-card"><span class="sum-k">缓存命中率</span><span class="sum-v"><b class="baloo" id="uTodayCache">—</b></span><span class="sum-delta up">稳定前缀布局生效</span></div>
+          <div class="glass sum-card"><span class="sum-k">近 30 天 tokens</span><span class="sum-v baloo" id="uTokens30">—</span><span class="sum-delta" id="uCost30">—</span></div>
+          <div class="glass sum-card"><span class="sum-k">近 30 天失败</span><span class="sum-v baloo" id="uFail30">—</span><span class="sum-delta">429/5xx 自动重试</span></div>
+        </div>
+        <div class="usage-row">
+          <div class="glass chart-card">
+            <div class="card-title"><svg class="ic"><use href="#i-chart"/></svg>近 7 天调用量
+              <button class="mini-btn ghost" id="btnBalances" style="margin-left:auto"><svg class="ic"><use href="#i-refresh"/></svg>查询平台余额</button></div>
+            <svg id="trendChart" viewBox="0 0 560 200" preserveAspectRatio="none"></svg>
+            <div class="bal-line" id="balLine"></div>
+          </div>
+          <div class="glass model-card">
+            <div class="card-title"><svg class="ic"><use href="#i-cpu"/></svg>按模型（近 30 天）
+              <button class="mini-btn ghost danger" id="btnUsageClear" style="margin-left:auto"><svg class="ic"><use href="#i-broom"/></svg>清空</button></div>
+            <table class="model-table">
+              <thead><tr><th>模型</th><th>调用</th><th>tokens</th><th>缓存</th><th>均回复</th></tr></thead>
+              <tbody id="modelTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 记忆页 ================= -->
+      <section class="page" data-page="memory">
+        <h1 class="page-title">记忆</h1>
+        <div class="memory-grid">
+          <div class="glass mem-list-card">
+            <div class="card-title"><svg class="ic"><use href="#i-brain"/></svg>会话
+              <button class="mini-btn ghost danger" id="btnMemClearAll" style="margin-left:auto"><svg class="ic"><use href="#i-broom"/></svg>清空全部</button></div>
+            <div class="mem-chats" id="memChats"></div>
+          </div>
+          <div class="glass mem-detail-card">
+            <div class="mem-head">
+              <span class="mem-chat-name" id="memChatName">选择左侧会话</span>
+              <span class="mem-card-tag" id="memCardTag" hidden></span>
+              <div class="mem-head-actions">
+                <button class="mini-btn ghost" id="btnMemBind" hidden><svg class="ic"><use href="#i-user"/></svg>绑定角色卡</button>
+                <button class="mini-btn ghost" id="btnMemExport" hidden><svg class="ic"><use href="#i-download"/></svg>导出</button>
+                <button class="mini-btn ghost danger" id="btnMemClearChat" hidden><svg class="ic"><use href="#i-trash"/></svg>清空此会话</button>
+              </div>
+            </div>
+            <div class="seg slim-seg" id="memTabs">
+              <button class="active" data-v="overview">概览</button><button data-v="deep">深层存档</button>
+            </div>
+            <div id="memOverview">
+              <div class="mem-cols">
+                <div class="mem-col"><div class="mem-col-title">重要记忆</div><div class="mem-col-body" id="memImportant"></div></div>
+                <div class="mem-col"><div class="mem-col-title">近期对话</div><div class="mem-col-body" id="memRecent"></div></div>
+                <div class="mem-col"><div class="mem-col-title">关键词索引</div><div class="mem-col-body" id="memIndex"></div></div>
+              </div>
+            </div>
+            <div id="memDeep" hidden>
+              <div class="deep-search-row">
+                <input type="text" id="deepQuery" placeholder="搜索深层存档…">
+                <button class="mini-btn" id="btnDeepSearch"><svg class="ic"><use href="#i-search"/></svg>搜索</button>
+                <button class="mini-btn ghost" id="btnDeepReset">清除</button>
+              </div>
+              <p class="deep-info" id="deepInfo"></p>
+              <div class="mem-col-body deep-body" id="memDeepBody"></div>
+              <button class="mini-btn wide ghost" id="btnDeepMore" hidden>加载更多</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 日志页 ================= -->
+      <section class="page" data-page="logs">
+        <h1 class="page-title">运行日志</h1>
+        <div class="glass log-card page-log-card">
+          <div class="log-head">
+            <svg class="ic"><use href="#i-file"/></svg><span>bot_run.log</span>
+            <span class="log-live"><span class="live-dot"></span>实时增量</span>
+            <button class="mini-btn ghost" id="btnPageLogClear"><svg class="ic"><use href="#i-broom"/></svg>清空显示</button>
+          </div>
+          <div class="log-body tall" id="logPageBody"></div>
+        </div>
+      </section>
+
+      <!-- ================= 设置页 ================= -->
+      <section class="page" data-page="settings">
+        <h1 class="page-title">设置</h1>
+        <div class="anchor-row" id="anchorRow">
+          <button class="anchor active" data-anchor="sec-appearance">外观主题</button>
+          <button class="anchor" data-anchor="sec-memory">对话记忆</button>
+          <button class="anchor" data-anchor="sec-dirs">文件目录</button>
+          <button class="anchor" data-anchor="sec-bridge">任务桥</button>
+          <button class="anchor" data-anchor="sec-web">联网搜索</button>
+          <button class="anchor" data-anchor="sec-voice">语音发送</button>
+          <button class="anchor" data-anchor="sec-override">按聊天覆盖</button>
+          <button class="anchor" data-anchor="sec-remind">定时与监视</button>
+        </div>
+
+        <!-- 外观主题 -->
+        <div class="glass sec-card" id="sec-appearance">
+          <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>外观主题与壁纸
+            <span class="title-hint">点击缩略图即时生效并保存 · 壁纸库自动收录「壁纸」文件夹</span></div>
+          <div class="theme-grid" id="themeGrid">
+            <button class="theme-thumb active" data-theme-key="abyss"><span class="th-preview"></span><span class="th-name">深海小漓</span></button>
+            <button class="theme-thumb" data-theme-key="neon"><span class="th-preview"></span><span class="th-name">霓虹夜行</span></button>
+            <button class="theme-thumb" data-theme-key="tokyonight"><span class="th-preview"></span><span class="th-name">Tokyo Night</span></button>
+            <button class="theme-thumb" data-theme-key="stellar"><span class="th-preview"></span><span class="th-name">星夜紫金</span></button>
+            <button class="theme-thumb" data-theme-key="moxin"><span class="th-preview"></span><span class="th-name">墨染</span></button>
+            <button class="theme-thumb" data-theme-key="cream"><span class="th-preview"></span><span class="th-name">奶油晨光</span></button>
+            <button class="theme-thumb" data-theme-key="mint"><span class="th-preview"></span><span class="th-name">薄荷气泡</span></button>
+          </div>
+          <div class="wp-block">
+            <div class="wp-block-title">壁纸</div>
+            <div class="wp-grid" id="wpGrid"></div>
+            <div class="wp-actions">
+              <button class="mini-btn ghost" id="btnWpImport"><svg class="ic"><use href="#i-image"/></svg>导入壁纸…</button>
+              <button class="mini-btn ghost danger" id="btnWpClear"><svg class="ic"><use href="#i-x"/></svg>清除壁纸</button>
+            </div>
+          </div>
+          <div class="slider-row">
+            <span class="slider-k">卡片透明度</span>
+            <input type="range" min="0" max="100" value="66" id="cardOpacity">
+            <span class="slider-v baloo" id="cardOpacityV">66%</span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-k">壁纸浓度</span>
+            <input type="range" min="0" max="100" value="12" id="wallOpacity">
+            <span class="slider-v baloo" id="wallOpacityV">12%</span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-k">毛玻璃程度</span>
+            <input type="range" min="0" max="100" value="100" id="blurAmount">
+            <span class="slider-v baloo" id="blurAmountV">100%</span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-k">面板浓度</span>
+            <input type="range" min="20" max="100" value="100" id="panelOpacity">
+            <span class="slider-v baloo" id="panelOpacityV">100%</span>
+          </div>
+          <div class="slider-row">
+            <span class="slider-k">界面字号</span>
+            <div class="seg" id="fontSeg">
+              <button data-v="small">小</button><button class="active" data-v="medium">标准</button><button data-v="large">大</button>
+            </div>
+            <label class="follow-sys"><input type="checkbox" id="followSystem"><span>跟随系统深浅色</span></label>
+          </div>
+        </div>
+
+        <!-- 对话记忆 -->
+        <div class="glass sec-card" id="sec-memory">
+          <div class="card-title"><svg class="ic"><use href="#i-brain"/></svg>对话记忆
+            <button class="mini-btn ghost danger" id="btnMemClearAll2" style="margin-left:auto"><svg class="ic"><use href="#i-broom"/></svg>清空全部记忆</button></div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>深层存档</b><small>溢出消息永不删除，AI 可经 recall_memory 工具检索回忆</small></div>
+            <label class="switch"><input type="checkbox" id="cbDeepMem"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>记忆压缩</b><small>AI 自动提炼「重要记忆」与「关键词索引」（会产生额外 API 调用）</small></div>
+            <label class="switch"><input type="checkbox" id="cbCompressMem"><span class="track"></span></label>
+          </div>
+          <div class="form-grid three mem-nums">
+            <label class="form-item"><span>近期保留条数</span><input id="spKeepRecent" type="number" min="10" max="200"></label>
+            <label class="form-item"><span>每压缩条数</span><input id="spCompressBatch" type="number" min="10" max="200"></label>
+            <label class="form-item"><span>重要记忆上限</span><input id="spImportantMax" type="number" min="5" max="100"></label>
+          </div>
+          <div class="form-grid">
+            <label class="form-item grow"><span>压缩模型（留空 = 随聊天模型）</span><input id="edCompressModel" type="text" list="modelList" placeholder="留空 = 随聊天模型"></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnMemSave">保存长记忆设置</button></div>
+        </div>
+
+        <!-- 文件目录 -->
+        <div class="glass sec-card" id="sec-dirs">
+          <div class="card-title"><svg class="ic"><use href="#i-folder"/></svg>文件目录</div>
+          <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="edTasks"></code>
+            <button class="mini-btn ghost" id="btnPickTasks">浏览…</button><button class="mini-btn" id="btnSaveTasks">保存</button></div>
+          <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="edFiles"></code>
+            <button class="mini-btn ghost" id="btnPickFiles">浏览…</button><button class="mini-btn" id="btnSaveFiles">保存</button></div>
+          <div class="dir-row"><span class="dir-k">天枢工作目录</span><code id="edTianshuWorkdir"></code><span class="dir-note">随任务目录自动跟随</span></div>
+          <div class="dir-row"><span class="dir-k">首轮提示词</span><code id="edFirstPrompt"></code>
+            <button class="mini-btn ghost" id="btnPickPrompt">选择文件…</button><button class="mini-btn ghost" id="btnClearPrompt">恢复内置</button></div>
+        </div>
+
+        <!-- 任务桥 -->
+        <div class="glass sec-card" id="sec-bridge">
+          <div class="card-title"><svg class="ic"><use href="#i-bridge"/></svg>任务桥</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>启用任务桥</b><small>识别任务请求 → 投递天枢 CLI → 成果文件自动回传微信（关闭 = 模型看不到任务工具）</small></div>
+            <label class="switch"><input type="checkbox" id="cbTaskBridge"><span class="track"></span></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn ghost" id="btnOpenTasks"><svg class="ic"><use href="#i-ext"/></svg>打开任务目录</button></div>
+        </div>
+
+        <!-- 联网搜索 -->
+        <div class="glass sec-card" id="sec-web">
+          <div class="card-title"><svg class="ic"><use href="#i-globe"/></svg>联网搜索</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>启用联网搜索</b><small>搜狗 / 必应 / 百度三源并发 + 网页正文抓取，零配置无需 key</small></div>
+            <label class="switch"><input type="checkbox" id="cbWebSearch"><span class="track"></span></label>
+          </div>
+          <div class="form-grid">
+            <label class="form-item grow"><span>搜索代理（可选，仅影响搜索/抓取）</span><input id="edWebProxy" type="text" placeholder="http://127.0.0.1:7897"></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnSaveProxy">保存代理</button></div>
+        </div>
+
+        <!-- 语音发送 -->
+        <div class="glass sec-card" id="sec-voice">
+          <div class="card-title"><svg class="ic"><use href="#i-mic"/></svg>语音发送</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>发送模式</b><small>接自部署 TTS（GPT-SoVITS api_v2），环回质检不过自动回退文本，回复永不丢</small></div>
+            <div class="seg tri" id="voiceSeg">
+              <button data-v="off">关闭</button><button data-v="auto">模型自主</button><button data-v="always">始终语音</button>
+            </div>
+          </div>
+          <div class="form-grid three">
+            <label class="form-item"><span>单段语音上限（秒）</span><input id="spVoiceMax" type="number" min="10" max="60"></label>
+            <label class="form-item"><span>合成超时（秒）</span><input id="spVoiceTimeout" type="number" min="10" max="600"></label>
+            <label class="form-item"><span>TTS 端点</span><input id="edVoiceEndpoint" type="text" placeholder="http://127.0.0.1:9880/tts"></label>
+          </div>
+          <div class="form-grid voice-profile-row">
+            <label class="form-item"><span>音色档案</span><select id="cbVoiceProfile"></select></label>
+            <label class="form-item"><span>档案名称</span><input id="edVoiceName" type="text"></label>
+            <div class="form-btns">
+              <button class="mini-btn ghost" id="btnVoiceNew"><svg class="ic"><use href="#i-plus"/></svg>新建</button>
+              <button class="mini-btn ghost danger" id="btnVoiceDel"><svg class="ic"><use href="#i-trash"/></svg>删除</button>
+            </div>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>当前使用此档案</b></div>
+            <label class="switch"><input type="checkbox" id="cbVoiceActive"><span class="track"></span></label>
+          </div>
+          <div class="voice-refs-block">
+            <div class="wp-block-title">情绪参考（TTS 服务器上的路径）</div>
+            <table class="model-table">
+              <thead><tr><th style="width:110px">情绪</th><th>参考音频路径</th><th>参考文本稿</th><th style="width:44px"></th></tr></thead>
+              <tbody id="voiceRefsTbody"></tbody>
+            </table>
+            <div class="editor-actions">
+              <button class="mini-btn ghost" id="btnVoiceRefAdd"><svg class="ic"><use href="#i-plus"/></svg>添加情绪参考</button>
+              <button class="mini-btn" id="btnVoiceSave">保存语音设置</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 按聊天覆盖 -->
+        <div class="glass sec-card" id="sec-override">
+          <div class="card-title"><svg class="ic"><use href="#i-layers"/></svg>按聊天覆盖
+            <span class="title-hint">为单个聊天开/关某功能，未设置的跟随全局</span></div>
+          <div class="form-grid voice-profile-row">
+            <label class="form-item grow"><span>聊天</span><select id="cbOvrChat"></select></label>
+            <div class="form-btns">
+              <button class="mini-btn ghost" id="btnOvrRefresh"><svg class="ic"><use href="#i-refresh"/></svg>刷新聊天列表</button>
+            </div>
+          </div>
+          <div class="ovr-combos" id="ovrCombos">
+            <label class="form-item"><span>语音发送</span><select data-feature="voice">
+              <option value="follow">跟随全局</option><option value="on">开启</option><option value="off">关闭</option></select></label>
+            <label class="form-item"><span>联网搜索</span><select data-feature="web_search">
+              <option value="follow">跟随全局</option><option value="on">开启</option><option value="off">关闭</option></select></label>
+            <label class="form-item"><span>任务桥</span><select data-feature="task">
+              <option value="follow">跟随全局</option><option value="on">开启</option><option value="off">关闭</option></select></label>
+            <label class="form-item"><span>状态监视</span><select data-feature="state_watch">
+              <option value="follow">跟随全局</option><option value="on">开启</option><option value="off">关闭</option></select></label>
+          </div>
+          <div class="editor-actions">
+            <button class="mini-btn" id="btnOvrSave">保存该聊天覆盖</button>
+            <button class="mini-btn ghost danger" id="btnOvrClear">清除该聊天全部例外</button>
+          </div>
+        </div>
+
+        <!-- 定时与监视 -->
+        <div class="glass sec-card" id="sec-remind">
+          <div class="card-title"><svg class="ic"><use href="#i-clock"/></svg>定时消息与状态监视</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>启用状态监视</b><small>轮询固定网页本地关键词判定，达成 / 到期统一回递由 AI 按人设回复（有额外 API 成本）</small></div>
+            <label class="switch"><input type="checkbox" id="cbStateWatch"><span class="track"></span></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnManageTriggers"><svg class="ic"><use href="#i-bell"/></svg>管理触发器…</button></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- ======== 通用模态层 ======== -->
+<div class="modal-mask" id="modalMask" hidden>
+  <!-- 触发器管理 -->
+  <div class="modal glass" id="modalTriggers" hidden>
+    <div class="modal-head"><svg class="ic"><use href="#i-bell"/></svg><b>触发器管理</b>
+      <button class="win-btn modal-close" data-close><svg class="ic"><use href="#i-x"/></svg></button></div>
+    <div class="modal-actions">
+      <button class="mini-btn" id="btnTrigAddTime"><svg class="ic"><use href="#i-clock"/></svg>新增定时提醒</button>
+      <button class="mini-btn ghost" id="btnTrigAddCond"><svg class="ic"><use href="#i-radar"/></svg>新增状态监视</button>
+    </div>
+    <table class="model-table trig-table">
+      <thead><tr><th>类型</th><th>目标聊天</th><th>内容/条件</th><th>状态</th><th>时间</th><th style="width:150px">操作</th></tr></thead>
+      <tbody id="trigTbody"></tbody>
+    </table>
+    <p class="trig-detail" id="trigDetail"></p>
+  </div>
+
+  <!-- 新增定时提醒 -->
+  <div class="modal glass narrow" id="modalTrigTime" hidden>
+    <div class="modal-head"><svg class="ic"><use href="#i-clock"/></svg><b>新增定时提醒</b>
+      <button class="win-btn modal-close" data-close><svg class="ic"><use href="#i-x"/></svg></button></div>
+    <label class="form-item block"><span>目标聊天（微信里的名字）</span><input id="trigChat" type="text" placeholder="如：家人群"></label>
+    <label class="form-item block"><span>内容（到点回递 AI 生成回复）</span><input id="trigContent" type="text"></label>
+    <div class="form-grid two">
+      <label class="form-item"><span>触发时间</span><input id="trigFireAt" type="datetime-local"></label>
+      <label class="form-item"><span>重复</span><select id="trigRepeat">
+        <option value="once">单次</option><option value="daily">每天</option><option value="weekly">每周</option></select></label>
+    </div>
+    <div class="editor-actions"><button class="mini-btn" id="btnTrigTimeSave">创建</button></div>
+  </div>
+
+  <!-- 新增状态监视 -->
+  <div class="modal glass narrow" id="modalTrigCond" hidden>
+    <div class="modal-head"><svg class="ic"><use href="#i-radar"/></svg><b>新增状态监视</b>
+      <button class="win-btn modal-close" data-close><svg class="ic"><use href="#i-x"/></svg></button></div>
+    <label class="form-item block"><span>目标聊天</span><input id="condChat" type="text"></label>
+    <label class="form-item block"><span>说明（回递时的上下文）</span><input id="condContent" type="text"></label>
+    <label class="form-item block"><span>轮询目标 URL</span><input id="condUrl" type="text" placeholder="https://…"></label>
+    <label class="form-item block"><span>达成条件（描述）</span><input id="condText" type="text"></label>
+    <div class="form-grid two">
+      <label class="form-item"><span>判定方式</span><select id="condJudge">
+        <option value="local">本地关键词</option><option value="api">模型判定（每轮小调用）</option></select></label>
+      <label class="form-item"><span>匹配方式</span><select id="condMatch">
+        <option value="present">出现关键词</option><option value="absent">关键词消失</option></select></label>
+    </div>
+    <label class="form-item block"><span>关键词（逗号分隔，本地判定用）</span><input id="condKeywords" type="text"></label>
+    <div class="form-grid two">
+      <label class="form-item"><span>轮询间隔（秒）</span><input id="condInterval" type="number" value="60" min="10"></label>
+      <label class="form-item"><span>截止时间（可选）</span><input id="condExpire" type="datetime-local"></label>
+    </div>
+    <div class="editor-actions"><button class="mini-btn" id="btnTrigCondSave">创建</button></div>
+  </div>
+
+  <!-- 通用确认 -->
+  <div class="modal glass narrow" id="modalConfirm" hidden>
+    <div class="modal-head"><svg class="ic"><use href="#i-bell"/></svg><b id="confirmTitle">确认</b></div>
+    <p class="confirm-text" id="confirmText"></p>
+    <div class="editor-actions">
+      <button class="mini-btn ghost" id="confirmNo">取消</button>
+      <button class="mini-btn" id="confirmYes">确定</button>
+    </div>
+  </div>
+
+  <!-- 关窗确认（对齐旧桌面端三选一） -->
+  <div class="modal glass narrow" id="modalExit" hidden>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>关闭小漓</b></div>
+    <p class="confirm-text">完全退出程序，还是最小化到系统托盘继续监听？</p>
+    <div class="editor-actions">
+      <button class="mini-btn ghost" id="exitCancel">取消</button>
+      <button class="mini-btn" id="exitToTray">最小化托盘</button>
+      <button class="mini-btn danger" id="exitQuit">完全退出</button>
+    </div>
+  </div>
+
+  <!-- 首启引导 -->
+  <div class="modal glass" id="modalFirstRun" hidden>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>欢迎使用小漓</b></div>
+    <p class="confirm-text">首次使用请确认三个工作目录。之后在微信里给小漓发消息即可自动回复；文件任务交给天枢 CLI 处理。</p>
+    <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="frTasks"></code><button class="mini-btn ghost" id="frPickTasks">浏览…</button></div>
+    <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="frFiles"></code><button class="mini-btn ghost" id="frPickFiles">浏览…</button></div>
+    <div class="dir-row"><span class="dir-k">记忆存储位置</span><code id="frMemory"></code></div>
+    <label class="form-item block" style="margin-top:12px"><span>微信昵称（小漓在群里认这个称呼）</span><input id="frNickname" type="text"></label>
+    <div class="editor-actions"><button class="mini-btn" id="frSave"><svg class="ic"><use href="#i-check"/></svg>开始使用</button></div>
+  </div>
+</div>
+
+<!-- toast 容器 -->
+<div id="toastBox"></div>
+
+<!-- 文件选择（用于导入卡片 JSON / 导出下载，真环境走系统对话框） -->
+<input type="file" id="filePick" accept=".json" hidden>
+
+<script src="api.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

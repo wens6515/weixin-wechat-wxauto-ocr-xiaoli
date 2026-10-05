@@ -101,6 +101,9 @@ logging.basicConfig(
 )
 # 终端只显示 INFO 及以上（handlers[2] = StreamHandler），bot.log 保留 DEBUG
 logging.getLogger().handlers[2].setLevel(logging.INFO)
+# comtypes 的模块导入/缓存 INFO 噪音（视觉链路反复触发）不进日志双轨：
+# 前端运行日志区被 "Imported existing <module 'comtypes.gen'...>" 刷屏的根因
+logging.getLogger("comtypes").setLevel(logging.WARNING)
 logger = logging.getLogger("xiaoli")
 
 
@@ -186,6 +189,13 @@ _FILE_TOKEN_RE = re.compile(
     r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]*?"
     r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)",
     re.I)
+# 兜底：已知扩展名一个都没匹配到（OCR 把后缀读花，真机事故 xlsx→xIsx）时，
+# 用「字母开头的 2~5 位字母数字后缀」再扫一遍——主干 ≥2 字符、后缀首字符
+# 必须是字母，避免把文件大小「19.6K」（后缀 6K 以数字开头）当成文件名。
+# 只在文件卡片流程里用（strict 未命中才落到这里），误配由按名查找兜底。
+_FILE_TOKEN_LOOSE_RE = re.compile(
+    r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]+?"
+    r"\.(?:[A-Za-z][A-Za-z0-9]{1,4})(?![A-Za-z0-9])")
 
 
 def _extract_file_name_token(text):
@@ -195,8 +205,15 @@ def _extract_file_name_token(text):
     文件卡片 OCR 会把文件名、大小（20.1K 带小数点）、图标字符（W/P/?）读成
     一串——整串当文件名传给 os.path.splitext 时，20.1K 的小数点会被误当
     扩展名分隔符，导致主干匹配失败。先拆出真实文件名 token。
+
+    OCR 换行会把文件名切成两半（真机 '…二轮面 试评分表.xlsx'）——token 只
+    取到空格后那段是预期行为：_find_file_by_display_name 走主干子串匹配，
+    片段命中全名，容忍这种截断。后缀读花（xlsx → xIsx）时走宽松后缀兜底。
     """
     toks = _FILE_TOKEN_RE.findall(text or "")
+    if toks:
+        return toks[0]
+    toks = _FILE_TOKEN_LOOSE_RE.findall(text or "")
     return toks[0] if toks else None
 
 
@@ -215,8 +232,11 @@ def _find_file_by_display_name_impl(file_dir, display_name):
     """按消息中的显示文件名在接收目录定位对方发来的文件（模块级，单测直测）。
 
     微信 4.x 下载命名 '<hash>_<msgid>_m_<原名>'，目录文件名包含原名
-    （分隔符归一化后包含匹配）。同名文件重复落盘时微信追加 (N) 重名后缀
-    且编号单调递增——取 (N) 最大 = 最近下载的那个，平局 ctime 新者优先。
+    （分隔符归一化后包含匹配）。同名文件重复落盘时微信追加 (N) 重名后缀，
+    但 (N) 只在同一序列里单调——跨月目录重收时新副本可能不带后缀，编号反而
+    更小（真机：2026-10 的新副本输给 2026-09 的 (4) 副本）。改为**下载时间
+    优先**：ctime（= 文件落到本机的时间）新者胜，(N) 编号最大只作同刻平局
+    的次序（同刻意味着微信硬链接复用同一份文件，取哪个都一样）。
 
     后缀参与匹配：主干命中后优先取后缀与显示名一致的候选。（真机事故：
     同名 .7z 自己攒出 (2) 编号，跨类型压倒刚收的 .pdf——(N) 最大语义只在
@@ -225,10 +245,10 @@ def _find_file_by_display_name_impl(file_dir, display_name):
     后缀）时回退全部主干命中，保持既有容错不回归。
 
     不做 bot 发送副本排除（旧快照/成果登记方案已删）：名字锚定查找下，
-    bot 的发送副本只在同名时进候选，且其编号必然小于其后用户下载产生的
-    副本，(N) 最大语义天然选中用户文件——用户把 bot 发的文件发回来不再
-    被误排除（真机缺陷：回传落在发送后 300s 内被「成果副本」规则拦下；
-    后续又发现 OCR 漏读文件名下划线导致匹配失败，加分隔符归一化根治）。
+    bot 的发送副本只在同名时进候选，而用户回传的那份 ctime 必然更新——
+    下载时间优先天然选中用户文件，不再被误排除（真机缺陷：回传落在发送后
+    300s 内被「成果副本」规则拦下；后续又发现 OCR 漏读文件名下划线导致
+    匹配失败，加分隔符归一化根治）。
     返回路径或 None"""
     if not display_name:
         return None
@@ -241,7 +261,7 @@ def _find_file_by_display_name_impl(file_dir, display_name):
         return None
     best = None
     best_ext = False  # 当前 best 是否与显示名同后缀（True 后异后缀不再参战）
-    best_key = (-1, -1)  # (微信重名编号 N, ctime)：N 最大 = 最近下载
+    best_key = (-1.0, -1)  # (下载时间 ctime, 微信重名编号 N)：ctime 新者胜
     try:
         for root, dirs, files in os.walk(file_dir):
             for fname in files:
@@ -260,7 +280,7 @@ def _find_file_by_display_name_impl(file_dir, display_name):
                     continue
                 m_dup = re.search(r"\((\d+)\)$", fstem_full)
                 dup = int(m_dup.group(1)) if m_dup else 0
-                key = (dup, ts)
+                key = (ts, dup)
                 if best is None or (ext_match and not best_ext) \
                         or key > best_key:
                     best_key = key
@@ -1227,12 +1247,12 @@ class WeChatBot:
     def _capture_media_images(self, chat_name, min_top=None, exclude_rows=None):
         """捕获消息区对方本轮全部新媒体，返回临时文件路径列表（时间正序）。
 
-        min_top：消息区 1x 下沿阈值（上层传 analyze_window 的 bot_bottom）
-        ——只捕获 top ≥ 阈值的媒体框，排除 bot 自己的文件卡片与历史媒体；
+        min_top：消息区 1x 下沿阈值（上层传 analyze_window 的 bot_bottom =
+        分析区上沿）——只捕获 top ≥ 阈值的媒体框，排除 bot 自己的历史媒体；
         None = 不过滤（全量）。
-        exclude_rows：消息区 1x 坐标 y 区间 [(top, bottom), ...]（上层传文件
-        名 OCR 行区间）——与文件行垂直相交的媒体框剔除（文件卡片的类型
-        图标会从面板跳出成独立小媒体框，面板本身判气泡）。
+        exclude_rows：消息区 1x 坐标 y 区间 [(top, bottom), ...]，与该区间
+        垂直相交的媒体框剔除；保留仅为兼容旧调用——文件卡片的类型图标已在
+        像素层剔除（面板内部的框一律不算媒体），调用不再需要传。
 
         每张独立走「点击 → 查看器判定分支」——微信 PC 每条消息各带一个
         头像，多张图片是多个独立媒体框（连通域按背景缝隙切分，不会被粘连）：

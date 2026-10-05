@@ -4,7 +4,7 @@
   <p><b>微信 AI 机器人 · 视觉版</b></p>
   <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x</sub></p>
   <p>
-    <img src="https://img.shields.io/badge/version-2.9.2-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
+    <img src="https://img.shields.io/badge/version-3.0.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
     <img src="https://img.shields.io/badge/WeChat_PC-4.x-35C48D?style=flat-square&amp;labelColor=0B2540" alt="WeChat PC 4.x">
     <img src="https://img.shields.io/badge/Windows-10+-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=windows&amp;logoColor=white" alt="Windows 10+">
     <img src="https://img.shields.io/badge/Python-3.12-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=python&amp;logoColor=white" alt="Python 3.12">
@@ -31,7 +31,7 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v2.9.2「回复净化与排障增强」** · 适配微信 PC **4.x** · 回复段首时间戳剥除修复 · 消息归属判定诊断日志
+> **v3.0.0「Web 前端 · 头像锚定」** · 适配微信 PC **4.x** · 桌面端换 Web 前端（前端代码开源） · 消息归属按头像重构 · 文件卡片视觉判定
 
 ## 目录
 
@@ -49,9 +49,9 @@
 
 ## 下载安装（桌面版）
 
-**v2.9.2 完整桌面版安装包**（PySide6 图形界面 + 7 套主题 + 壁纸库 + 托盘常驻）：
+**v3.0.0 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v2.9.2.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v2.9.2/xiaoli-setup-v2.9.2.exe)
+👉 [点击下载 `xiaoli-setup-v3.0.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.0.0/xiaoli-setup-v3.0.0.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -98,17 +98,17 @@
 flowchart TD
     A["红圈检测新消息<br/>0.5s 恒定快档 · 最小化哨兵"] -->|无| A
     A -->|有未读| B0["红圈几何切换（零 OCR）<br/>点该行 + 选中像素复验；已选中不点<br/>复验不过 = 放弃该条目（每轮一条）"]
-    B0 --> D["截图并分析气泡（纯像素，无 OCR）<br/>skip_bot=N[chat] 定位 bot_bottom"]
+    B0 --> D["截图 + 头像锚定的消息块分析（纯像素，无 OCR）<br/>bot 最后一条消息 = 右侧头像 y 最大者（skip_bot=N[chat] 跳占位）<br/>分析区上沿 = 之后的下一条对方头像上边界<br/>逐对方头像判类型：文字 / 图片 / 文件卡片"]
     D -->|无新内容| A
-    D -->|含图片或文件| H["等待10秒再截图"]
-    D --> F["读取对方新消息 = 联合 OCR<br/>标题带+消息区一次读（会话身份与群聊判定都取自这里）<br/>下边框=消息区下沿（占位回复之前的内容也纳入）"]
+    D -->|含多媒体色块（图片或文件卡片）| H["等待10秒再截图"]
+    D --> F["读取对方新消息 = 联合 OCR<br/>标题带+消息区一次读（会话身份与群聊判定都取自这里）<br/>只保留 [该消息头像上边界, 该消息块下边界] 内的文字<br/>（头像区文字剔除；图片块文字丢弃、文件块文字保留）"]
     F -->|无内容| A
     F --> C{"私聊还是群聊<br/>权威 = 标题区括号人数"}
     C -->|群聊含 @小漓| I
     C -->|群聊未 @| G0["点击输入框标记已读<br/>（红圈清零防滞留循环）"]
     G0 --> A
     C -->|私聊| I
-    H --> L["重新截图分析"]
+    H --> L["重新截图分析（锚定每个对方头像对应的消息类型并记录）"]
     L -->|① sender 有待关联文件<br/>且带文字指令| I
     L -->|② 有文件| O["文件流程"]
     O --> T2{"有伴随文字?"}
@@ -128,7 +128,7 @@ flowchart TD
     J --> A
 ```
 
-> 气泡/媒体分析无法区分视频、表情、图片，统一按图片处理（表情包点击不弹查看器，按媒体矩形裁剪当前帧识别；纯图/表情消息走角色化回复）；图片消息含文字时 10 秒等待防话没说完（此后重走的联合 OCR 未画出）；文件消息「回复收到 + 不停摆」，该发送者后续文字指令自动关联待处理文件。API 最终失败自动重试（429/5xx 指数退避 + 墙钟预算），重试耗尽发角色内友好提示，绝不把错误码原样发给好友。联网搜索走搜狗/必应/百度三源并发 + 网页正文抓取（无 SLA，搜索全挂或页面无正文时模型会自行换源/告知不可用；搜索引擎跳转桩自动跟随解析到真实目标页）。触发器（定时/状态监视）到点、达成、到期统一回递 API，由模型结合创建时的对话按人设生成回复，不预写提醒文案；状态监视轮询创建时选定的固定网页并解析到真实目标地址，本地关键词判定只匹配当前时段切片。会话身份以标题区读取为准（列表区不再 OCR：未读条目只靠红圈几何点击切换，名字统一由读消息那次联合 OCR 的标题带给出，位置模式拿不到名字就放弃本轮）；memory 键存会话名原文、查找做引号/空格变体等价匹配（记忆页显示的就是微信里的名字，且不因 OCR 变体分裂）；处理失败的条目 8 秒退避，防滞留红圈反复 OCR；微信被最小化时视觉通道是盲的，哨兵会自动恢复窗口。消息序列按「稳定前缀在前、每轮变化区在尾」构造（当前时间紧贴当前消息），上一轮请求是下一轮的前缀 → 模型缓存命中大幅提升。OCR 为 RapidOCR（PP-OCRv5 mobile + onnxruntime 限 2 线程），识别链路 1x 原生（不再靠 2x 放大补偿小字）——条带锚定/消息读取/标题读取合计比升级前快约 40%，0.5s 轮询与 CPU 占用不变。任务进度由天枢在关键节点写 progress.json、主循环每读到一次新写入就转发一条（与结果回传同一轮询节点，不设静默期与最小间隔），短任务不写就没有进度消息。
+> 消息归属只用头像：一条消息 = 一个头像，像素层不再用气泡颜色/x 中线判自己还是对方（气泡色只用于找气泡框、媒体框这类结构）；分析区上沿 = bot 最后一条消息之后的下一条对方头像上边界，只读该上沿以下的对方新消息；头像检测不到就当作该侧没有新消息，不做颜色/中线降级。文件卡片 = 面板色与文字气泡一致 + 面板内右侧一个实心小图标（图标颜色不参与判定，Excel 绿与 PDF 蓝一视同仁）；面板内部的框（图标）一律不是图片，图片点击路径碰不到文件卡片，不会误开用户文件。头像区（左右窄带 ∩ 头像竖直区间）识别出的文字按几何剔除（真机头像幻影行「用户已无生命体征」曾混进文件名 OCR）。气泡/媒体分析无法区分视频、表情、图片，统一按图片处理（表情包点击不弹查看器，按媒体矩形裁剪当前帧识别；纯图/表情消息走角色化回复）；图片消息含文字时 10 秒等待防话没说完（此后重走的联合 OCR 未画出）；文件消息「回复收到 + 不停摆」，该发送者后续文字指令自动关联待处理文件。API 最终失败自动重试（429/5xx 指数退避 + 墙钟预算），重试耗尽发角色内友好提示，绝不把错误码原样发给好友。联网搜索走搜狗/必应/百度三源并发 + 网页正文抓取（无 SLA，搜索全挂或页面无正文时模型会自行换源/告知不可用；搜索引擎跳转桩自动跟随解析到真实目标页）。触发器（定时/状态监视）到点、达成、到期统一回递 API，由模型结合创建时的对话按人设生成回复，不预写提醒文案；状态监视轮询创建时选定的固定网页并解析到真实目标地址，本地关键词判定只匹配当前时段切片。会话身份以标题区读取为准（列表区不再 OCR：未读条目只靠红圈几何点击切换，名字统一由读消息那次联合 OCR 的标题带给出，位置模式拿不到名字就放弃本轮）；memory 键存会话名原文、查找做引号/空格变体等价匹配（记忆页显示的就是微信里的名字，且不因 OCR 变体分裂）；处理失败的条目 8 秒退避，防滞留红圈反复 OCR；微信被最小化时视觉通道是盲的，哨兵会自动恢复窗口。消息序列按「稳定前缀在前、每轮变化区在尾」构造（当前时间紧贴当前消息），上一轮请求是下一轮的前缀 → 模型缓存命中大幅提升。OCR 为 RapidOCR（PP-OCRv5 mobile + onnxruntime 限 2 线程），识别链路 1x 原生（不再靠 2x 放大补偿小字）——条带锚定/消息读取/标题读取合计比升级前快约 40%，0.5s 轮询与 CPU 占用不变。任务进度由天枢在关键节点写 progress.json、主循环每读到一次新写入就转发一条（与结果回传同一轮询节点，不设静默期与最小间隔），短任务不写就没有进度消息。
 
 ## 源码运行（开发者）
 
@@ -166,7 +166,10 @@ xiaoli_desktop/
 │   ├── __init__.py          # 后端注册表 + create_backend("auto")
 │   ├── models.py            # WeChatMessage / MessageType
 │   └── visual_backend.py    # 视觉后端：截图/OCR/红圈检测/气泡定位/发送/语音通道
+├── xiaoli_web.py            # 桌面端入口（pywebview 壳 + 托盘；Web 前端版）
+├── webui/                   # Web 前端（index.html / style.css / app.js / api.js，无构建步骤）
 ├── xiaoli_app/
+│   ├── webbridge.py         # 前端桥接层（pywebview js_api 方法面 + 后端推送循环）
 │   ├── config_store.py      # 配置加载/迁移 + 模型清单 + 人设默认（后端共用）
 │   ├── card_store.py        # 角色卡存储（cards/*.json CRUD/校验/导入导出）
 │   ├── memory_store.py      # 对话记忆（近期窗口/重要记忆/关键词索引 + 深层 jsonl 存档）
@@ -193,6 +196,8 @@ tools/                       # 配套标定/调试/出图工具
 ├── calibrate_input_box.py   # 输入框坐标标定
 ├── test_read_messages.py    # 消息读取链路调试
 ├── cdp_probe.py             # CDP/accessibility 通道验证探针
+├── webui_dev_server.py      # Web 前端独立热调（静态服务 + no-store，浏览器直开）
+├── smoke_webbridge.py       # 桥接层冒烟（临时目录假配置，验证方法面可用）
 └── make_showcase.py         # 仓库展示图生成（吉祥物抠图 / 截图美化 / 横幅）
 assets/                      # README 展示图（mascot / showcase-voice / social-preview + raw 原图）
 ```
@@ -244,6 +249,7 @@ assets/                      # README 展示图（mascot / showcase-voice / soci
 
 ## 更新记录
 
+- [v3.0.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.0.0.md)（Web 前端开源/头像锚定归属重构/文件卡片视觉判定/消息文字范围规则/文件名定位下载时间优先）
 - [v2.9.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.2.md)（回复段首时间戳剥除修复/消息归属判定诊断日志）
 - [v2.9.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.1.md)（背景静态化风扇静音/页面切换提速/主题 19 收 7/按聊天三态功能开关/用量上 SQLite/聊天记录导出/触发器可视管理）
 - [v2.9.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.0.md)（语音发送·音源接口化/音色档案情绪参考/语音模式三态/环回质检 fail-closed/颜文字乱语修复/功能开关区/粘贴后停顿节奏）

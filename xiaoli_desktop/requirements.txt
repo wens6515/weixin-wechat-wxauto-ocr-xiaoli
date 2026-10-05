@@ -28,3 +28,7 @@ comtypes==1.4.16        # Office COM
 openpyxl==3.1.5         # Excel
 python-docx==1.2.0      # Word
 pypdf==6.1.3            # PDF 文字层提取（纯 Python，零系统依赖）
+
+# --- Web 前端壳（xiaoli_web.py：pywebview 窗口 + pystray 托盘）---
+pywebview==6.2.1        # Edge WebView2 窗口壳（Windows 系统组件，无额外运行时体积）
+pystray==0.19.5         # 系统托盘（依赖 pillow，已在上方）
