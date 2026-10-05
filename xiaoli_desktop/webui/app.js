@@ -1205,6 +1205,7 @@ function refreshSettings() {
   $("#cbDeepMem").checked = !!m.memory_deep_enabled;
   $("#cbCompressMem").checked = !!m.memory_compress_enabled;
   $("#spKeepRecent").value = m.memory_keep_recent ?? 30;
+  $("#spRollStep").value = m.memory_rolling_step ?? 30;
   $("#spCompressBatch").value = m.memory_compress_batch ?? 30;
   $("#spImportantMax").value = m.memory_important_max ?? 20;
   $("#edCompressModel").value = m.memory_compress_model || "";
@@ -1228,10 +1229,13 @@ function refreshSettings() {
   reloadOvrChats();
 }
 $("#btnMemSave").addEventListener("click", async () => {
+  const stepRaw = parseInt($("#spRollStep").value, 10);
+  const rollStep = Number.isFinite(stepRaw) && stepRaw >= 0 ? stepRaw : 30;
   const r = await API.save_config({
     memory_deep_enabled: $("#cbDeepMem").checked,
     memory_compress_enabled: $("#cbCompressMem").checked,
     memory_keep_recent: parseInt($("#spKeepRecent").value) || 30,
+    memory_rolling_step: rollStep,
     memory_compress_batch: parseInt($("#spCompressBatch").value) || 30,
     memory_important_max: parseInt($("#spImportantMax").value) || 20,
     memory_compress_model: $("#edCompressModel").value.trim(),

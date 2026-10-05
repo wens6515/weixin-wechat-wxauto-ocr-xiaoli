@@ -354,6 +354,12 @@ class WeChatBot(MediaCaptureMixin):
         self.memory_deep_enabled = bool(cfg.get("memory_deep_enabled", True))
         self.memory_compress_enabled = bool(cfg.get("memory_compress_enabled", False))
         self.memory_keep_recent = max(5, int(cfg.get("memory_keep_recent", 30)))
+        # 阶梯滚动步长（缓存友好）：窗口在 [keep_recent, keep_recent+step]
+        # 间波动，攒到上限一次性弹出溢出段归档——两次滚动之间注入序列纯追加，
+        # API 前缀缓存命中；0 = 逐条立即滚动（旧行为）
+        self.memory_rolling_step = max(
+            0, int(cfg.get("memory_rolling_step",
+                           AI_DEFAULTS["memory_rolling_step"])))
         self.memory_compress_batch = max(5, int(cfg.get("memory_compress_batch", 30)))
         self.memory_important_max = max(3, int(cfg.get("memory_important_max", 20)))
         self.memory_compress_model = strip_model_prefix(
@@ -560,6 +566,10 @@ class WeChatBot(MediaCaptureMixin):
                 pass
         return max(5, min(keep, max_hist))
 
+    def _rolling_step(self, chat_id=None):
+        """阶梯滚动步长（memory_rolling_step，热改即时生效）。"""
+        return max(0, int(getattr(self, "memory_rolling_step", 30)))
+
     def _save_memory(self):
         try:
             with open(self.memory_file, "w", encoding="utf-8") as f:
@@ -656,7 +666,8 @@ class WeChatBot(MediaCaptureMixin):
         store = self.__dict__.get("_mem_store")
         if store is None:
             store = MemoryStore(memory_file=self.memory_file,
-                                cap_fn=self._recent_cap)
+                                cap_fn=self._recent_cap,
+                                step_fn=self._rolling_step)
             self.__dict__["_mem_store"] = store
         return store
 
@@ -820,11 +831,13 @@ class WeChatBot(MediaCaptureMixin):
         图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
         消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
         带图返回 400）。消息布局（缓存友好：稳定前缀在前、每轮变化区在尾）：
-          [system 人设] → [system 重要记忆] → [历史(带[ts])] →
-          [system 相关记忆] → [system 当前时间] → [user content]
+          [system 人设] → [system 回复纪律] → [历史(带[ts])] →
+          [system 重要记忆] → [system 相关记忆] → [system 当前时间] → [user content]
         人设（self.system_prompt）前置为 system 纯文本消息（空人设则不插入人设
         system 消息）；重要记忆/相关记忆来自长记忆压缩产出（per-chat，未启用
-        或无内容时缺省）；「当前时间」system 紧贴当前消息——它每秒变化，绝不能
+        或无内容时缺省），放在历史之后的尾区——压缩提交会改写重要记忆，插在
+        历史之前时每次提交都把整条「人设+历史」前缀缓存作废，挪到尾区后只
+        作废尾巴一小截；「当前时间」system 紧贴当前消息——它每秒变化，绝不能
         插在历史之前打断缓存前缀。
 
         chat_id 可选（默认 None）：非空时注入重要记忆块与 _get_history(chat_id)
@@ -861,9 +874,6 @@ class WeChatBot(MediaCaptureMixin):
         # 位置紧跟人设、在重要记忆之前：仍属稳定前缀区，不破坏缓存布局。
         if REPLY_STYLE_RULES:
             messages.append({"role": "system", "content": REPLY_STYLE_RULES})
-        important = self._important_block(chat_id) if chat_id else None
-        if important:
-            messages.append({"role": "system", "content": important})
         if chat_id:
             # 历史注入：语义逐字对齐 call_chat_ai（system 之后、user 之前；
             # 有 time 字段带 [ts] 前缀，否则原文；不重排——_get_history 返回
@@ -875,6 +885,10 @@ class WeChatBot(MediaCaptureMixin):
                 else:
                     msg_content = h['content']
                 messages.append({"role": h["role"], "content": msg_content})
+        # 重要记忆（压缩产出）在历史之后的尾区：缓存布局见 docstring
+        important = self._important_block(chat_id) if chat_id else None
+        if important:
+            messages.append({"role": "system", "content": important})
         if related_memory:
             messages.append({"role": "system", "content": related_memory})
         # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
@@ -1237,8 +1251,9 @@ class WeChatBot(MediaCaptureMixin):
             decorated = f"私聊 - {sender_name}：{user_msg}" if sender_name else f"私聊：{user_msg}"
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
         # 消息布局（缓存友好，与 call_vision_api 对齐）：稳定前缀在前
-        # （人设 → 重要记忆 → 历史），每轮变化区在尾（相关记忆 → 当前时间
-        # → 当前消息）。「当前时间」每秒变化，绝不能插在历史之前打断前缀。
+        # （人设 → 回复纪律），每轮变化区在尾（历史 → 重要记忆 → 相关记忆
+        # → 当前时间 → 当前消息）。重要记忆在历史之后的尾区——压缩提交
+        # 改写它时只作废尾巴，不打碎「人设+历史」前缀缓存。
         messages = [
             {"role": "system",
              "content": ov.get("system_prompt") or self.system_prompt},
@@ -1247,9 +1262,6 @@ class WeChatBot(MediaCaptureMixin):
         # 保证降级/触发器回递时的说话方式不发生突变。
         if REPLY_STYLE_RULES:
             messages.append({"role": "system", "content": REPLY_STYLE_RULES})
-        important = self._important_block(chat_id)
-        if important:
-            messages.append({"role": "system", "content": important})
         for h in self._get_history(chat_id):
             if "time" in h:
                 ts = h["time"]
@@ -1257,6 +1269,9 @@ class WeChatBot(MediaCaptureMixin):
             else:
                 msg_content = h['content']
             messages.append({"role": h["role"], "content": msg_content})
+        important = self._important_block(chat_id)
+        if important:
+            messages.append({"role": "system", "content": important})
         related = self._match_related_memory(chat_id, user_msg)
         if related:
             messages.append({"role": "system", "content": related})

@@ -29,7 +29,7 @@ VAR = "摸鱼”集团"        # 同一会话的 OCR 变体（前引号丢失）
 
 def make_store(tmp):
     return MemoryStore(memory_file=os.path.join(tmp, "memory.json"),
-                       cap_fn=lambda c: 5)
+                       cap_fn=lambda c: 5, step_fn=lambda c: 0)
 
 
 class TestDeepFileKeyConsistency(unittest.TestCase):

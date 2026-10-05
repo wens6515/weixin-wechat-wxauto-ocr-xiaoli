@@ -227,6 +227,10 @@ AI_DEFAULTS = {
     "memory_deep_enabled": True,
     "memory_compress_enabled": False,
     "memory_keep_recent": 30,
+    # 阶梯滚动步长：近期窗口在 [keep_recent, keep_recent+step] 间波动，
+    # 攒到上限一次性弹出归档（缓存友好——两次滚动之间注入序列纯追加）；
+    # 0 = 到量立即逐条滚动（旧行为）
+    "memory_rolling_step": 30,
     "memory_compress_batch": 30,
     "memory_important_max": 20,
     "memory_compress_model": "",

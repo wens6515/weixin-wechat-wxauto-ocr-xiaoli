@@ -25,6 +25,7 @@ def make_bot(tmp, **over):
     bot.memory_deep_enabled = True
     bot.memory_compress_enabled = True
     bot.memory_keep_recent = 5
+    bot.memory_rolling_step = 0   # 逐条立即滚动（旧行为）；阶梯滚动另测
     bot.memory_compress_batch = 3
     bot.memory_important_max = 3
     bot.memory_compress_model = ""
@@ -306,8 +307,9 @@ class TestMemoryDeletion(unittest.TestCase):
 
 
 class TestMessageLayout(unittest.TestCase):
-    """消息布局：[人设, 重要记忆, 历史(带[ts]), 相关记忆, 当前时间, 当前消息]
-    ——稳定前缀在前，每秒变化的当前时间紧贴当前消息（缓存前缀不断）。"""
+    """消息布局：[人设, 纪律, 历史(带[ts]), 重要记忆, 相关记忆, 当前时间, 当前消息]
+    ——稳定前缀在前；重要记忆在历史之后的尾区（压缩提交只作废尾巴不打碎
+    人设+历史前缀），每秒变化的当前时间紧贴当前消息（缓存前缀不断）。"""
 
     def _layout_bot(self, tmp):
         bot = make_bot(tmp)
@@ -343,9 +345,9 @@ class TestMessageLayout(unittest.TestCase):
             self.assertEqual(msgs[0], {"role": "system", "content": "你是小漓"})
             self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES,
                              "风格纪律紧跟人设（运行时注入，仍在稳定前缀区）")
-            self.assertIn("对花生过敏", msgs[2]["content"])
-            self.assertEqual(msgs[3]["content"], "[{ts}] 我在准备考研".format(
+            self.assertEqual(msgs[2]["content"], "[{ts}] 我在准备考研".format(
                 ts=bot.memory_db["小明"]["recent"][0]["time"]))
+            self.assertIn("对花生过敏", msgs[3]["content"])   # 重要记忆在历史后
             self.assertIn("相关记忆", msgs[4]["content"])
             self.assertIn("准备考研", msgs[4]["content"])
             self.assertIn("当前时间：", msgs[5]["content"])
@@ -377,8 +379,8 @@ class TestMessageLayout(unittest.TestCase):
             msgs = payloads[0]["messages"]
             self.assertEqual(msgs[0]["content"], "你是小漓")
             self.assertEqual(msgs[1]["content"], REPLY_STYLE_RULES)  # 风格纪律
-            self.assertIn("对花生过敏", msgs[2]["content"])     # 重要记忆
-            self.assertIn("准备考研", msgs[3]["content"])         # 历史
+            self.assertIn("准备考研", msgs[2]["content"])         # 历史在前缀区
+            self.assertIn("对花生过敏", msgs[3]["content"])     # 重要记忆在历史后
             self.assertIn("准备考研", msgs[4]["content"])        # 相关记忆
             self.assertIn("当前时间：", msgs[5]["content"])      # 时间紧贴消息
             self.assertEqual(msgs[6]["role"], "user")
@@ -403,6 +405,41 @@ class TestMessageLayout(unittest.TestCase):
             roles = [m["role"] for m in msgs]
             self.assertEqual(roles, ["system", "system", "user", "system", "user"])
             self.assertIn("当前时间：", msgs[3]["content"])
+
+
+
+class TestSteppedRolling(unittest.TestCase):
+    """阶梯滚动（缓存友好）：窗口在 [cap, cap+step] 间波动，攒到上限把
+    溢出段按序一次性弹出归档——两次滚动之间注入序列是「旧前缀 + 尾部追加」，
+    API 前缀缓存全程命中；逐条弹出让每轮请求的第一条历史都在变，前缀缓存
+    从第一条历史起就失效。"""
+
+    def test_window_oscillates_and_batch_archives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = make_bot(tmp, memory_rolling_step=3)
+            for i in range(8):   # 8 - 5 = 3，不大于 step=3 → 稳定区不滚动
+                bot._add_history("小明", "user", f"消息{i}")
+            st = bot.memory_db["小明"]
+            self.assertEqual(len(st["recent"]), 8,
+                             "窗口落在稳定区（cap < len ≤ cap+step）不得滚动")
+            self.assertEqual(bot._deep_count.get("小明", 0), 0)
+            bot._add_history("小明", "user", "消息8")   # 9 - 5 = 4 > 3 → 触发
+            self.assertEqual(len(st["recent"]), 5,
+                             "触发后一次性弹出溢出段，窗口回到 cap")
+            self.assertEqual(st["recent"][0]["content"], "消息4")
+            self.assertEqual(
+                [m["content"] for m in bot._iter_deep("小明")],
+                ["消息0", "消息1", "消息2", "消息3"],
+                "被弹出的消息按序一次性归档进深层（压缩边界不受影响）")
+
+    def test_step_zero_is_legacy_per_message_rolling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = make_bot(tmp, memory_rolling_step=0)
+            for i in range(7):
+                bot._add_history("小明", "user", f"消息{i}")
+            st = bot.memory_db["小明"]
+            self.assertEqual(len(st["recent"]), 5)
+            self.assertEqual(bot._deep_count["小明"], 2)
 
 
 if __name__ == "__main__":
