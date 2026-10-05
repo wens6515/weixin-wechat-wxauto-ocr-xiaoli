@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from xiaoli_bot import AgentBot, _looks_like_file_text, poll_outbox
+from xiaoli_bot import AgentBot, poll_outbox
 from wx_backend.models import MessageType
 
 
@@ -147,21 +147,6 @@ class TestTextTaskNoAttachment(unittest.TestCase):
 
 # ---- 文件文本识别 + 任务判断输入格式 + 图片预览驱动 ----
 
-
-class TestLooksLikeFileText(unittest.TestCase):
-    def test_file_text_true(self):
-        """含文档扩展名的 OCR 文本 = 文件消息（含合并文本 + 图标杂字符）。"""
-        self.assertTrue(_looks_like_file_text(
-            "新宣传.docx 部门简介+纳新宣传.docx W"))
-        self.assertTrue(_looks_like_file_text("报告.xlsx"))
-        self.assertTrue(_looks_like_file_text("演示文稿.PPTX"))
-
-    def test_instruction_false(self):
-        """真实用户指令不含扩展名 → 不是文件文本。"""
-        self.assertFalse(_looks_like_file_text(
-            "把这个做成一个赛博朋克风格的网页"))
-        self.assertFalse(_looks_like_file_text(""))
-        self.assertFalse(_looks_like_file_text("帮我总结一下"))
 
 
 class TestFileTaskClassifyInput(unittest.TestCase):
@@ -847,18 +832,18 @@ class TestGroupNameDecoratedFinal(unittest.TestCase):
                          "私聊格式保持不变")
 
 
-class TestWindowFileFloor(unittest.TestCase):
-    """文件候选阈值 = other_first_top（bot_bottom 之下第一个对方头像上边框）。
-    旧旁路（_looks_like_file_text 直通 bot_bottom 过滤，d3c6f4e 重构混入）
-    已删：窗口里残留的旧文件文本不再每轮进候选（用户实测「文件处理完后，
-    后续普通聊天被旧文件重新响应/重复问文件已收到」的根因）；bot 的文件
-    卡文本即使被误判 sender，y < other_first_top 也进不了候选（占位挂起
-    态 bot_bottom 落在 bot 头像上，裸阈值挡不住）；对方本轮新文件照常识别。"""
+class TestWindowMsgsFilter(unittest.TestCase):
+    """窗口消息过滤与文件判据（type=FILE 唯一判据）：
+    - 文件识别只认视觉层 FILE 消息——OCR 扩展名旁路已删：含扩展名的普通
+      文字（「报告.docx 什么时候给我」）是聊天文本，不再被劫持进文件流程；
+    - 阈值 = 分析区上沿 bot_bottom（analyze_window 的 other_first_top 与它
+      同源恒等），y 低于阈值的历史/bot 消息不进候选；bot_bottom=None 全部
+      视为新。"""
 
     @staticmethod
-    def _msg(sender, content, y):
+    def _msg(sender, content, y, mtype=MessageType.TEXT):
         return SimpleNamespace(sender=sender, content=content, id=f"m{y}",
-                               type=MessageType.TEXT, y=y)
+                               type=mtype, y=y)
 
     def _run(self, msgs, win_extra):
         bot = _make_bot()
@@ -872,8 +857,7 @@ class TestWindowFileFloor(unittest.TestCase):
 
         bot.wx = Wx(msgs)
         bot._tick_poll_outbox = lambda: None
-        bot._handle_file_message = \
-            lambda *a, **k: calls["file"].append(a[2]) or True
+        bot._handle_file_message =             lambda *a, **k: calls["file"].append(a[2]) or True
         bot._handle_text = lambda *a, **k: calls["text"].append(a[2]) or True
 
         def _capture(chat, min_top=None, exclude_rows=None):
@@ -885,37 +869,40 @@ class TestWindowFileFloor(unittest.TestCase):
             bot._handle_unread_session("小明")
         return calls
 
-    def test_stale_file_above_floor_excluded(self):
-        """场景①：bot_bottom=100、other_first_top=400——y=200 的旧文件文本
-        （bot 卡误判 sender）不进候选；y=450 的新文件照常触发文件分支。"""
+    def test_text_with_extension_not_hijacked_to_file_branch(self):
+        """含扩展名的普通文字走文本分支（OCR 旁路已删），文件分支不触发。"""
         calls = self._run(
-            [self._msg("王", "旧成果.html", 200),
-             self._msg("王", "新报告.pdf", 450),
-             self._msg("王", "帮忙处理", 460)],
-            {"bot_bottom": 100, "other_first_top": 400, "has_media": True})
-        self.assertEqual(calls["file"], ["新报告.pdf"],
-                         "旧文件文本不得进候选（旧旁路已删），新文件照常")
-        self.assertEqual(calls["capture"], [(100, None)],
-                         "捕获不再传排除行：文件卡片图标已在像素层剔除"
-                         "（面板内部的内容框不算媒体），点不到用户文件")
+            [self._msg("王", "报告.docx 什么时候给我", 120),
+             self._msg("王", "帮我看看", 130)],
+            {"bot_bottom": 100, "has_media": False})
+        self.assertEqual(calls["file"], [])
+        self.assertEqual(len(calls["text"]), 1)
+        self.assertIn("报告.docx", calls["text"][0])
+
+    def test_file_type_message_triggers_file_branch(self):
+        """视觉层 FILE 消息 → 文件分支（唯一判据）。"""
+        calls = self._run(
+            [self._msg("王", "新报告.pdf", 450, MessageType.FILE)],
+            {"bot_bottom": 100, "has_media": True})
+        self.assertEqual(calls["file"], ["新报告.pdf"])
+        self.assertEqual(calls["text"], [])
+
+    def test_below_threshold_excluded(self):
+        """y < bot_bottom 的历史消息不进候选。"""
+        calls = self._run(
+            [self._msg("王", "历史上的话", 50),
+             self._msg("王", "新消息", 150)],
+            {"bot_bottom": 100})
+        self.assertEqual(calls["file"], [])
+        self.assertEqual(len(calls["text"]), 1)
+        self.assertIn("新消息", calls["text"][0])
 
     def test_no_bot_messages_all_new(self):
-        """场景②：bot_bottom=None（窗口内无 bot 消息）= 全部视为新，
-        旧语义不变。"""
+        """bot_bottom=None（窗口内无 bot 消息）= 全部视为新，旧语义不变。"""
         calls = self._run([self._msg("王", "旧文件.docx", 50)],
-                          {"bot_bottom": None, "other_first_top": None})
-        self.assertEqual(calls["file"], ["旧文件.docx"])
+                          {"bot_bottom": None})
+        self.assertEqual(len(calls["text"]), 1)
 
-    def test_placeholder_state_bot_file_card_blocked(self):
-        """场景③：占位挂起（skip>0）时 bot_bottom 落在 bot 头像上（100），
-        bot 最后回复的文件卡（y=200，误判 sender）被 other_first_top=400
-        挡住；本轮只有对方新文字 → 走文本分支而非文件分支。"""
-        calls = self._run(
-            [self._msg("王", "任务成果.zip", 200),
-             self._msg("王", "谢谢", 450)],
-            {"bot_bottom": 100, "other_first_top": 400})
-        self.assertEqual(calls["file"], [], "bot 文件卡不得进候选")
-        self.assertEqual(calls["text"], ["谢谢"])
 
 
 class TestDispatchAttachmentWritable(unittest.TestCase):

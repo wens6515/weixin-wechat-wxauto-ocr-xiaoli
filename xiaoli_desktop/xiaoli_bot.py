@@ -103,20 +103,6 @@ VISION_CHAT_PROMPT = (
 )
 
 
-def _looks_like_file_text(text):
-    """判断 OCR 文本是否为文件消息的显示文本（含常见文档扩展名）。
-
-    视觉后端把文件消息 OCR 成文件名文本（多条合并如
-    '新宣传.docx 部门简介+纳新宣传.docx W'，type 可能是 TEXT）——
-    _wait_pending_instruction 找用户指令时须跳过这类文本，否则会把
-    文件名当指令（LLM 对文件名判 is_task=False 且真实指令被错过）。
-    """
-    return bool(re.search(
-        r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)\b",
-        text or "", flags=re.I))
-
-
-
 # =====================================================================
 # 任务桥与后台线程已拆至 xiaoli_app（纯移动）；此处显式 re-import，
 # 既有导入路径（tests / xiaoli_app.setup / xiaoli_web）不变。
@@ -1137,22 +1123,14 @@ class AgentBot(WeChatBot):
             msgs = self.wx.get_messages(chat_name, assume_switched=True,
                                         skip_bot=win.get("skip_bot", 0))
             bot_bottom = win.get("bot_bottom")
-            # 文件候选阈值用 other_first_top（bot_bottom 之下第一个对方头像
-            # 上边框）：占位挂起（skip_bot>0）时 bot_bottom 落在 bot 自己的
-            # 头像上，bot 最后回复若是文件卡片，其文本行会滑过裸阈值混进
-            # 候选（头像漏检误判 sender 时同理）；对方头像上边框才是对方
-            # 本轮新消息的真边界。bot_bottom 为 None = 无 bot 消息，窗口内
-            # 全部视为新，维持原语义。
-            file_floor = win.get("other_first_top")
-            if file_floor is None:
-                file_floor = bot_bottom
+            # 阈值 = 分析区上沿（bot 最后回复之后的下一条对方头像上边界，
+            # analyze_window 的 bot_bottom）。bot_bottom 为 None = 无 bot
+            # 消息，窗口内全部视为新，维持原语义。
             return [
                 m for m in msgs
                 if m.sender not in (None, "self", self.nickname)
                 and (bot_bottom is None
-                     or (m.y is not None
-                         and m.y >= (file_floor if _looks_like_file_text(m.content)
-                                     else bot_bottom)))
+                     or (m.y is not None and m.y >= bot_bottom))
             ]
 
         # D/R: 截图 + 气泡/媒体分析（无 OCR）。skip_bot：跳过最近 N 条 bot
@@ -1164,16 +1142,14 @@ class AgentBot(WeChatBot):
         if not (win.get("has_other") or win.get("has_text") or win.get("has_media")):
             logger.info(f"[跳过] {chat_name or entry} 窗口空（bot 已回复或无对方消息）")
             return False
-        # 先读一次窗口内文字，判断是否有文件（OCR 扩展名）。文件卡片在视觉层
-        # 被判普通气泡（has_text 而非 has_media），但文件下载/渲染同样需防抖。
-        # 注意：_window_msgs → get_messages 内部 read_title 会刷新
+        # 读窗口内对方新消息（get_messages 内部 read_title 会刷新
         # _current_is_group 为本次会话权威值——群聊判定必须在这之后读取，
         # 否则私聊被上一轮群聊残留误判为群聊（实测日志「私聊林小满被判
         # 群聊消息未 @小漓」；analyze_window 本身无 read_title 不刷新）。
         window_msgs = _window_msgs(win)
-        has_file_initial = any(_looks_like_file_text(m.content) for m in window_msgs)
-        # F/H: 有图片（媒体）或有文件 → sleep 10s 防话没说完/文件没下载完，再分析
-        if win.get("has_media") or has_file_initial:
+        # F/H: 有多媒体（图片或文件卡片，analyze_blocks 的 kind=file 计入
+        # has_media）→ sleep 10s 防话没说完/文件没下载完，再分析
+        if win.get("has_media"):
             time.sleep(10)
             win = self.wx.analyze_window(
                 chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0),
@@ -1227,22 +1203,17 @@ class AgentBot(WeChatBot):
                         logger.warning(f"[已读] 标记已读失败: {e}")
                 return False
         sender = window_msgs[-1].sender if window_msgs else chat_name
-        # 文件识别：视觉层判定的文件卡片（type=FILE）为准——归属/类型全由
-        # 色块与头像给出，不再依赖 OCR 扩展名（真机事故：xlsx 被读成 xIsx，
-        # 文件卡片退化成文字消息、任务投递丢掉附件）。OCR 扩展名只作兜底：
-        # 图标判据万一漏检，含扩展名的文本仍能把本轮拉回文件流程。
+        # 文件识别：视觉层判定的文件卡片（type=FILE）唯一判据——归属/类型
+        # 全由色块与头像给出。OCR 扩展名旁路已删：含扩展名的普通文字（如
+        # 「报告.docx 发我一下」）会被劫持进文件流程回「下载失败」；图标
+        # 判据漏检的最坏退化只是「AI 对着文件名聊天」，重发即可恢复。
         file_text = next(
             (m.content.strip() for m in window_msgs if m.type == MessageType.FILE),
             None)
-        if not file_text:
-            file_text = next(
-                (m.content.strip() for m in window_msgs
-                 if _looks_like_file_text(m.content)), None)
-        # 文字部分（排除文件消息与文件名的 OCR 文本）
+        # 文字部分（排除文件消息）
         text_candidates = [
             m for m in window_msgs
             if m.content.strip() and m.type != MessageType.FILE
-            and not _looks_like_file_text(m.content)
         ]
         if len(text_candidates) > 1:
             # 多发送者合并：每条带各自发送者名（群聊名兜底，不整批只带最后一条）
