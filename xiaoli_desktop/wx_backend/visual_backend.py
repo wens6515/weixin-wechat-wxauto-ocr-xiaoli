@@ -595,6 +595,45 @@ def _bucket_avatar(top: int, tops: list[int]) -> int | None:
     return hit
 
 
+def _anchor_avatar(top: int, tops: list[int], tol: int = 8) -> int | None:
+    """消息框归属头像（唯一判据 = 头像，用户定案）。
+
+    消息框顶部与头像顶部对齐（真机实测差 0），但渲染取整可能差 1~2px；
+    直接走区间归属会把「顶在头像上方 1px」的框错划给上一个头像。先取
+    |top - 头像top| ≤ tol 里最近的头像，超出容差才回退区间归属；仍无归属
+    （框顶在所有头像之上）返回 None——调用方按「无归属」丢弃，不做任何
+    颜色/中线降级。
+    """
+    best = None
+    for t in tops:
+        d = abs(top - t)
+        if d <= tol and (best is None or d < best[0]):
+            best = (d, t)
+    if best is not None:
+        return best[1]
+    return _bucket_avatar(top, tops)
+
+
+def _contains(outer: tuple, inner: tuple, pad: int = 2) -> bool:
+    """inner 框是否落在 outer 框内（外扩 pad 容差）。"""
+    ot, ob, ol, orr = outer
+    it, ib, il, ir = inner
+    return it >= ot - pad and ib <= ob + pad and il >= ol - pad and ir <= orr + pad
+
+
+def drop_panel_contents(boxes: list[tuple], panels: list[tuple],
+                        pad: int = 2) -> list[tuple]:
+    """剔除落在面板（气泡框）内部的内容框。
+
+    文件卡片的类型图标（Excel 绿方块 / W·PDF 彩色小方块）会从面板跳出成
+    独立小框——它是面板的一部分，不是图片：留在这里会被图片点击路径
+    （media_screen_boxes → 点击 → Ctrl+C/裁剪）当成图片点开，真机会直接
+    打开用户文件。面板内部一律不产出媒体框。
+    """
+    return [(t, b, l, r) for (t, b, l, r) in boxes
+            if not any(_contains(p, (t, b, l, r), pad) for p in panels)]
+
+
 def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
     """检测消息区左侧/右侧头像的顶部 y 列表（几何判据，无需头像模板）。
 
@@ -645,6 +684,140 @@ def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
         if min_h <= seg_h <= max_h and int(counts[seg_start:rh].max()) >= min_peak:
             tops.append(seg_start)
     return tops
+
+
+# 文件卡片判据（用户定案）：被标记为多媒体的消息块，若整体颜色与文字气泡
+# 一致、只多一个右侧小图标，即文件消息。图标是面板内部的「实心小色块」——
+# 真机标定（实时截图）：Excel 图标 69x55、填充率 0.96；同一面板内的文字行
+# 高 ≤31、填充率 ≤0.48（含贴到面板右缘的长行），高度 40 / 填充率 0.7 双阈
+# 把两者彻底分开。图标颜色不参与判定（Excel 绿 ≈ 微信绿会被 self 通道吞掉，
+# PDF/Word 的蓝红方块又会跳成独立媒体框——两种都靠本判据统一处理）。
+_ICON_MIN_H = 40
+_ICON_MIN_W = 30
+_ICON_FILL_MIN = 0.7
+
+
+def find_panel_icon(arr, panel: tuple, colors: dict) -> tuple | None:
+    """在面板（气泡框）内部右侧找文件卡片的类型图标，返回 1x 框或 None。
+
+    arr：消息区 1x RGB 数组（np.int16）；panel：(top, bottom, left, right)。
+    只在面板右半找（左半是文件名/大小文字），要求实心（填充率高）、有图标
+    量级的高度与宽度，且不贴顶（贴顶块是文件名首行）。
+    """
+    t, b, l, r = panel
+    ph, pw = b - t, r - l
+    if ph <= 0 or pw <= 0:
+        return None
+    c = colors.get("other")
+    if c is None:
+        return None
+    sub = arr[t:b, l:r]
+    mask = ~_near_color(sub, c, 12)
+    if colors.get("bg") is not None:
+        mask &= ~_near_color(sub, colors["bg"], 8)
+    mask[:, :int(pw * 0.5)] = False
+    best = None
+    for (ct, cb, cl, cr) in _connected_boxes(mask, min_h=20, min_w=20):
+        h, w = cb - ct, cr - cl
+        if h < max(_ICON_MIN_H, int(ph * 0.2)) or w < _ICON_MIN_W:
+            continue
+        if h > int(ph * 0.85) or w > int(pw * 0.5):
+            continue
+        fill = float(mask[ct:cb, cl:cr].mean())
+        if fill < _ICON_FILL_MIN:
+            continue
+        score = fill * h * w
+        if best is None or score > best[0]:
+            best = (score, (t + ct, t + cb, l + cl, l + cr))
+    return best[1] if best else None
+
+
+def analyze_blocks(img: Image.Image, colors: dict, bot_tops: list[int],
+                   other_tops: list[int], skip_bot: int = 0) -> dict:
+    """头像锚定的消息块分析（纯像素、无 OCR）：一条消息 = 一个头像。
+
+    用户定案的流程（视觉层唯一入口，analyze_window 与 get_messages 共用）：
+    1. 先确认 bot 最后一条消息 = 右侧头像 y 最大者（skip_bot 再往前数 N 条，
+       占位回复语义保留）；2. 分析区上沿 = 该消息之后的下一条**对方**头像
+       上边界，只有该上沿以下才是本轮对方新内容；3. 逐对方头像锚定一条
+       消息，块 = 归属该头像的面板/媒体框并集，类型 text / image / file。
+    归属只用头像（_anchor_avatar），气泡颜色只用于「找面板/媒体框」这类
+    结构判定，不再参与 self/对方 判定；头像检测不到 = 该侧无新消息，
+    不做任何颜色/中线降级。
+
+    返回 dict：
+      bot_last_top   int|None   bot 最后一条消息的头像 top
+      region_top     int|None   分析区上沿（= 对方新消息第一条的上边框）
+      other_new_tops [int,...]  本轮对方新消息的头像 top（升序）
+      all_tops       [int,...]  全部头像 top（升序）
+      blocks         [dict,...] 每个对方头像一条：{avatar_top, top, bottom,
+                                left, right, kind, panel, media, icon}
+      has_text       bool       含文字消息块
+      has_media      bool       含多媒体块（图片或文件卡片）
+    """
+    import numpy as np
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    rh, rw = img.height, img.width
+    all_tops = sorted(set(bot_tops) | set(other_tops))
+    last_bot_top = None
+    if bot_tops:
+        skip = min(skip_bot, len(bot_tops) - 1)
+        last_bot_top = sorted(bot_tops)[-(1 + skip)]
+    other_new_tops = sorted(t for t in other_tops
+                            if last_bot_top is None or t > last_bot_top)
+    region_top = other_new_tops[0] if other_new_tops else None
+    bubbles = find_bubble_boxes(img, colors)
+    panels_all = [(t, b, l, r) for (t, b, l, r, is_self) in bubbles if not is_self]
+    media_raw = find_media_boxes(img, colors)
+    # 面板 ↔ 媒体框互含剔除（两个方向都要）：
+    # - 媒体框在面板内 = 文件卡片的类型图标，不是图片（点它会打开用户文件）
+    # - 面板在媒体框内 = 图片内容里与气泡色相近的色块（真机 fixture：图片块
+    #   838~1117 内被判出「气泡框」869~928），不是消息
+    panels = [p for p in panels_all
+              if not any(_contains(m, p) for m in media_raw)]
+    media = drop_panel_contents(media_raw, panels_all)
+    icons = {}
+    for p in panels:
+        ic = find_panel_icon(arr, p, colors)
+        if ic is not None:
+            icons[p] = ic
+    blocks = []
+    for T in other_new_tops:
+        anchored = [p for p in panels if _anchor_avatar(p[0], all_tops) == T]
+        anchored_media = [m for m in media if _anchor_avatar(m[0], all_tops) == T]
+        nxt = [t for t in all_tops if t > T]
+        cap = (min(nxt) - 1) if nxt else (rh - 1)
+        boxes = anchored + anchored_media
+        panel = anchored[0] if anchored else None
+        if boxes:
+            bottom = min(max(b[1] for b in boxes), cap)
+            left = min(b[2] for b in boxes)
+            right = max(b[3] for b in boxes)
+        else:
+            # 头像在、框没检到（气泡色漂移等）：块范围退到下一个头像为止，
+            # 类型按文字处理，保证该头像新消息的文字仍被读走；不做归属降级。
+            bottom, left, right = cap, 0, rw
+        if anchored_media:
+            kind = "image"
+        elif panel is not None and icons.get(panel) is not None:
+            kind = "file"
+        else:
+            kind = "text"
+        blocks.append({
+            "avatar_top": T, "top": min(T, boxes[0][0]) if boxes else T,
+            "bottom": bottom, "left": left, "right": right, "kind": kind,
+            "panel": panel, "media": (anchored_media[0] if anchored_media else None),
+            "icon": (icons.get(panel) if panel is not None else None),
+        })
+    return {
+        "bot_last_top": last_bot_top,
+        "region_top": region_top,
+        "other_new_tops": other_new_tops,
+        "all_tops": all_tops,
+        "blocks": blocks,
+        "has_text": any(b["kind"] == "text" for b in blocks),
+        "has_media": any(b["kind"] in ("image", "file") for b in blocks),
+    }
 
 
 def region_changed(a: Image.Image, b: Image.Image, region=None,
@@ -1229,11 +1402,6 @@ def _get_voice_channel():
 # 不同会导致错位，普通用户分发需引导框选或自适应检测。
 _SESSION_REGION_RATIO = (0.09, 0.0878, 0.418, 0.9895)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.4165, 0.1288, 0.9913, 0.8337)
-# 同一气泡内换行 vs 气泡间距的 y 差阈值（1x 坐标）。真机标定：气泡内换行
-# 行距 ~20-25px，群聊名字-内容 53px、内容块间最小 93px——取 35 夹中间，
-# 让换行合并、气泡分开。（2x 坐标口径时期为 70，去 2x 后线性减半行为不变；
-# 更早的 18 小于换行距，多行长消息被逐行拆散。）
-_BUBBLE_LINE_GAP = 35
 # 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
 _TITLE_REGION_RATIO = (0.4151, 0.0386, 0.8128, 0.082)
 
@@ -1912,13 +2080,22 @@ class VisualBackend:
         logger.info(f"[高亮] 采样选中行背景色 {rgb}（y={screen_y}）")
 
     def get_messages(self, chat: str | None, limit: int | None = None,
-                     assume_switched: bool = False) -> list[WeChatMessage]:
-        """返回会话 chat 的消息（最近 limit 条）。消息区 OCR + 时间戳行切分。
+                     assume_switched: bool = False,
+                     skip_bot: int = 0) -> list[WeChatMessage]:
+        """返回会话 chat **本轮对方新消息**（最近 limit 条）。消息区 OCR + 头像锚定合并。
 
-        消息块判定：时间戳行（如 '昨天 18:45'、'20:14'）作为块分隔符；块内
-        多行合并为一条消息。sender 按 x 坐标与消息区中线比较——右侧=自己
-        （sender="self"，上层跳过），左侧=对方（私聊 sender=会话名；群聊
-        发送者名由气泡上方短文本行的 pending_name 机制读取）。
+        用户定案的分块规则（与 analyze_window 共用 analyze_blocks）：
+        - 归属只用头像：一条消息 = 一个头像，消息文字范围 = [该消息头像上
+          边界, 该消息块下边界]；块外文字（时间/日期分隔行、bot 自己的消息、
+          更早的历史消息）一律不读；
+        - 头像区域内的 OCR 文字按几何剔除（头像窄带 x ∩ 头像竖直区间）——
+          头像图片上的字（真机幻影行「用户已无生命体征」）不是消息内容；
+        - 块类型 image：块内文字全部丢弃（图片上的字不是消息）；块类型
+          file：文字保留（文件名是文件流程唯一凭据），消息 type=FILE 供上层
+          直接判文件，不再依赖 OCR 扩展名正则。
+        sender：私聊 = 会话名；群聊 = 面板（气泡）外、气泡上方的短文本行
+        （发送者名）；取不到就退回会话名。skip_bot 与 analyze_window 同源
+        （占位回复剔除），必须传同一个值，否则分析区上沿会错位。
 
         assume_switched：同一处理事件里 analyze_window 刚完成「切换 + 读
         标题」时置 True——跳过重切与标题重读（省一次点击、两次 OCR，是
@@ -1954,7 +2131,7 @@ class VisualBackend:
                 self._current_is_group = is_group
         region = None
         items = []
-        bubble_boxes: list[tuple] = []  # 1x 坐标气泡框 [(t,b,l,r,is_self)]
+        info: dict = {}
         for attempt in range(2):
             shot = self._refresh(force=True)
             if shot is None:
@@ -2026,12 +2203,14 @@ class VisualBackend:
                 # 单片读 40+ 字超长行一字不差。
                 items = ocr_image(region)
             if items:
-                # 连通域分气泡：自动探测主题气泡色/背景色，找气泡边界框，
-                # 与 OCR 坐标同在 1x 口径直接对齐。探测失败（纯色/mock 截图）
-                # 时 bubble_boxes 留空 → 下行合并回退 y 阈值逻辑。
+                # 头像检测 + 头像锚定的消息块分析（与 analyze_window 同一核心、
+                # 同一张截图——OCR 坐标与块几何必须同源）。气泡颜色只用于结构
+                # （找面板/媒体框/文件卡片图标），归属一律走头像。
                 colors = detect_bubble_colors(region_1x)
-                if colors.get("self") or colors.get("other"):
-                    bubble_boxes = find_bubble_boxes(region_1x, colors)
+                bot_tops = detect_avatar_tops(region_1x, colors.get("bg"), "right")
+                other_tops = detect_avatar_tops(region_1x, colors.get("bg"), "left")
+                info = analyze_blocks(region_1x, colors, bot_tops, other_tops,
+                                      skip_bot=skip_bot)
                 break
             # 消息区空白：可能 toggle 取消选中了（微信再点一次恢复选中）
             if attempt == 0:
@@ -2039,118 +2218,28 @@ class VisualBackend:
                 self._switch_chat(chat, force=True)
         if not items:
             return []
-        # 按 y 排序 → 合并相邻行成消息块（时间戳行作为分隔）
-        items.sort(key=lambda it: (it["y"], it["x"]))
-        # 气泡归属标记：每个 OCR 行标它落在哪个气泡框（供分组 + sender 判定）
-        for it in items:
-            cy = it["y"] + it["h"] // 2
-            cx = it["x"] + it["w"] // 2
-            it["_bubble"] = None
-            it["_bubble_self"] = None
-            for (t, b, l, r, is_self) in bubble_boxes:
-                if t <= cy <= b and l <= cx <= r:
-                    it["_bubble"] = (t, b)
-                    it["_bubble_self"] = is_self
-                    break
-        # 头像文字排除：自己头像（右侧几何窄带）+ 对方头像（气泡左边缘反推）。
-        # 头像图片上的文字（如「蓝色大肥鱼」）不应成为消息内容——头像在
-        # 气泡外侧：自己头像在右侧（x/w≥0.84 窄带），对方头像在左侧（气泡框
-        # left 更左边那一列）。
-        right_tops_1x = detect_avatar_tops(region_1x, colors.get("bg"), "right")
-        other_tops_1x = detect_avatar_tops(region_1x, colors.get("bg"), "left")
-        # media 框归属：文件卡片/图片是 media 框（无气泡），find_bubble_boxes
-        # 覆盖不到（其文本行 _bubble=None）。补 media 框 + 头像几何判据——
-        # 顶部对齐右侧头像的 media 归 bot、对齐左侧归对方，把 bot 文件卡片
-        # 的文本行（文件名）也标 self。真机根因：bot 发 index.html，文件卡片
-        # media 框横跨中线（l=334 < 373 < r=613），文件名 OCR 行 x 靠左被
-        # _is_self 降级判对方，上层窗口过滤漏进 bot 消息误判为对方文件。
-        media_1x = find_media_boxes(region_1x, colors)
-        # 头像划块：左右头像 top 混合排序成边界序列，media 框顶部落入
-        # 哪个区间 → 归属该头像（x 侧：右=自己/左=对方）。替代旧 tol=40
-        # 对齐——区间归属无需魔法数容差。
-        all_avatar_tops_1x = sorted(set(right_tops_1x) | set(other_tops_1x))
-        media_self_boxes = []   # 1x 坐标，归 bot 的 media 框
-        media_other_boxes = []  # 1x 坐标，归对方的 media 框
-        for (mt, mb, ml, mr) in media_1x:
-            hit = _bucket_avatar(mt, all_avatar_tops_1x)
-            if hit is not None and hit in right_tops_1x:
-                media_self_boxes.append((mt, mb, ml, mr))
-            elif hit is not None:
-                media_other_boxes.append((mt, mb, ml, mr))
-        for it in items:
-            cy = it["y"] + it["h"] // 2
-            cx = it["x"] + it["w"] // 2
-            it["_media_self"] = None
-            it["_in_media"] = False
-            for (t, b, l, r) in media_self_boxes:
-                if t <= cy <= b and l <= cx <= r:
-                    it["_media_self"] = True
-                    break
-            if it["_media_self"] is None:
-                for (t, b, l, r) in media_other_boxes:
-                    if t <= cy <= b and l <= cx <= r:
-                        it["_media_self"] = False
-                        # 仅对方媒体框剔除：对方图片块内文字（图片上的字）
-                        # 是假消息（真机 '我不是'）；bot 文件卡片文件名
-                        # （media_self_boxes）是真实 bot 输出，保留 sender='self'
-                        # （既有验收 test_get_messages_bot_file_card_sender_self）。
-                        it["_in_media"] = True
-                        break
-        avatar_h = max(40, region_1x.height // 18)
-        avatar_x = int(region_1x.width * 0.84)
-        avatar_w = region_1x.width - avatar_x
-        self_avatar_boxes = [
-            (avatar_x, top, avatar_w, avatar_h)  # (x, y, w, h)，1x 坐标
-            for top in right_tops_1x
-        ]
-        # 对方头像只在消息区左侧（对方消息/头像在左）：只取 left<中线 的
-        # other 气泡框。对方气泡色接近背景时 find_bubble_boxes 会把右侧
-        # 背景误连成 other 框（真机实测 left=1220 > 中线 747）——若不过滤，
-        # other_avatar_x_max 被污染成右侧值，消息区所有行 cx<该值 被误判
-        # 头像区丢弃，全部消息读空（get_messages 读 0 条的真机根因）。
-        other_lefts = [l for (t, b, l, r, is_self) in bubble_boxes
-                       if not is_self and l < region_1x.width // 2]
-        other_avatar_x_max = min(other_lefts) if other_lefts else None
-        for it in items:
-            cx = it["x"] + it["w"] // 2
-            cy = it["y"] + it["h"] // 2
-            it["_in_avatar"] = False
-            for (ax, ay, aw, ah) in self_avatar_boxes:
-                if ax <= cx <= ax + aw and ay <= cy <= ay + ah:
-                    it["_in_avatar"] = True
-                    break
-            if not it["_in_avatar"] and other_avatar_x_max is not None \
-                    and cx < other_avatar_x_max:
-                it["_in_avatar"] = True
-        midline_x = region_1x.width // 2  # 消息区中线：右侧=自己发的
-        # 头像锚定：右侧头像中心 y（几何窄带），优先于 x 坐标
-        avatar_ys = [top + avatar_h // 2 for top in right_tops_1x]  # 1x 头像中心 y
+        # 归属只用头像（用户定案）：analyze_blocks 给出本轮对方新消息的逐头像
+        # 消息块；没有块 = 无对方新消息（头像检测不到也走这里，不做降级）。
+        blocks = info.get("blocks") or []
+        if not blocks:
+            return []
+        region_w, region_h = region_1x.width, region_1x.height
+        avatar_h = max(40, region_h // 18)
+        # 头像窄带（与 detect_avatar_tops 的 x 窗口同源）：头像图片上的文字
+        # 不是消息内容，必须按几何剔除——真机幻影行「用户已无生命体征」悬在
+        # 头像上、且正好落在该条消息的文字范围内，不剔除会混进文件名 OCR。
+        left_band = (int(region_w * 0.02), int(region_w * 0.14))
+        right_band = (int(region_w * 0.84), int(region_w * 0.98))
 
-        def _is_self(first_x: int, first_y: int) -> bool:
-            for ay in avatar_ys:
-                if abs(first_y - ay) < 18:  # 消息 y 与头像 y 对齐 → self（2x 口径 35 线性减半）
-                    return True
-            return first_x > midline_x  # 降级：x 中线
-
-        msgs: list[WeChatMessage] = []
-        cur_lines: list[dict] = []
-        cur_y: list[int] = []
-        seq = 0
-        # 群聊发送者名识别：气泡上方短文本行（如 '哆拉A萝'）紧贴内容上方。
-        # pending_name = (文本, y)：候选发送者名；被后续内容行消费（y 差<75）
-        # → 成为该块 sender；悬空（后面没紧跟内容）→ 它本身是一条独立短消息。
-        pending_name: tuple[str, int] | None = None
-        block_sender: str | None = None
-
-        def _is_timestamp(text: str) -> bool:
-            """时间戳/日期行：'昨天 18:45' / '20:14' / '下午 2:30' / '1月1日'。"""
-            if not text:
-                return True
-            t = text.replace(" ", "").replace("：", ":")
-            return bool(re.match(
-                r"^(昨天|前天|今天)?(\d{1,2}[:.]\d{1,2}|上午|下午|晚上|"
-                r"\d{1,2}月\d{1,2}日|星期[一二三四五六日天])",
-                t))
+        def _in_avatar(cy: int, cx: int) -> bool:
+            for (x0, x1), tops in ((left_band, other_tops),
+                                   (right_band, bot_tops)):
+                if not (x0 <= cx <= x1):
+                    continue
+                for t in tops:
+                    if t <= cy <= t + avatar_h:
+                        return True
+            return False
 
         def _is_noise(text: str) -> bool:
             """OCR 噪音：空文本，或全部是标点/符号/异常字符（无 CJK 无字母无数字）。
@@ -2165,167 +2254,77 @@ class VisualBackend:
                 return True
             return False
 
-        def _flush():
-            nonlocal seq, block_sender, pending_name
-            if cur_lines:
-                # 一条消息：多行文本合并
-                text = " ".join(l["text"] for l in cur_lines).strip()
-                text = re.sub(r"\s+", " ", text)
-                if text and not _is_noise(text):
-                    # sender 判定：块内首行 x 相对中线（右侧=自己）
-                    first_x = cur_lines[0]["x"]
-                    first_y = cur_lines[0]["y"]
-                    # 输入框按钮噪声：微信输入框"发送"按钮固定在消息区右下角，
-                    # OCR 会把它读成消息且 x 靠右判 self——顶掉真实最新消息导致
-                    # 上层跳过整会话（真机日志：latest sender='self' content='发送'）。
-                    is_send_button = (text == "发送" and first_x > 0.85 * region_1x.width
-                                      and first_y > 0.8 * region_1x.height)
-                    if not is_send_button:
-                        # 群聊：气泡上方发送者名（pending_name 被内容行消费时
-                        # 设置 block_sender）；私聊退回会话名。
-                        # sender 判定：连通域气泡 is_self 优先（最可靠），
-                        # 气泡探测失败时降级头像锚定 + x 中线。
-                        bubble_self = cur_lines[0].get("_bubble_self")
-                        media_self_flag = cur_lines[0].get("_media_self")
-                        # 头像划块优先于气泡色：bot 文件卡片颜色接近 other
-                        # 气泡色会被 find_bubble_boxes 误判 is_self=False，但
-                        # 消息框顶（气泡框 top 优先、OCR 行 y 兜底）落入头像
-                        # 边界序列区间 → 区间头像 x 侧定 sender（右=自己/
-                        # 左=对方）。群聊对方消息 sender 用 block_sender
-                        # （发送者名），不得被 x 中线/气泡色取代——名字是
-                        # 用户硬性要求保留的信息。
-                        first_y_1x = first_y
-                        if cur_lines[0].get("_bubble") is not None:
-                            first_y_1x = cur_lines[0]["_bubble"][0]
-                        bucket_hit = _bucket_avatar(first_y_1x,
-                                                    all_avatar_tops_1x)
-                        if bucket_hit is not None \
-                                and bucket_hit in right_tops_1x:
-                            sender = "self"
-                        elif bucket_hit is not None:
-                            sender = block_sender or chat
-                        elif bubble_self is not None:
-                            sender = "self" if bubble_self else (block_sender or chat)
-                        elif media_self_flag is not None:
-                            sender = "self" if media_self_flag else (block_sender or chat)
-                        else:
-                            sender = "self" if _is_self(first_x, first_y) \
-                                else (block_sender or chat)
-                        # 归属判定诊断（DEBUG 轨——只进 bot.log 全量日志、
-                        # 不进前端 bot_run.log）：记录气泡判定/头像划块/
-                        # 头像坐标全现场。"⚠不一致" = 气泡判定与最终归属
-                        # 矛盾（间歇性归属错配的错误现场，排障 grep "[归属]"
-                        # 即得：若出现 ⚠ 行，其字段足以还原当时错配原因）。
-                        _mismatch = (bubble_self is not None
-                                     and (sender == "self") != bool(bubble_self))
-                        logger.debug(
-                            f"[归属]{' ⚠不一致' if _mismatch else ''} "
-                            f"{text[:24]!r} -> {sender!r}"
-                            f" bubble_self={bubble_self}"
-                            f" bubble={cur_lines[0].get('_bubble')}"
-                            f" bucket={bucket_hit} first_y={first_y_1x}"
-                            f" right_tops={right_tops_1x}"
-                            f" left_tops={other_tops_1x}"
-                            f" media_self={media_self_flag}")
-                        seq += 1
-                        msgs.append(WeChatMessage(
-                            id=f"visual_{seq}",
-                            chat=chat,
-                            sender=sender,
-                            content=text,
-                            type=MessageType.TEXT,
-                            y=first_y,
-                        ))
-                cur_lines.clear()
-                cur_y.clear()
-            block_sender = None
-            # 悬空的候选发送者名（后面没紧跟内容）→ 它本身是一条独立短消息
-            if pending_name is not None:
-                name, pname_y = pending_name
-                pending_name = None
-                seq += 1
-                msgs.append(WeChatMessage(
-                    id=f"visual_{seq}", chat=chat, sender=chat,
-                    content=name, type=MessageType.TEXT,
-                    y=pname_y,
-                ))
-
+        # 逐行归位：剔噪 → 剔头像区文字 → 剔输入框"发送"按钮 → 按消息块收行。
+        # 不属于任何消息块的文字（时间/日期分隔行、bot 自己的消息、更早的
+        # 历史）一律丢弃——块边界由头像锚定，不猜、不降级。
+        by_block: dict[int, list[dict]] = {}
         for it in items:
             text = it["text"]
-            # 时间戳行：作为分隔符（flush 前块 + 悬空候选名），本身不入块
-            if _is_timestamp(text):
-                _flush()
-                pending_name = None
-                continue
             if _is_noise(text):
                 continue
-            # 头像文字排除：落在头像区域（自己模板 / 对方气泡左列）的文字
-            # 是头像图片上的字，不是消息内容，直接丢弃。
-            if it.get("_in_avatar"):
+            cy = it["y"] + it["h"] // 2
+            cx = it["x"] + it["w"] // 2
+            if _in_avatar(cy, cx):
                 continue
-            # media 框内文字剔除（与 _in_avatar 对称）：图片/文件消息的
-            # 内容矩形（media 框）内 OCR 到的文字（图片上的字/文件名）不
-            # 拆成假文字消息——图片块只产 1 条媒体消息（由 analyze_window
-            # 媒体框承载，上层 has_media 分支处理）。紧贴框顶的候选发送者
-            # 名（pending_name）是媒体消息的发送者，一并吞掉不产独立消息。
-            if it.get("_in_media"):
-                if pending_name is not None \
-                        and abs(it["y"] - pending_name[1]) < 75:
-                    pending_name = None
+            # 输入框按钮噪声：微信输入框"发送"按钮固定在消息区右下角，OCR 会
+            # 把它读成消息（真机日志：latest content='发送'）；同时防 x 靠右
+            # 的按钮被并进消息尾部。
+            if text == "发送" and it["x"] > 0.85 * region_w \
+                    and it["y"] > 0.8 * region_h:
                 continue
-            # 气泡归并：连通域气泡框优先——同一气泡框的行合并、不同气泡框
-            # 换块（气泡内换行 vs 跨气泡不再靠猜行距）。气泡框缺失（纯色/
-            # mock 截图探测失败）时回退 y 阈值。
-            if cur_lines:
-                cb = cur_lines[0].get("_bubble")
-                ib = it.get("_bubble")
-                if cb is not None and ib is not None:
-                    if ib != cb:
-                        _flush()
-                elif cb is not None or ib is not None:
-                    _flush()  # 一个在气泡内、一个在气泡外（发送者名/时间戳）→ 换块
-                elif cur_y and abs(it["y"] - cur_y[-1]) > _BUBBLE_LINE_GAP:
-                    _flush()
-            if not cur_lines:
-                first_x0 = it["x"]
-                first_y0 = it["y"]
-                # 1. self（右侧自己发的）消息无群聊发送者名，直接成内容
-                if _is_self(first_x0, first_y0):
-                    if pending_name is not None:
-                        _flush()  # 悬空候选（如私聊短消息）先成独立消息
-                        pending_name = None
-                    cur_lines.append(it)
-                    cur_y.append(it["y"])
-                    continue
-                # 2. 候选发送者名已存在且本行紧贴（y 差 <75（1x）——真机名字-内容
-                #    53px、内容块间最小 93px；2x 口径时期为 150）→ 消费：本行是
-                #    内容，候选是发送者
-                if pending_name is not None and abs(first_y0 - pending_name[1]) < 75:
-                    block_sender = pending_name[0]
-                    pending_name = None
-                    cur_lines.append(it)
-                    cur_y.append(it["y"])
-                    continue
-                # 3. 悬空候选（存在但不紧贴）→ 它是独立短消息，先 flush
-                if pending_name is not None:
-                    _flush()
-                    pending_name = None
-                # 4. 对方短文本（≤8 字符）→ 候选群聊发送者名（不立即成消息）。
-                #    但气泡框内的短文本是内容（如 8 字标题），不是发送者名——
-                #    发送者名在气泡上方、气泡框外（_bubble 为 None）。
-                if it.get("_bubble") is None and len(text.strip()) <= 8:
-                    pending_name = (text.strip(), first_y0)
-                    continue
-                # 5. 普通内容行
-                cur_lines.append(it)
-                cur_y.append(it["y"])
-            else:
-                # 续行：同一气泡内的后续换行/左右分片框，直接并入当前块。
-                # （旧实现无此分支——cur_lines 非空时续行被静默丢弃，多行长
-                # 消息只剩第一行，任务 raw_message 截断。）
-                cur_lines.append(it)
-                cur_y.append(it["y"])
-        _flush()
+            hit = None
+            for bi, blk in enumerate(blocks):
+                if blk["top"] <= cy <= blk["bottom"]:
+                    hit = bi
+                    break
+            if hit is None:
+                continue
+            by_block.setdefault(hit, []).append(it)
+
+        msgs: list[WeChatMessage] = []
+        seq = 0
+        for bi, blk in enumerate(blocks):
+            lines = by_block.get(bi)
+            if not lines:
+                continue
+            lines.sort(key=lambda i: (i["y"], i["x"]))
+            if blk["kind"] == "image":
+                # 图片消息：块内 OCR 文字全部丢弃——图片上的字不是消息内容
+                # （真机 '我不是'）。图片本体由媒体捕获路径处理。
+                continue
+            panel = blk["panel"]
+            sender = chat
+            content_lines = lines
+            # 群聊发送者名：面板（气泡）外、气泡上方的短文本行（真机
+            # '哆拉A萝'）；私聊没有这行，sender 退回会话名。
+            if panel is not None and len(lines) > 1:
+                head = lines[0]
+                if (head["y"] + head["h"] // 2) < panel[0] \
+                        and len(head["text"].strip()) <= 8:
+                    sender = head["text"].strip()
+                    content_lines = lines[1:]
+            text = " ".join(l["text"] for l in content_lines).strip()
+            text = re.sub(r"\s+", " ", text)
+            if not text or _is_noise(text):
+                continue
+            seq += 1
+            mtype = MessageType.FILE if blk["kind"] == "file" else MessageType.TEXT
+            msgs.append(WeChatMessage(
+                id=f"visual_{seq}",
+                chat=chat,
+                sender=sender,
+                content=text,
+                type=mtype,
+                y=blk["top"],
+            ))
+            # 归位诊断（DEBUG 轨，只进 bot.log）：块类型/头像锚点/块范围/
+            # 面板与图标全现场，排障 grep "[归位]" 即得。
+            logger.debug(
+                f"[归位] {text[:24]!r} -> {sender!r} kind={blk['kind']}"
+                f" avatar_top={blk['avatar_top']}"
+                f" block=({blk['top']},{blk['bottom']})"
+                f" panel={panel} icon={blk['icon']}"
+                f" right_tops={bot_tops} left_tops={other_tops}")
 
         if limit:
             msgs = msgs[-limit:]
@@ -2539,8 +2538,13 @@ class VisualBackend:
         colors = detect_bubble_colors(region)
         if not (colors.get("self") or colors.get("other")):
             return []
-        boxes = filter_media_boxes(find_media_boxes(region, colors),
-                                   min_top=min_top, exclude_rows=exclude_rows)
+        # 面板（气泡框）内部的框一律不算媒体：文件卡片的类型图标会跳出成
+        # 独立小框，点它会打开用户文件（真机风险）——先剔除再过滤。
+        panels = [(t, b, l, r) for (t, b, l, r, is_self)
+                  in find_bubble_boxes(region, colors) if not is_self]
+        boxes = filter_media_boxes(
+            drop_panel_contents(find_media_boxes(region, colors), panels),
+            min_top=min_top, exclude_rows=exclude_rows)
         if not boxes:
             return []
         rect = wt.RECT()
@@ -2554,9 +2558,9 @@ class VisualBackend:
     def analyze_window(self, chat: str, foreground: bool = True,
                        skip_bot: int = 0,
                        assume_switched: bool = False) -> dict:
-        """切会话 + 截图 + 气泡/媒体分析，返回窗口内消息结构（不 OCR 文字）。
+        """切会话 + 截图 + 头像锚定的消息块分析，返回窗口内消息结构（不 OCR）。
 
-        供上层先判断「窗口内是否只有文字」还是「有图/文件」，再决定
+        供上层先判断「窗口内是否只有文字」还是「有图片/文件卡片」，再决定
         sleep 10s 防话没说完 / OCR 读文字。
 
         assume_switched：调用方在**同一次处理事件**里刚切过（红圈几何链路：
@@ -2564,25 +2568,27 @@ class VisualBackend:
         一次点击与一次标题 OCR。只省首切——分析为空时的 force 重切兜底
         （toggle 取消选中防线）保留不动。
 
-        bot 消息判定：头像几何（右侧窄带非背景块=bot 头像，左侧=对方头像）。
-        无需头像模板、无需绿气泡色、无需宽度阈值——头像大小/位置固定，
-        对方长文字/文件即使右边缘靠右也不会被误判为 bot。
+        归属判据（用户定案）：只用头像。右侧窄带非背景块 = bot 头像，左侧 =
+        对方头像；一条消息 = 一个头像；分析区上沿 = bot 最后一条消息之后
+        的下一条对方头像上边框，只有该上沿以下才判类型与分块。气泡颜色只
+        用于结构（找面板/媒体框），不再参与 self/对方判定；头像检测不到即
+        视作该侧无新消息，不做任何颜色/中线降级。
 
-        skip_bot：跳过最近 N 条 bot 消息再定位 bot_bottom（占位回复剔除）。
-        跳过的是 bot 头像序列里最新的 N 条，即 last_bot_top 取
-        sorted(bot_tops)[-(1 + skip_bot)]；skip_bot=0 时恒等于 max(bot_tops)，
-        与旧行为完全一致。越界时 skip 收敛到 len(bot_tops)-1 兜底不越界。
-        other_text / other_media / has_other 随新的 last_bot_top 上移。
+        skip_bot：跳过最近 N 条 bot 消息（占位回复剔除），分析区上沿随之
+        上移——占位之前对方发来的消息仍纳入本轮。越界时收敛到
+        len(bot_tops)-1 兜底不越界。
 
         返回 dict：
         {
-            "bot_bottom": int | None,       # 我方最后回复之后第一条消息的上边框（1x）；无下一条=消息区高，None=无 bot 回复
-            "other_first_top": int | None,  # bot_bottom 之下第一个对方头像上边框（1x）；对方本轮新消息的严格下界（占位挂起时 > bot_bottom）
-            "other_text": [(t,b,l,r), ...],  # 窗口内对方文字气泡框
-            "other_media": [(t,b,l,r), ...], # 窗口内对方媒体矩形（图/视频/表情/文件卡片）
+            "bot_bottom": int | None,       # 分析区上沿 = 对方新消息第一条的上边框（1x）
+            "other_first_top": int | None,  # 同上（文件候选阈值沿用的键）
+            "other_text": [(t,b,l,r), ...],  # 对方文字消息的面板框
+            "other_media": [(t,b,l,r), ...], # 对方图片/视频/表情的媒体矩形
+            "other_files": [(t,b,l,r), ...], # 对方文件卡片的面板框（属多媒体，供 10s 防抖）
+            "other_blocks": [dict, ...],     # 逐头像锚定的消息块（kind: text/image/file）
             "has_text": bool,
-            "has_media": bool,
-            "has_other": bool,               # 有 bot 之后的对方新消息（纯头像几何判据，不依赖气泡/media）
+            "has_media": bool,              # 有图片或文件卡片
+            "has_other": bool,              # 有 bot 之后的对方新消息（纯头像几何判据）
             "width": int, "height": int,
         }
         """
@@ -2595,7 +2601,8 @@ class VisualBackend:
         # 在 _window_msgs 之后再取缓存。
         is_group = bool(getattr(self, "_current_is_group", False))
         empty = {"bot_bottom": None, "other_first_top": None,
-                 "other_text": [], "other_media": [],
+                 "other_text": [], "other_media": [], "other_files": [],
+                 "other_blocks": [], "skip_bot": skip_bot,
                  "has_text": False, "has_media": False, "has_other": False,
                  "is_group": is_group, "width": 0, "height": 0}
         for attempt in range(2):
@@ -2619,59 +2626,36 @@ class VisualBackend:
             ))
             rw, rh = region.size
             colors = detect_bubble_colors(region)
-            bubbles = find_bubble_boxes(region, colors)   # [(t,b,l,r,is_self)]
-            media = find_media_boxes(region, colors)       # [(t,b,l,r)]
-            # bot 消息判定：头像几何。右侧窄带非背景块 = bot 头像，左侧 = 对方头像。
-            # 头像大小/位置固定，无需模板、无需颜色、无需宽度阈值。真机实测：
-            # bot 文件 r/w=0.83、对方长文字 r/w=0.80——宽度阈值切不开，头像一右一左分离。
+            # 头像检测：右侧窄带 = bot 头像，左侧 = 对方头像（全流程唯一归属判据）。
+            # 真机实测：bot 文件 r/w=0.83、对方长文字 r/w=0.80——宽度阈值切不开，
+            # 头像一右一左天然分离，无需模板/颜色/宽度判据。
             bot_tops = detect_avatar_tops(region, colors.get("bg"), "right")
             other_tops = detect_avatar_tops(region, colors.get("bg"), "left")
-            # 头像划块：左右头像 top 混合排序成边界序列，消息框（气泡/
-            # media 框）顶部 y 落入哪个区间 → 归属该区间头像（替代旧
-            # tol=40 _aligned 对齐——区间归属无魔法数容差）。
-            all_avatar_tops = sorted(set(bot_tops) | set(other_tops))
-            # 消息定位改用头像几何不变量：消息上边框 = 对应头像上边框。
-            # bot_bottom = 我方最后回复之后第一条消息的上边框（不再依赖
-            # find_bubble_boxes 检测 bot 气泡算 bottom——气泡色漂移会导致
-            # bot 气泡漏检、bot_bottom 偏小或为 None，漏掉对方新消息）。
-            last_bot_top = max(bot_tops) if bot_tops else None
-            # skip_bot：跳过最近 N 条 bot 消息（占位回复剔除）。last_bot_top
-            # 取 sorted(bot_tops)[-(1+skip)]——skip=0 时恒等于 max(bot_tops)，
-            # 与旧行为一致；skip 先做 min(skip_bot, len(bot_tops)-1) 兜底，
-            # bot_tops 不足时不越界。other_new_tops 等随后续 last_bot_top 上移。
-            if bot_tops:
-                skip = min(skip_bot, len(bot_tops) - 1)
-                last_bot_top = sorted(bot_tops)[-(1 + skip)]
-            else:
-                last_bot_top = None
-            if last_bot_top is not None:
-                after = [t for t in all_avatar_tops if t > last_bot_top]
-                bot_bottom = after[0] if after else rh
-            else:
-                bot_bottom = None
-            # 对方新消息 = bot 最后头像之后的左侧头像 top（纯几何，不依赖
-            # 气泡/media 检测——气泡色漂移、黑图被当背景都不会漏判）
-            other_new_tops = [t for t in other_tops
-                              if last_bot_top is None or t > last_bot_top]
-            other_new_set = set(other_new_tops)
-            # 类型区分：气泡/media 框顶部落入对方新消息头像区间（划块归属）
-            other_text = [(t, b, l, r) for (t, b, l, r, _is_self) in bubbles
-                          if _bucket_avatar(t, all_avatar_tops) in other_new_set]
-            other_media = [(t, b, l, r) for (t, b, l, r) in media
-                           if _bucket_avatar(t, all_avatar_tops) in other_new_set]
-            has_other = bool(other_new_tops)
-            # 窗口完全空（无气泡/媒体/头像）→ toggle 取消选中，重切兜底
-            if not bubbles and not media and not bot_tops and not other_tops:
+            # 窗口完全空（无头像、无气泡色）→ 疑似 toggle 取消选中，重切兜底
+            if not bot_tops and not other_tops \
+                    and not (colors.get("self") or colors.get("other")):
                 continue
+            info = analyze_blocks(region, colors, bot_tops, other_tops,
+                                  skip_bot=skip_bot)
+            blocks = info["blocks"]
             return {
-                "bot_bottom": bot_bottom,
-                "other_first_top": (min(other_new_tops)
-                                    if other_new_tops else None),
-                "other_text": other_text,
-                "other_media": other_media,
-                "has_text": bool(other_text),
-                "has_media": bool(other_media),
-                "has_other": has_other,
+                "bot_bottom": info["region_top"],
+                "other_first_top": info["region_top"],
+                # 框未检到的块（气泡色漂移）在列表里不出现——块本身仍在
+                # other_blocks 里（文字照读），列表只收真实框。
+                "other_text": [b["panel"] for b in blocks
+                               if b["kind"] == "text" and b["panel"]],
+                "other_media": [b["media"] for b in blocks
+                                if b["kind"] == "image" and b["media"]],
+                "other_files": [b["panel"] for b in blocks
+                                if b["kind"] == "file" and b["panel"]],
+                "other_blocks": blocks,
+                # skip_bot 原样回传：调用方随后调 get_messages 时必须传同一个
+                # 值，否则两次分析的「分析区上沿」会错位（占位回复剔除失效）。
+                "skip_bot": skip_bot,
+                "has_text": info["has_text"],
+                "has_media": info["has_media"],
+                "has_other": bool(info["other_new_tops"]),
                 "is_group": is_group,
                 "width": rw, "height": rh,
             }

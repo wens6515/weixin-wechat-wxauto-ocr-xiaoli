@@ -68,12 +68,18 @@ class WeChatBackend(Protocol):
         ...
 
     def get_messages(
-        self, chat: str, limit: int | None = None
+        self, chat: str, limit: int | None = None, assume_switched: bool = False,
+        skip_bot: int = 0,
     ) -> list[WeChatMessage]:
         """返回会话 chat 的消息列表，全部转换为统一 WeChatMessage。
 
         limit 限制条数（None=全部）；返回顺序（新→旧或旧→新）由实现
-        定义并在实现 docstring 中说明。"""
+        定义并在实现 docstring 中说明。
+
+        可选扩展（visual 后端实现，其它后端可忽略）：
+        assume_switched —— 同一处理事件里刚完成切换+读标题，跳过重切与标题重读；
+        skip_bot —— 跳过最近 N 条 bot 消息再定分析区上沿（占位回复剔除），
+        必须与本次 analyze_window 用同一个值。"""
         ...
 
     def send_text(self, chat: str, text: str) -> bool:

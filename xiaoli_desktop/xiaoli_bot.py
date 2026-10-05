@@ -190,6 +190,14 @@ def dispatch_task(tasks_dir, task_info, attachment_paths=None):
             dest = os.path.join(att_dir, os.path.basename(p))
             try:
                 shutil.copy2(p, dest)
+                # 微信接收目录的文件是只读副本，copy2 会把只读位一起带过来——
+                # 留着它，任务目录之后删不掉（打包脚本清 dist、用户/界面清理
+                # 任务都会撞 PermissionError [WinError 5]，已实测）。落盘后
+                # 立即清掉只读位（Windows 只看只读位，0o666 即「可写」）。
+                try:
+                    os.chmod(dest, 0o666)
+                except OSError:
+                    pass
                 copied.append(os.path.basename(p))
             except Exception as e:
                 logger.error(f"[投递] 复制附件失败 {p}: {e}")
@@ -1998,8 +2006,12 @@ class AgentBot(WeChatBot):
 
         def _window_msgs(win):
             # assume_switched：analyze_window 刚完成切换+读标题（同一处理
-            # 事件），跳过重切与标题重读——事件热路径省一次点击两次 OCR
-            msgs = self.wx.get_messages(chat_name, assume_switched=True)
+            # 事件），跳过重切与标题重读——事件热路径省一次点击两次 OCR。
+            # skip_bot 必须与刚才 analyze_window 用同一个值（win 里带回来）：
+            # 它决定「分析区上沿」= 哪条对方头像以下算本轮新消息，值不一致
+            # 两次分析的边界就会错位（占位回复剔除失效）。
+            msgs = self.wx.get_messages(chat_name, assume_switched=True,
+                                        skip_bot=win.get("skip_bot", 0))
             bot_bottom = win.get("bot_bottom")
             # 文件候选阈值用 other_first_top（bot_bottom 之下第一个对方头像
             # 上边框）：占位挂起（skip_bot>0）时 bot_bottom 落在 bot 自己的
@@ -2091,14 +2103,22 @@ class AgentBot(WeChatBot):
                         logger.warning(f"[已读] 标记已读失败: {e}")
                 return False
         sender = window_msgs[-1].sender if window_msgs else chat_name
-        # 文件识别：OCR 文本含文件扩展名
+        # 文件识别：视觉层判定的文件卡片（type=FILE）为准——归属/类型全由
+        # 色块与头像给出，不再依赖 OCR 扩展名（真机事故：xlsx 被读成 xIsx，
+        # 文件卡片退化成文字消息、任务投递丢掉附件）。OCR 扩展名只作兜底：
+        # 图标判据万一漏检，含扩展名的文本仍能把本轮拉回文件流程。
         file_text = next(
-            (m.content.strip() for m in window_msgs if _looks_like_file_text(m.content)),
+            (m.content.strip() for m in window_msgs if m.type == MessageType.FILE),
             None)
-        # 文字部分（排除文件名的 OCR 文本）
+        if not file_text:
+            file_text = next(
+                (m.content.strip() for m in window_msgs
+                 if _looks_like_file_text(m.content)), None)
+        # 文字部分（排除文件消息与文件名的 OCR 文本）
         text_candidates = [
             m for m in window_msgs
-            if m.content.strip() and not _looks_like_file_text(m.content)
+            if m.content.strip() and m.type != MessageType.FILE
+            and not _looks_like_file_text(m.content)
         ]
         if len(text_candidates) > 1:
             # 多发送者合并：每条带各自发送者名（群聊名兜底，不整批只带最后一条）
@@ -2121,21 +2141,14 @@ class AgentBot(WeChatBot):
                 pending["filename"], text_content, multi_sender=multi_sender)
         # ============ 分类分发 ============
         if file_text:
-            # 文件（可能同时有图片）：对方本轮新图一并投递，不再被文件分支吞掉
-            # （min_top=bot_bottom 排除 bot 自己的历史文件卡片/图标碎片）。
-            # exclude_rows：文件卡片的类型图标（W/PDF 彩色小方块）会从面板
-            # 跳出成独立小媒体框（面板本身判气泡），与文件名行同块垂直相交
-            # ——相交即排除；真实图片块与文件行分属不同消息块必不相交。
-            # 带宽 -20/+50：1x 文件名行高 ~35px，覆盖图标碎片与行的相交面
-            # （真机探针标定：行 y=935，图标 918~987）。
-            exclude_rows = [(m.y - 20, m.y + 50) for m in window_msgs
-                            if _looks_like_file_text(m.content)
-                            and m.y is not None]
+            # 文件（可能同时有图片）：对方本轮新图一并投递，不再被文件分支吞掉。
+            # 文件卡片本身不会进媒体框（面板内部的图标已在像素层剔除），
+            # 所以这里不需要再按行剔除图标碎片；min_top=分析区上沿只放行
+            # 本轮对方的真图片。
             extra_attachments = []
             if has_media:
                 extra_attachments = self._capture_media_images(
-                    chat_name, min_top=win.get("bot_bottom"),
-                    exclude_rows=exclude_rows)
+                    chat_name, min_top=win.get("bot_bottom"))
             logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
             try:
                 return self._handle_file_message(

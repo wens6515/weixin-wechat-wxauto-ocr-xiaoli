@@ -255,7 +255,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                 calls["sessions"] += 1
                 return iter(["林小满", "周雨桐"])
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return []  # 无消息 → 不触发后续处理
 
         bot = self._make(FakeWx())
@@ -273,7 +273,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                 self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
                 return iter([(100, 163)])   # 位置条目（真实后端契约）
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return []
 
         bot = self._make(FakeWx())
@@ -309,7 +309,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="未知",
                                   content="你好", type=MessageType.TEXT),
@@ -370,7 +370,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
                                   content="豆包有学生优惠了", type=MessageType.TEXT),
@@ -429,7 +429,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": False, "width": 747, "height": 1135}
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 # 联合 OCR 契约：读取消息时解析标题刷新 _current_is_group
                 # （私聊标题「林小满」无括号人数 → False）
                 self._current_is_group = False
@@ -483,7 +483,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
                                   content="@小漓 在吗", type=MessageType.TEXT),
@@ -689,7 +689,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
                         "has_text": True, "has_media": False,
                         "is_group": True, "width": 747, "height": 1135}
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return [
                     WeChatMessage(id=m["id"], chat=chat, sender=m["sender"],
                                   content=m["content"], type=MessageType.TEXT)
@@ -756,7 +756,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
                 self._current_title = "小王"   # 位置模式身份来源（真实由联合 OCR 刷新）
                 return iter([(100, 294)])   # 位置条目（真实后端契约）
 
-            def get_messages(self, chat, assume_switched=False):
+            def get_messages(self, chat, assume_switched=False, skip_bot=0):
                 return [
                     WeChatMessage(id="v1", chat=chat, sender="哆拉A萝",
                                   content="@小漓 [动画表情]", type=MessageType.EMOJI),
@@ -954,9 +954,28 @@ class TestFileDisplayNameAndSnapshot(unittest.TestCase):
                           content="名单.xlsx 说明.pdf W", type=MessageType.FILE)
         self.assertEqual(obj._extract_file_display_name(m), "名单.xlsx")
 
-    def test_find_file_by_display_name_picks_largest_dup(self):
-        """同名文件重复落盘 → (N) 重名编号最大（最近下载）优先，ctime 平局。
-        快照/成果登记方案已删：显示名锚定查找不再排除任何候选。"""
+    def test_find_file_by_display_name_picks_latest_download(self):
+        """同名文件重复落盘 → **下载时间（ctime）最新**优先；(N) 编号只作
+        同刻平局次序。真机：跨月目录重收时新副本不带后缀、(N) 反而更小，
+        旧的「(N) 最大」语义会选到旧副本。
+
+        场景：先落 报告(3).txt（编号大但下载早），后落 报告.txt（编号小、
+        下载晚）→ 必须选后落的那个。"""
+        obj = self._obj()
+        with tempfile.TemporaryDirectory() as tmp:
+            obj.file_storage_path = tmp
+            older = os.path.join(tmp, "h1_1_m_报告(3).txt")
+            with open(older, "w") as fp:
+                fp.write("older")
+            time.sleep(0.02)  # 拉开 ctime（NTFS 精度足够，跨文件系统也稳）
+            newer = os.path.join(tmp, "h2_2_m_报告.txt")
+            with open(newer, "w") as fp:
+                fp.write("newer")
+            self.assertEqual(
+                obj._find_file_by_display_name("报告.txt"), newer,
+                "下载时间新者胜（编号小的新副本不得输给旧的 (3)）")
+            # 无同名候选 → None（不乱选其他文件）
+            self.assertIsNone(obj._find_file_by_display_name("不存在.docx"))
         obj = self._obj()
         with tempfile.TemporaryDirectory() as tmp:
             obj.file_storage_path = tmp

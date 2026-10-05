@@ -676,7 +676,7 @@ def load_config_store(path="config.json", cards_dir="cards"):
         "chat_card_bindings": {},  # per-chat 角色卡绑定 {聊天名: 卡id}；空 = 全部跟随全局活跃卡
         "card_opacity": 0.5,  # 卡片不透明度 0~1.0（设置页滑块调节毛玻璃强度，默认 50%）
         "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
-        "font_scale": "small",  # 全局字号档位：small/medium/large（用户指定：启动默认小字号）
+        "font_scale": "medium",  # 全局字号档位：small/medium/large（启动默认标准档）
         "wallpaper_path": "小漓主题.jpg",  # 背景壁纸（裸文件名 → 启动时按壁纸库解析绝对路径；配套 abyss 主题）
         "web_proxy": "",  # 联网搜索/网页抓取代理（http/https/socks5；空 = 直连；不影响模型 API）
         "chat_feature_overrides": {},  # per-chat 功能覆盖三态例外 {memory_key(聊天): {voice/web_search/task/state_watch: bool}}；空 = 全部跟随全局
@@ -691,8 +691,9 @@ def load_config_store(path="config.json", cards_dir="cards"):
     if cfg.get("theme") not in ("abyss", "neon", "tokyonight", "stellar",
                                 "moxin", "cream", "mint"):
         cfg["theme"] = "abyss"
-    if cfg.get("font_scale") in ("medium", None):
-        cfg["font_scale"] = "small"
+    # font_scale 不做归一化改写：用户保存什么档位重启后就是什么档位
+    # （历史缺陷：曾把 medium/None 强制改写成 small——「标准」保存后重启
+    # 必变「小」，且默认档被钉死在 small）
     if not str(cfg.get("wallpaper_path") or "").strip():
         cfg["wallpaper_path"] = "小漓主题.jpg"
     # 任务目录：用户显式设置的路径一律保留（引导/设置页的选择即事实），

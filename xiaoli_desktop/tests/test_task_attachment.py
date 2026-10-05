@@ -53,7 +53,7 @@ class _FakeWx:
             "width": 747, "height": 1135,
         }
 
-    def get_messages(self, chat, assume_switched=False):
+    def get_messages(self, chat, assume_switched=False, skip_bot=0):
         return self._msgs
 
 
@@ -887,8 +887,7 @@ class TestWindowFileFloor(unittest.TestCase):
 
     def test_stale_file_above_floor_excluded(self):
         """场景①：bot_bottom=100、other_first_top=400——y=200 的旧文件文本
-        （bot 卡误判 sender）不进候选；y=450 的新文件照常触发文件分支，
-        且捕获排除行只含新文件行的相交带。"""
+        （bot 卡误判 sender）不进候选；y=450 的新文件照常触发文件分支。"""
         calls = self._run(
             [self._msg("王", "旧成果.html", 200),
              self._msg("王", "新报告.pdf", 450),
@@ -896,8 +895,9 @@ class TestWindowFileFloor(unittest.TestCase):
             {"bot_bottom": 100, "other_first_top": 400, "has_media": True})
         self.assertEqual(calls["file"], ["新报告.pdf"],
                          "旧文件文本不得进候选（旧旁路已删），新文件照常")
-        self.assertEqual(calls["capture"], [(100, [(430, 500)])],
-                         "排除行 = 新文件名行的相交带（y-20 ~ y+50）")
+        self.assertEqual(calls["capture"], [(100, None)],
+                         "捕获不再传排除行：文件卡片图标已在像素层剔除"
+                         "（面板内部的内容框不算媒体），点不到用户文件")
 
     def test_no_bot_messages_all_new(self):
         """场景②：bot_bottom=None（窗口内无 bot 消息）= 全部视为新，
@@ -916,3 +916,29 @@ class TestWindowFileFloor(unittest.TestCase):
             {"bot_bottom": 100, "other_first_top": 400})
         self.assertEqual(calls["file"], [], "bot 文件卡不得进候选")
         self.assertEqual(calls["text"], ["谢谢"])
+
+
+class TestDispatchAttachmentWritable(unittest.TestCase):
+    """投递附件落在任务目录后必须可删（清掉微信侧的只读位）。"""
+
+    def test_copied_attachment_is_writable(self):
+        """微信接收目录的附件是只读副本，copy2 会带上只读位——任务目录之后
+        删不掉（打包脚本清 dist / 界面清理任务撞 PermissionError [WinError 5]，
+        真机实测）。投递后立即清只读位。"""
+        import stat
+        from xiaoli_bot import dispatch_task
+        with tempfile.TemporaryDirectory() as recv, \
+                tempfile.TemporaryDirectory() as tasks:
+            src = os.path.join(recv, "只读附件.xlsx")
+            with open(src, "w", encoding="utf-8") as f:
+                f.write("x")
+            os.chmod(src, stat.S_IREAD)  # 模拟微信下载副本（只读）
+            if os.access(src, os.W_OK):   # 环境不支持只读位则跳过
+                self.skipTest("当前文件系统不支持只读位")
+            tid = dispatch_task(tasks, {"chat_name": "王", "task": "看表"},
+                                [src])
+            dest = os.path.join(tasks, tid, "attachments", "只读附件.xlsx")
+            self.assertTrue(os.path.isfile(dest))
+            self.assertTrue(os.access(dest, os.W_OK),
+                            "投递后的附件必须可写，否则任务目录删不掉")
+            os.unlink(dest)  # 真删一次（只读位没清会在这里报错）

@@ -241,6 +241,35 @@ class TestRoundTrip(unittest.TestCase):
         self.assertEqual(cfg1["vision_api_url"], cfg2["vision_api_url"])
 
 
+class TestFontScaleDefaultAndPersistence(unittest.TestCase):
+    """字号档位：默认标准（medium），保存的档位重启后原样保留。
+
+    历史缺陷：load 曾把 medium/None 强制改写 small（「启动默认小字号」旧
+    决策的遗留规则）——用户保存「标准」重启必变「小」。规则已删、默认改
+    medium；显式保存的任何档位（含 small）都不得被改写。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cfg_font_")
+        self.cfg_path = os.path.join(self.tmp, "config.json")
+        self.cards_dir = os.path.join(self.tmp, "cards")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_default_is_medium(self):
+        cfg = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        self.assertEqual(cfg["font_scale"], "medium")
+
+    def test_saved_scale_survives_restart(self):
+        for scale in ("small", "medium", "large"):
+            with open(self.cfg_path, "w", encoding="utf-8") as f:
+                json.dump({"font_scale": scale}, f, ensure_ascii=False)
+            cfg = config_store.load_config_store(self.cfg_path, self.cards_dir)
+            self.assertEqual(cfg["font_scale"], scale,
+                             f"保存的 {scale} 档位被改写")
+
+
 class TestSaveAndRestartKeepsModel(unittest.TestCase):
     """回归：模型页「保存并应用」必须把模型选择持久化到活跃卡。
 
