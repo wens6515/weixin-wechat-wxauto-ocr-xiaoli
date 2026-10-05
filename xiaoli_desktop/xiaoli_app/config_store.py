@@ -211,6 +211,9 @@ AI_DEFAULTS = {
     "chat_temperature": 0.7,
     "chat_top_p": 0.9,
     "max_history": 1000,
+    # 回复长度物理上限（chat/vision 两链路共用；max_tokens 含推理模型的
+    # 思考 token，压太狠会出空回复——推理模型用户建议调高到 1000+）
+    "reply_max_tokens": 400,
     # 单次请求上下文预算（估算 token，fit_messages_in_budget 裁剪依据）：
     # 大文件/长历史用户按模型真实上下文调大（如 128K/1M 模型），超限仍从
     # 最旧历史丢弃。估算偏保守（estimate_tokens 高估），不会击穿上限。
@@ -664,6 +667,11 @@ def load_config_store(path="config.json", cards_dir="cards"):
     # 读盘后解密 key 字段（dpapi: 前缀 → DPAPI 解开；旧明文原样保留），
     # 内存态 cfg 全为明文，引擎/UI 零改动
     cfg = _decrypt_cfg_keys(cfg)
+
+    # vision_max_tokens → reply_max_tokens 一次性改名迁移（单键化：两链路
+    # 共用的回复长度上限不再挂视觉键名——老配置不丢值，写回后旧键消失）
+    if "vision_max_tokens" in cfg and "reply_max_tokens" not in cfg:
+        cfg["reply_max_tokens"] = cfg.pop("vision_max_tokens")
 
     cfg = migrate_config(cfg, cards_dir)
     # AI 参数默认补全：投影只重建 provider 相关键，cooldown/

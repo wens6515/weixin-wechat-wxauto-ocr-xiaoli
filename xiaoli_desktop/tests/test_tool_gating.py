@@ -36,7 +36,7 @@ def _make_bot(voice_mode="off", profile=None, web_search=True):
     bot.vision_api_key = "k"
     bot.chat_model = "test-model"
     bot.chat_temperature = 0.7
-    bot.vision_max_tokens = REPLY_MAX_TOKENS
+    bot.reply_max_tokens = REPLY_MAX_TOKENS
     bot._model_lock = threading.RLock()
     bot.memory_compress_enabled = False
     bot.memory_deep_enabled = False

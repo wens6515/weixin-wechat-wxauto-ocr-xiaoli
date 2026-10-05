@@ -218,7 +218,7 @@ class TestSetReminderTool(unittest.TestCase):
         bot_with.system_prompt = "p"
         bot_with.chat_model = "m"
         bot_with.chat_temperature = 0.7
-        bot_with.vision_max_tokens = 100
+        bot_with.reply_max_tokens = 100
         bot_with._model_lock = threading.RLock()
         bot_with._memory_lock = threading.RLock()
         bot_with._deep_count = {}
@@ -239,7 +239,7 @@ class TestSetReminderTool(unittest.TestCase):
         bot_without.system_prompt = "p"
         bot_without.chat_model = "m"
         bot_without.chat_temperature = 0.7
-        bot_without.vision_max_tokens = 100
+        bot_without.reply_max_tokens = 100
         bot_without._model_lock = threading.RLock()
         bot_without._memory_lock = threading.RLock()
         bot_without._deep_count = {}

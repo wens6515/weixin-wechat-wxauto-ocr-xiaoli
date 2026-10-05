@@ -849,6 +849,7 @@ async function loadModels() {
   fillProvSelect(card?.chat_provider || (S.providers[0] || {}).id,
     card?.chat_model || "");
   $("#edCtxBudget").value = (S.misc || {}).max_context_tokens ?? 100000;
+  $("#edReplyTokens").value = (S.misc || {}).reply_max_tokens ?? 400;
 }
 function renderProvTable() {
   const tb = $("#provTbody");
@@ -914,8 +915,15 @@ async function saveProviders() {
   S.providers = r.providers || provs;
   renderProvTable();
   const budget = parseInt($("#edCtxBudget").value) || 100000;
-  const cr = await API.save_config({ max_context_tokens: budget });
-  if (cr.ok && S.misc) S.misc.max_context_tokens = budget;
+  const replyCap = parseInt($("#edReplyTokens").value) || 400;
+  const cr = await API.save_config({
+    max_context_tokens: budget,
+    reply_max_tokens: replyCap,
+  });
+  if (cr.ok && S.misc) {
+    S.misc.max_context_tokens = budget;
+    S.misc.reply_max_tokens = replyCap;
+  }
   toast(cr.ok ? "已保存并应用 ✓" : "模型已保存，上下文预算保存失败", cr.ok ? "ok" : "err");
 }
 $("#btnProvSave").addEventListener("click", saveProviders);

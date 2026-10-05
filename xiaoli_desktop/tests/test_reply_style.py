@@ -61,7 +61,7 @@ def _build_bot(memory_dir, persona="你是小漓，蓝色大肥鱼。"):
     bot.chat_model = "test-model"
     bot.chat_temperature = 0.7
     bot.chat_top_p = 0.9
-    bot.vision_max_tokens = REPLY_MAX_TOKENS
+    bot.reply_max_tokens = REPLY_MAX_TOKENS
     bot.reply_max_tokens = REPLY_MAX_TOKENS
     bot.api_timeout = 60
     bot._model_lock = threading.RLock()
@@ -205,7 +205,7 @@ class TestMaxTokens(_BotCase):
         bot = self.bot()
         captured = self.capture_payloads(bot)
         bot.call_vision_api([{"type": "text", "text": "你好"}])
-        self.assertEqual(captured[0]["max_tokens"], bot.vision_max_tokens)
+        self.assertEqual(captured[0]["max_tokens"], bot.reply_max_tokens)
 
     def test_chat_max_tokens_falls_back_to_constant(self):
         """__new__ 构造（无 __init__）的 bot 也必须有限额，不能压根不发。"""

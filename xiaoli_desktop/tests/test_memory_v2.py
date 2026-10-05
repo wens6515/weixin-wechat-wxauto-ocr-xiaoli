@@ -319,7 +319,7 @@ class TestMessageLayout(unittest.TestCase):
         bot._model_lock = threading.RLock()
         bot.vision_api_url = "https://x"
         bot.vision_api_key = "k"
-        bot.vision_max_tokens = 10000
+        bot.reply_max_tokens = 10000
         bot.chat_top_p = 0.9
         bot.api_url = "https://x"
         bot.api_key = "k"

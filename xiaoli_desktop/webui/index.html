@@ -330,6 +330,7 @@
           </div>
           <div class="form-grid">
             <label class="form-item grow"><span>上下文预算（token，超限自动裁最旧历史，大上下文模型可调高）</span><input id="edCtxBudget" type="number" min="1000" step="1000" placeholder="100000"></label>
+            <label class="form-item grow"><span>回复长度上限（token，含推理模型的思考 token，思考模型建议 1000+）</span><input id="edReplyTokens" type="number" min="100" step="50" placeholder="400"></label>
           </div>
           <div class="editor-actions"><button class="mini-btn" id="btnModelSave">保存模型配置</button></div>
         </div>
