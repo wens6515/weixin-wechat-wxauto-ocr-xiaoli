@@ -133,7 +133,7 @@ class TestConditionWatcher(unittest.TestCase):
     def test_absent_scope_rain_present_not_met(self):
         """等雨停：当前时段仍有雨 → 未达成（未来预报里的晴不得误触发）。"""
         item = self._add()
-        with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_RAIN):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value=MIXED_PAGE_RAIN):
             self.w._scan_once()
         self.assertEqual(self._drain_events(), [])
         rec = self.bot.reminders.list_conditions(active_only=False)[0]
@@ -143,7 +143,7 @@ class TestConditionWatcher(unittest.TestCase):
 
     def test_absent_scope_rain_gone_met(self):
         item = self._add()
-        with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_SUNNY):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value=MIXED_PAGE_SUNNY):
             self.w._scan_once()
         evs = self._drain_events()
         self.assertEqual(len(evs), 1)
@@ -160,7 +160,7 @@ class TestConditionWatcher(unittest.TestCase):
         间隔内不会重试——这里推进时钟模拟连续多轮失败）。"""
         item = self._add()
         now = time.time()
-        with mock.patch("xiaoli_bot.web_fetch", return_value="改版后的页面没有时间标记"):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value="改版后的页面没有时间标记"):
             for i in range(WATCH_MAX_FAILS):
                 rows = self.bot.reminders.list_conditions()
                 self.w._check_once(rows[0], now + i * 120)
@@ -173,7 +173,7 @@ class TestConditionWatcher(unittest.TestCase):
     def test_fetch_error_counts_as_fail(self):
         item = self._add()
         import requests
-        with mock.patch("xiaoli_bot.web_fetch",
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch",
                         side_effect=requests.exceptions.ConnectTimeout()):
             self.w._scan_once()
         rec = self.bot.reminders.list_conditions()[0]
@@ -182,7 +182,7 @@ class TestConditionWatcher(unittest.TestCase):
     def test_present_local_met(self):
         item = self._add(condition="有货", match_type="present",
                          met_keywords=["有货"], scope_start=None, scope_end=None)
-        with mock.patch("xiaoli_bot.web_fetch",
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch",
                         return_value="商品页 现货充足 有货 下单吧"):
             self.w._scan_once()
         evs = self._drain_events()
@@ -193,7 +193,7 @@ class TestConditionWatcher(unittest.TestCase):
         """absent 判定的空壳页守卫：片段过短不得判「已消失」（防验证页
         误触发达成）。"""
         item = self._add(scope_start=None, scope_end=None)
-        with mock.patch("xiaoli_bot.web_fetch", return_value="加载中"):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value="加载中"):
             self.w._scan_once()
         self.assertEqual(self._drain_events(), [])
         self.assertEqual(
@@ -212,7 +212,7 @@ class TestConditionWatcher(unittest.TestCase):
                     '{"met": true, "reason": "页面显示晴"}'}}]}
 
         self.bot._post_chat_completions = fake_post
-        with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_SUNNY):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value=MIXED_PAGE_SUNNY):
             self.w._scan_once()
         self.assertEqual(captured["label"], "watch")
         self.assertIn("雨停了", captured["payload"]["messages"][1]["content"])
@@ -224,7 +224,7 @@ class TestConditionWatcher(unittest.TestCase):
         item = self._add(judge="api", met_keywords=None)
         self.bot._post_chat_completions = lambda *a, **k: {
             "choices": [{"message": {"content": "不是JSON"}}]}
-        with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_SUNNY):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value=MIXED_PAGE_SUNNY):
             self.w._scan_once()
         self.assertEqual(self._drain_events(), [])
         self.assertEqual(
@@ -234,7 +234,7 @@ class TestConditionWatcher(unittest.TestCase):
         """固定截止（非倒计时）：expire_at 一过即到期回递，最后尽力抓一次
         页面当「到期时的状况」。"""
         item = self._add(expire_at=time.time() - 1)
-        with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_RAIN):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value=MIXED_PAGE_RAIN):
             self.w._scan_once()
         evs = self._drain_events()
         self.assertEqual(len(evs), 1)
@@ -260,12 +260,12 @@ class TestConditionWatcher(unittest.TestCase):
         （轮询闸 = 开关 or 存在条目——per-chat 强制开创建的条目本身就是
         事实源，见 _state_watch_polling_active。）"""
         self.bot.state_watch_enabled = False
-        with mock.patch("xiaoli_bot.web_fetch") as mf:
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch") as mf:
             self._run_briefly(self.bot)
         mf.assert_not_called()
         # 手动驱动 _scan_once（绕过 run 的闸门）确认数据本身可扫
         self._add()
-        with mock.patch("xiaoli_bot.web_fetch", return_value=MIXED_PAGE_RAIN):
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch", return_value=MIXED_PAGE_RAIN):
             self.w._scan_once()
         self.assertEqual(len(self.bot.reminders.list_conditions()), 1)
 
@@ -274,7 +274,7 @@ class TestConditionWatcher(unittest.TestCase):
         截止即走到期回递（由 _scan_once 的过期分支保证，另测）。"""
         self._add()
         self.bot.paused = True
-        with mock.patch("xiaoli_bot.web_fetch") as mf:
+        with mock.patch("xiaoli_app.bot_daemons.web_fetch") as mf:
             self._run_briefly(self.bot)
         mf.assert_not_called()
 
