@@ -89,7 +89,7 @@ class TestUsageStore(unittest.TestCase):
                                       "prompt": 0, "completion": 0,
                                       "latency_sum": 0.0, "cache_hit": 0,
                                       "cache_miss": 0, "reasoning": 0,
-                                      "total": 0})
+                                      "total": 0, "est_calls": 0})
 
     def test_record_cache_fields_and_hit_ratio(self):
         """缓存字段透传 + 命中率聚合；无缓存数据显示「无数据」（None）而非 0%。"""

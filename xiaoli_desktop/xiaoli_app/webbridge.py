@@ -910,14 +910,15 @@ class BridgeApi:
             by_model.append({"model": model, "calls": b["calls"],
                              "prompt": b["prompt"], "completion": b["completion"],
                              "fail": b["fail"], "cache": hit_ratio(b),
-                             "avg_reply": avg})
-        # 近 7 天按天按模型调用量（排除端到端耗时记录 kind=reply）
+                             "avg_reply": avg, "est": b.get("est_calls", 0)})
+        # 近 7 天按天按模型调用量（排除端到端耗时记录 kind=reply 与本地
+        # 估算行 src=est——折线图只画实测口径）
         import datetime
         day_names = [(datetime.date.today() - datetime.timedelta(days=i))
                      .isoformat() for i in range(6, -1, -1)]
         day_model = {d: {} for d in day_names}
         for r in records:
-            if r.get("kind") == "reply":
+            if r.get("kind") == "reply" or r.get("src") == "est":
                 continue
             day = str(r.get("ts") or "")[:10]
             if day in day_model and r.get("model"):

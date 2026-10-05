@@ -21,6 +21,11 @@ BACKOFF_BASE = 1.0            # 指数退避起始秒数：1s → 2s → 4s …
 BACKOFF_CAP = 8.0             # 单次退避封顶
 API_WALL_BUDGET_DEFAULT = 45  # 墙钟预算默认值：重试总时长封顶，杜绝「超时×重试」叠成分钟级等待
 
+# est 兜底口径：每张图的固定占位 token（真实成本随模型/分辨率差异极大，
+# base64 字符数完全不代表 token 数；该值只用于响应缺 usage 字段时的本地
+# 估算行，用量页以「≈」标示与实测区分）
+IMAGE_EST_TOKENS = 1000
+
 
 class ApiCallError(Exception):
     """LLM API 调用最终失败（4xx 不可重试 / Retry-After 过长 / 重试耗尽 / 预算用尽）。
@@ -105,6 +110,26 @@ def _trim_blocks(blocks, keep):
     return out
 
 
+def _messages_estimate_tokens(messages):
+    """meta 消息列表的 prompt token 估算（响应缺 usage 字段时的兜底）。
+
+    多模态块列表：text 块正常估算，image_url 等非文本块按固定占位计
+    （IMAGE_EST_TOKENS）——按 base64 字符数估算会高出几个数量级。
+    """
+    total = 0
+    for m in messages or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, list):
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    total += estimate_tokens(str(b.get("text") or ""))
+                else:
+                    total += IMAGE_EST_TOKENS
+        else:
+            total += estimate_tokens(str(content or ""))
+    return total
+
+
 def fit_messages_in_budget(messages, budget=100000, reserve=2000):
     """把 messages 裁剪到 token 预算内（从最旧的非 system 消息开始丢弃）。
 
@@ -183,7 +208,8 @@ class LlmClient:
         wall_budget = float(wall_budget)
         deadline = time.monotonic() + wall_budget
         attempts = int(retry) + 1
-        latency_ms = 0.0
+        latency_ms = 0.0      # 全程累计（含退避）：失败时记录 = 用户真实等待
+        attempt_ms = 0.0      # 成功那一次尝试的净耗时（成功记录用这个）
         last_desc = "未发起请求"
         status = None
         for attempt in range(attempts):
@@ -199,13 +225,15 @@ class LlmClient:
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
             except requests.exceptions.RequestException as e:
-                latency_ms += (time.monotonic() - started) * 1000.0
+                attempt_ms = (time.monotonic() - started) * 1000.0
+                latency_ms += attempt_ms
                 last_desc = f"网络异常 {type(e).__name__}: {e}"
                 logger.warning(f"[{label}] {last_desc}（第 {attempt + 1} 次）")
                 retryable = True
             else:
                 status = resp.status_code
-                latency_ms += (time.monotonic() - started) * 1000.0
+                attempt_ms = (time.monotonic() - started) * 1000.0
+                latency_ms += attempt_ms
                 if status == 200:
                     try:
                         data = resp.json()
@@ -214,8 +242,10 @@ class LlmClient:
                         logger.warning(f"[{label}] {last_desc}")
                         retryable = True
                     else:
+                        # 成功记录只计成功尝试的净耗时——退避等待与失败尝试
+                        # 的耗时不算进「调用耗时」，否则重试后平均耗时虚高
                         self._finish_usage(meta, ok=True, status=200,
-                                           latency_ms=latency_ms, data=data)
+                                           latency_ms=attempt_ms, data=data)
                         return data
                 else:
                     last_desc = f"HTTP {status}: {(getattr(resp, 'text', '') or '')[:200]}"
@@ -267,8 +297,7 @@ class LlmClient:
             prompt_t = usage.get("prompt_tokens")
             completion_t = usage.get("completion_tokens")
             if prompt_t is None and meta.get("messages"):
-                prompt_t = estimate_tokens("".join(
-                    str(m.get("content") or "") for m in meta["messages"]))
+                prompt_t = _messages_estimate_tokens(meta["messages"])
             if completion_t is None and data:
                 try:
                     completion_t = estimate_tokens(

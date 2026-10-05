@@ -987,7 +987,7 @@ async function loadUsage() {
   const tb = $("#modelTbody");
   tb.innerHTML = (r.by_model || []).map((m) => `<tr>
     <td>${esc(m.model)}</td><td class="baloo">${m.calls}</td>
-    <td class="baloo">${fmtTokens(m.prompt + m.completion)}</td>
+    <td class="baloo">${fmtTokens(m.prompt + m.completion)}${m.est ? ` <span title="${m.est} 条为本地估算（响应未带 usage）">≈</span>` : ""}</td>
     <td class="baloo">${m.cache != null ? (m.cache * 100).toFixed(0) + "%" : "—"}</td>
     <td class="baloo">${m.avg_reply != null ? m.avg_reply.toFixed(1) + "s" : "—"}</td></tr>`).join("")
     || `<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:16px">暂无数据</td></tr>`;
