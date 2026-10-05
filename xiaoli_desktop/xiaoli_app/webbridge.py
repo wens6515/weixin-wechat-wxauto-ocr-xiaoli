@@ -952,6 +952,109 @@ class BridgeApi:
     def clear_usage(self) -> dict:
         return {"ok": bool(UsageStore().clear())}
 
+    # ---------- 语音自检 ----------
+
+    def _voice_ready_report(self):
+        """语音就绪判定（与 wechat_bot._voice_profile_ready 同口径：端点 +
+        激活档案 + 「通用」参考齐全）。返回 (profile or None, missing 列表)。
+        读 ctx.cfg 现值——save_config 落盘前已热写同一份 dict，设置页保存
+        即时反映。"""
+        cfg = self.ctx.cfg
+        if not str(cfg.get("tts_endpoint") or "").strip():
+            return None, ["未配置 TTS 端点"]
+        pid = str(cfg.get("active_voice_profile_id") or "")
+        profile = next((p for p in (cfg.get("voice_profiles") or [])
+                        if isinstance(p, dict) and str(p.get("id") or "") == pid),
+                       None)
+        if profile is None:
+            return None, ["未激活任何音色档案"]
+        base = (profile.get("refs") or {}).get("通用") or {}
+        missing = []
+        if not str(base.get("ref_audio_path") or "").strip():
+            missing.append("「通用」参考音频路径")
+        if not str(base.get("prompt_text") or "").strip():
+            missing.append("「通用」参考文本稿")
+        if missing:
+            return None, missing
+        return profile, []
+
+    @_safe
+    def voice_ready(self) -> dict:
+        """语音就绪状态灯（纯本地判定，零 API）。"""
+        profile, missing = self._voice_ready_report()
+        return {"ok": True, "ready": profile is not None, "missing": missing}
+
+    @_safe
+    def voice_selftest(self) -> dict:
+        """语音自检（长操作：daemon 线程 + push('voice_test') 回传）。
+
+        先按就绪口径逐项报缺什么；全齐则用激活档案的「通用」参考真实合成
+        一句问候，wav 以 base64 data URI 回传前端试听——用户当场验证自己
+        接入的 TTS 服务是否可用（合成失败同样回传明确原因）。"""
+        if getattr(self, "_voice_testing", False):
+            return {"ok": False, "error": "自检已在进行中"}
+        self._voice_testing = True
+
+        def worker():
+            try:
+                profile, missing = self._voice_ready_report()
+                if profile is None:
+                    self.push("voice_test",
+                              {"ok": False, "ready": False,
+                               "message": "语音未就绪：缺 " + "、".join(missing)})
+                    return
+                from .tts import GptSovitsClient, TtsError, wav_duration_seconds
+                client = GptSovitsClient(
+                    str(self.ctx.cfg.get("tts_endpoint") or ""),
+                    timeout=max(10, int(self.ctx.cfg.get("tts_timeout_seconds", 120))))
+                wav = client.synthesize("你好呀，我是小漓！", profile["refs"]["通用"])
+                dur = wav_duration_seconds(wav)
+                audio = ("data:audio/wav;base64,"
+                         + base64.b64encode(wav).decode("ascii"))
+                self.push("voice_test", {"ok": True, "ready": True,
+                                         "duration": round(dur, 1), "audio": audio})
+            except Exception as e:
+                self.push("voice_test",
+                          {"ok": False, "ready": False,
+                           "message": f"合成失败：{e}"})
+            finally:
+                self._voice_testing = False
+
+        threading.Thread(target=worker, daemon=True,
+                         name="xiaoli-voice-test").start()
+        return {"ok": True, "started": True}
+
+    # ---------- 任务桥（任务页） ----------
+
+    @_safe
+    def list_tasks(self) -> dict:
+        """任务目录扫描（与 CLI task-status 共用 task_bridge.scan_task_status）：
+        waiting/done 来自顶层任务目录，archived 来自 sent/ 归档。"""
+        from .task_bridge import scan_task_status
+        tasks_dir = str(self.ctx.cfg.get("tasks_dir") or "").strip()
+        entries, waiting, done, archived = scan_task_status(tasks_dir)
+        rows = [{"name": n, "state": st, "desc": desc, "mtime": mt}
+                for (n, st, desc, mt) in entries]
+        return {"ok": True, "rows": rows, "waiting": waiting, "done": done,
+                "archived": archived, "tasks_dir": tasks_dir}
+
+    @_safe
+    def delete_task(self, name: str) -> dict:
+        """删除任务目录（waiting/done = 顶层；archived = sent/ 下的归档）。
+        前端必须先经用户确认；名字做路径安全校验（裸目录名，拒绝 sent 与
+        隐藏项），防拼接逃逸出任务根目录。"""
+        import shutil
+        tasks_dir = str(self.ctx.cfg.get("tasks_dir") or "").strip()
+        name = str(name or "").strip()
+        if not tasks_dir or not name or os.path.basename(name) != name \
+                or name == "sent" or name.startswith("."):
+            return {"ok": False, "error": "非法任务名"}
+        target = os.path.join(tasks_dir, name)
+        if not os.path.isdir(target):
+            return {"ok": False, "error": "任务目录不存在"}
+        shutil.rmtree(target, ignore_errors=True)
+        return {"ok": True, "deleted": name}
+
     # ---------- 环境 / 天枢 / 更新 / 首轮提示词 ----------
 
     @_safe

@@ -99,7 +99,7 @@ let curKey = "home";
 const PAGE_LOADERS = {
   usage: () => loadUsage(), cards: () => loadCards(),
   models: () => loadModels(), memory: () => loadMemory(),
-  logs: () => initLogPage(),
+  logs: () => initLogPage(), tasks: () => loadTasks(),
 };
 
 function indicatorMode() {
@@ -996,6 +996,38 @@ async function loadUsage() {
   S.lastTrend = { calls, days: r.days };
   drawTrend(calls, r.days);
 }
+async function loadTasks() {
+  const r = await API.list_tasks();
+  if (!r.ok) return;
+  $("#taskWaiting").textContent = r.waiting ?? 0;
+  $("#taskDone").textContent = r.done ?? 0;
+  $("#taskArchived").textContent = r.archived ?? 0;
+  $("#taskDirHint").textContent = r.tasks_dir || "（任务目录未配置）";
+  const badge = { waiting: ["⏳ 天枢处理中", ""], done: ["✅ 已完成待回传", "ok"],
+                  archived: ["📦 已归档", ""] };
+  const tb = $("#taskTbody");
+  tb.innerHTML = (r.rows || []).map((t) => {
+    const [label, cls] = badge[t.state] || [t.state, ""];
+    return `<tr>
+      <td class="baloo">${esc(t.name)}</td>
+      <td><span class="test-result ${cls}">${label}</span></td>
+      <td>${esc(t.desc || "—")}</td>
+      <td>${esc(t.mtime || "—")}</td>
+      <td><button class="row-del" data-task="${esc(t.name)}" title="删除该任务目录"><svg class="ic"><use href="#i-trash"/></svg></button></td>
+    </tr>`;
+  }).join("")
+    || `<tr><td colspan="5" style="color:var(--muted);text-align:center;padding:16px">还没有任务</td></tr>`;
+  $$("#taskTbody .row-del").forEach((btn) => btn.addEventListener("click", async () => {
+    const name = btn.dataset.task;
+    if (!(await confirmModal("删除任务",
+        `确定删除任务「${name}」及其全部文件（含附件/成果/归档记录）？`))) return;
+    const dr = await API.delete_task(name);
+    toast(dr.ok ? "任务已删除 ✓" : "删除失败：" + (dr.error || ""), dr.ok ? "ok" : "err");
+    if (dr.ok) loadTasks();
+  }));
+}
+$("#btnTaskRefresh").addEventListener("click", loadTasks);
+
 function drawTrend(calls, dayLabels) {
   const svg = $("#trendChart");
   if (!svg || !calls?.length) return;
@@ -1234,7 +1266,41 @@ function refreshSettings() {
   $("#spVoiceTimeout").value = v.tts_timeout_seconds ?? 120;
   $("#edVoiceEndpoint").value = v.tts_endpoint || "";
   renderVoiceProfiles();
+  updateVoiceReady();
   reloadOvrChats();
+}
+async function updateVoiceReady() {
+  const chip = $("#voiceReadyChip");
+  if (!chip) return;
+  const r = await API.voice_ready();
+  if (!r.ok) { chip.textContent = ""; return; }
+  if (r.ready) {
+    chip.textContent = "✓ 语音已就绪";
+    chip.className = "test-result ok";
+  } else {
+    chip.textContent = "✗ 未就绪";
+    chip.className = "test-result bad";
+  }
+}
+$("#btnVoiceTest").addEventListener("click", async () => {
+  const r = await API.voice_selftest();
+  if (!r.ok) { toast(r.error || "无法开始自检", "err"); return; }
+  toast("自检中……正在用「通用」参考合成一句问候", "");
+});
+function onVoiceTestResult(p) {
+  if (!p.ok) {
+    toast(p.message || "自检失败", "err");
+    updateVoiceReady();
+    return;
+  }
+  toast(`自检通过 ✓ 合成 ${p.duration}s，试听中`, "ok");
+  try {
+    const audio = new Audio(p.audio);
+    audio.play();
+  } catch (e) {
+    toast("合成成功，但本机无法播放音频", "err");
+  }
+  updateVoiceReady();
 }
 $("#btnMemSave").addEventListener("click", async () => {
   const stepRaw = parseInt($("#spRollStep").value, 10);
@@ -1534,6 +1600,8 @@ onPush((evt, p) => {
     onInstallProgress(p);
   } else if (evt === "prompt") {
     toast(p.message || (p.ok ? "已发送" : "发送失败"), p.ok ? "ok" : "err");
+  } else if (evt === "voice_test") {
+    onVoiceTestResult(p);
   }
 });
 
