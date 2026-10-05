@@ -803,8 +803,8 @@ class TestImageCaptureBranches(unittest.TestCase):
         """查看器打开（真图片）→ 复制 helper + 恰好一次 ESC，不裁剪。"""
         from unittest import mock as _mock
         bot = self._bot()
-        with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch("wechat_bot.find_window_by_title",
+        with _mock.patch("xiaoli_app.media_capture.pyautogui") as pg, \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title",
                          return_value=object()) as fw, \
              _mock.patch.object(bot, "_copy_image_from_viewer",
                                 return_value="/tmp/orig.jpg") as copy, \
@@ -822,8 +822,8 @@ class TestImageCaptureBranches(unittest.TestCase):
         """查看器没开（表情包）→ 绝不 ESC/Ctrl+C，按媒体矩形裁剪。"""
         from unittest import mock as _mock
         bot = self._bot()
-        with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch("wechat_bot.find_window_by_title", return_value=None), \
+        with _mock.patch("xiaoli_app.media_capture.pyautogui") as pg, \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title", return_value=None), \
              _mock.patch.object(bot, "_copy_image_from_viewer") as copy, \
              _mock.patch.object(bot, "_crop_media_region",
                                 return_value="/tmp/sticker.jpg") as crop:
@@ -838,8 +838,8 @@ class TestImageCaptureBranches(unittest.TestCase):
         """查看器开了但剪贴板为空 → 先 ESC 关查看器（防遮挡）再裁剪。"""
         from unittest import mock as _mock
         bot = self._bot()
-        with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch("wechat_bot.find_window_by_title",
+        with _mock.patch("xiaoli_app.media_capture.pyautogui") as pg, \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title",
                          return_value=object()), \
              _mock.patch.object(bot, "_copy_image_from_viewer",
                                 return_value=None), \
@@ -856,8 +856,8 @@ class TestImageCaptureBranches(unittest.TestCase):
         bot = self._bot()
         bot.wx.media_screen_boxes.return_value = [(100, 200, 220, 320),
                                                   (100, 400, 220, 520)]
-        with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch("wechat_bot.find_window_by_title",
+        with _mock.patch("xiaoli_app.media_capture.pyautogui") as pg, \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title",
                          return_value=object()), \
              _mock.patch.object(bot, "_copy_image_from_viewer",
                                 side_effect=["/tmp/a.jpg", "/tmp/b.jpg"]), \
@@ -872,8 +872,8 @@ class TestImageCaptureBranches(unittest.TestCase):
         """min_top 与 exclude_rows 原样透传后端（图标碎片过滤在视觉层执行）。"""
         from unittest import mock as _mock
         bot = self._bot()
-        with _mock.patch("wechat_bot.pyautogui"), \
-             _mock.patch("wechat_bot.find_window_by_title", return_value=None):
+        with _mock.patch("xiaoli_app.media_capture.pyautogui"), \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title", return_value=None):
             bot._capture_media_images("林小满", min_top=456,
                                       exclude_rows=[(915, 985)])
         bot.wx.media_screen_boxes.assert_called_once_with(
@@ -885,8 +885,8 @@ class TestImageCaptureBranches(unittest.TestCase):
         bot = self._bot()
         bot.wx.media_screen_boxes.return_value = [(100, 200, 220, 320),
                                                   (100, 400, 220, 520)]
-        with _mock.patch("wechat_bot.pyautogui"), \
-             _mock.patch("wechat_bot.find_window_by_title", return_value=None), \
+        with _mock.patch("xiaoli_app.media_capture.pyautogui"), \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title", return_value=None), \
              _mock.patch.object(bot, "_copy_image_from_viewer"), \
              _mock.patch.object(bot, "_crop_media_region",
                                 side_effect=[None, "/tmp/b.jpg"]) as crop:
@@ -902,10 +902,10 @@ class TestImageCaptureBranches(unittest.TestCase):
         shot.width, shot.height = 800, 1000
         crop_img = _mock.MagicMock()
         shot.crop.return_value = crop_img
-        with _mock.patch("wechat_bot.pyautogui") as pg, \
-             _mock.patch("wechat_bot.find_window_by_title", return_value=1), \
-             _mock.patch("wechat_bot.ensure_window_visible"), \
-             _mock.patch("wechat_bot.window_rect",
+        with _mock.patch("xiaoli_app.media_capture.pyautogui") as pg, \
+             _mock.patch("xiaoli_app.media_capture.find_window_by_title", return_value=1), \
+             _mock.patch("xiaoli_app.media_capture.ensure_window_visible"), \
+             _mock.patch("xiaoli_app.media_capture.window_rect",
                          return_value=(1000, 500, 800, 1000)), \
              _mock.patch.object(bot, "_save_screenshot_compressed",
                                 return_value=123):
