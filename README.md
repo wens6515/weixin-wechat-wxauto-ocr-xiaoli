@@ -219,6 +219,7 @@ assets/                      # README 展示图（mascot / showcase-voice / soci
 | `tianshu_poll_interval` | 5 | 任务结果轮询间隔（秒） |
 | `file_send_method` | `clipboard` | 成果文件发送方式：clipboard（剪贴板，v2.1.0 唯一方式） |
 | `max_history` | 1000 | 单聊天保留的最大历史条数 |
+| `max_context_tokens` | 100000 | 单次请求上下文预算（估算 token，超限从最旧历史裁剪；模型页可改，大上下文模型可调高） |
 | `cooldown` | 3 | 回复冷却（秒） |
 | `api_retry` | 2 | API 调用重试次数（429/5xx/网络异常；指数退避） |
 | `api_wall_budget` | 45 | 单次调用重试总时长封顶（秒），防止「超时×重试」叠成分钟级等待 |

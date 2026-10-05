@@ -328,6 +328,9 @@
             <label class="form-item grow"><span>模型</span><input id="cmbModel" type="text" list="modelList" placeholder="deepseek:deepseek-chat">
               <datalist id="modelList"></datalist></label>
           </div>
+          <div class="form-grid">
+            <label class="form-item grow"><span>上下文预算（token，超限自动裁最旧历史，大上下文模型可调高）</span><input id="edCtxBudget" type="number" min="1000" step="1000" placeholder="100000"></label>
+          </div>
           <div class="editor-actions"><button class="mini-btn" id="btnModelSave">保存模型配置</button></div>
         </div>
       </section>

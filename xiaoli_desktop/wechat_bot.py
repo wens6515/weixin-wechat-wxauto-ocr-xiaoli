@@ -365,6 +365,10 @@ class WeChatBot:
         self.reply_max_tokens = self.vision_max_tokens
         self.system_prompt = cfg.get("system_prompt", AI_DEFAULTS["system_prompt"])
         self.max_history = cfg.get("max_history", AI_DEFAULTS["max_history"])
+        # 上下文预算（chat/vision 两条链路共用的 fit_messages_in_budget 裁剪依据）
+        self.max_context_tokens = max(
+            1000, int(cfg.get("max_context_tokens",
+                              AI_DEFAULTS["max_context_tokens"])))
         self.cooldown = cfg.get("cooldown", AI_DEFAULTS["cooldown"])
         self.api_retry = cfg.get("api_retry", AI_DEFAULTS["api_retry"])
         self.api_timeout = cfg.get("api_timeout", AI_DEFAULTS["api_timeout"])
@@ -417,11 +421,7 @@ class WeChatBot:
         # feature_enabled（web_search/task/state_watch）与 voice_state（voice）
         self.chat_feature_overrides = dict(
             cfg.get("chat_feature_overrides") or {})
-        # 文件处理配置
-        self.file_model = strip_model_prefix(cfg.get("file_model", self.chat_model))
-        self.file_temp = cfg.get("file_temp", 1.0)
-        self.file_max_tokens = cfg.get("file_max_tokens", 10000)
-        self.file_prompt = cfg.get("file_prompt", self.system_prompt)
+        # 微信文件接收目录（对方发来的文件按显示名在此定位）
         self.file_storage_path = cfg.get("file_storage_path", "")
         # 图片消息点击偏移校准（竖图点击偏位时手动校正，格式 [dx, dy]，存 config.json）
         self.image_click_offset = cfg.get("image_click_offset", [0, 0])

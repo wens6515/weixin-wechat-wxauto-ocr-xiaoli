@@ -848,6 +848,7 @@ async function loadModels() {
   }
   fillProvSelect(card?.chat_provider || (S.providers[0] || {}).id,
     card?.chat_model || "");
+  $("#edCtxBudget").value = (S.misc || {}).max_context_tokens ?? 100000;
 }
 function renderProvTable() {
   const tb = $("#provTbody");
@@ -912,7 +913,10 @@ async function saveProviders() {
   if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
   S.providers = r.providers || provs;
   renderProvTable();
-  toast("已保存并应用 ✓", "ok");
+  const budget = parseInt($("#edCtxBudget").value) || 100000;
+  const cr = await API.save_config({ max_context_tokens: budget });
+  if (cr.ok && S.misc) S.misc.max_context_tokens = budget;
+  toast(cr.ok ? "已保存并应用 ✓" : "模型已保存，上下文预算保存失败", cr.ok ? "ok" : "err");
 }
 $("#btnProvSave").addEventListener("click", saveProviders);
 $("#btnModelSave").addEventListener("click", saveProviders);
@@ -1402,15 +1406,23 @@ $("#btnVoiceSave").addEventListener("click", async () => {
     const newRefs = {};
     $$("#voiceRefsTbody tr").forEach((tr) => {
       const emo = $("input[data-rf='emo']", tr);
-      if (!emo || emo.disabled) {
-        if (emo && emo.disabled && cur.refs["通用"]) newRefs["通用"] = cur.refs["通用"];
-        return;
-      }
-      newRefs[emo.value.trim() || "未命名"] = {
+      if (!emo) return;
+      const ref = {
         ref_audio_path: $("input[data-rf='audio']", tr).value.trim(),
         prompt_text: $("input[data-rf='text']", tr).value.trim(),
       };
+      // 通用行只有情绪名锁定，路径/文本稿照常收集——跳过会让通用永远
+      // 存不进去（新建档案的通用是空壳，表现为「填了就清空」）
+      if (emo.disabled) {
+        newRefs["通用"] = ref;
+        return;
+      }
+      newRefs[emo.value.trim() || "未命名"] = ref;
     });
+    // 表格渲染的是空态占位行（refs 为空）时没有通用行，保底不误删旧值
+    if (!("通用" in newRefs) && cur.refs && cur.refs["通用"]) {
+      newRefs["通用"] = cur.refs["通用"];
+    }
     cur.refs = newRefs;
   }
   const r = await API.save_config({

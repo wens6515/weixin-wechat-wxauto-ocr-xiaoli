@@ -211,6 +211,10 @@ AI_DEFAULTS = {
     "chat_temperature": 0.7,
     "chat_top_p": 0.9,
     "max_history": 1000,
+    # 单次请求上下文预算（估算 token，fit_messages_in_budget 裁剪依据）：
+    # 大文件/长历史用户按模型真实上下文调大（如 128K/1M 模型），超限仍从
+    # 最旧历史丢弃。估算偏保守（estimate_tokens 高估），不会击穿上限。
+    "max_context_tokens": 100000,
     "cooldown": 3,
     "api_retry": 2,
     "api_timeout": 60,

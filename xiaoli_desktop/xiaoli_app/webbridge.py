@@ -157,6 +157,7 @@ _ALLOWED_KEYS = {
     "font_scale", "wall_opacity", "blur_level",
     "memory_deep_enabled", "memory_compress_enabled", "memory_keep_recent",
     "memory_compress_batch", "memory_important_max", "memory_compress_model",
+    "max_context_tokens",
     "file_storage_path", "web_search_enabled", "web_proxy", "task_enabled",
     "state_watch_enabled",
     "voice_mode", "tts_endpoint", "tts_timeout_seconds", "voice_max_seconds",
@@ -169,7 +170,8 @@ _ALLOWED_KEYS = {
 _BOT_HOT_KEYS = {
     "web_search_enabled", "task_enabled", "state_watch_enabled",
     "memory_deep_enabled", "memory_compress_enabled", "memory_keep_recent",
-    "memory_compress_batch", "memory_important_max", "file_storage_path",
+    "memory_compress_batch", "memory_important_max", "max_context_tokens",
+    "file_storage_path",
     "voice_mode", "tts_endpoint", "voice_max_seconds", "voice_profiles",
     "active_voice_profile_id",
 }
@@ -432,6 +434,7 @@ class BridgeApi:
             "memory_compress_batch": cfg.get("memory_compress_batch", 30),
             "memory_important_max": cfg.get("memory_important_max", 20),
             "memory_compress_model": cfg.get("memory_compress_model", ""),
+            "max_context_tokens": cfg.get("max_context_tokens", 100000),
             "file_storage_path": cfg.get("file_storage_path", ""),
             "tasks_dir": cfg.get("tasks_dir", ""),
             "tianshu_workdir": cfg.get("tianshu_workdir", ""),
