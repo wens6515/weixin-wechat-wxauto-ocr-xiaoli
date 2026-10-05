@@ -151,6 +151,7 @@
     <!-- ======== 左侧导航 ======== -->
     <nav class="nav" id="nav">
       <button class="nav-item active" data-page="home"><svg class="ic"><use href="#i-home"/></svg><span>首页</span></button>
+      <button class="nav-item" data-page="tasks"><svg class="ic"><use href="#i-bridge"/></svg><span>任务</span></button>
       <button class="nav-item" data-page="cards"><svg class="ic"><use href="#i-user"/></svg><span>角色卡</span></button>
       <button class="nav-item" data-page="models"><svg class="ic"><use href="#i-cpu"/></svg><span>模型</span></button>
       <button class="nav-item" data-page="usage"><svg class="ic"><use href="#i-chart"/></svg><span>用量</span></button>
@@ -333,6 +334,27 @@
             <label class="form-item grow"><span>回复长度上限（token，含推理模型的思考 token，思考模型建议 1000+）</span><input id="edReplyTokens" type="number" min="100" step="50" placeholder="400"></label>
           </div>
           <div class="editor-actions"><button class="mini-btn" id="btnModelSave">保存模型配置</button></div>
+        </div>
+      </section>
+
+      <!-- ================= 任务页 ================= -->
+      <section class="page" data-page="tasks">
+        <h1 class="page-title">任务桥</h1>
+        <div class="glass sec-card">
+          <div class="card-title"><svg class="ic"><use href="#i-bridge"/></svg>任务流转
+            <span class="title-hint" id="taskDirHint"></span>
+            <button class="mini-btn ghost" id="btnTaskRefresh" style="margin-left:auto"><svg class="ic"><use href="#i-refresh"/></svg>刷新</button></div>
+          <div class="sum-grid" style="margin:14px 0">
+            <div class="glass sum-card"><span class="sum-k">天枢处理中</span><span class="sum-v baloo" id="taskWaiting">—</span></div>
+            <div class="glass sum-card"><span class="sum-k">已完成待回传</span><span class="sum-v baloo" id="taskDone">—</span></div>
+            <div class="glass sum-card"><span class="sum-k">已归档</span><span class="sum-v baloo" id="taskArchived">—</span></div>
+          </div>
+          <div class="prov-table-wrap">
+            <table class="model-table">
+              <thead><tr><th style="width:190px">任务 ID</th><th style="width:130px">状态</th><th>描述</th><th style="width:130px">时间</th><th style="width:44px"></th></tr></thead>
+              <tbody id="taskTbody"></tbody>
+            </table>
+          </div>
         </div>
       </section>
 
@@ -557,6 +579,13 @@
             <label class="form-item"><span>单段语音上限（秒）</span><input id="spVoiceMax" type="number" min="10" max="60"></label>
             <label class="form-item"><span>合成超时（秒）</span><input id="spVoiceTimeout" type="number" min="10" max="600"></label>
             <label class="form-item"><span>TTS 端点</span><input id="edVoiceEndpoint" type="text" placeholder="http://127.0.0.1:9880/tts"></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>就绪状态</b><small id="voiceReadyHint">端点 + 激活档案 + 「通用」参考齐全才会说话</small></div>
+            <div class="form-btns">
+              <span class="test-result" id="voiceReadyChip"></span>
+              <button class="mini-btn" id="btnVoiceTest">语音自检</button>
+            </div>
           </div>
           <div class="form-grid voice-profile-row">
             <label class="form-item"><span>音色档案</span><select id="cbVoiceProfile"></select></label>

@@ -130,6 +130,11 @@ const MOCK = (() => {
       return { ok: true, state: state.engine };
     },
     tail_log: () => ({ ok: true, lines: LOG_POOL }),
+    voice_ready: () => ({ ok: true, ready: true, missing: [] }),
+    voice_selftest: () => ({ ok: true, started: true }),
+    list_tasks: () => ({ ok: true, rows: [], waiting: 0, done: 0, archived: 0,
+                         tasks_dir: "D:\\演示\\wxauto" }),
+    delete_task: () => ({ ok: true }),
     get_config: () => ({ ok: true, ui: { ...state.cfgUI }, misc: { ...state.misc },
       voice: JSON.parse(JSON.stringify(state.voice)), overrides: JSON.parse(JSON.stringify(state.overrides)),
       active_card_id: state.active_card_id, first_run_needed: false,
