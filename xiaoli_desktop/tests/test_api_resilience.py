@@ -193,7 +193,7 @@ class TestEmptyModelFallback(unittest.TestCase):
         bot.vision_api_url = "https://api.test/v1/chat/completions"
         bot.vision_api_key = "test-key"
         bot.chat_temperature = 0.7
-        bot.vision_max_tokens = 1024
+        bot.reply_max_tokens = 1024
 
         def fake_post(url, headers, payload, timeout, label="api", meta=None):
             captured["model"] = payload["model"]
@@ -248,7 +248,7 @@ class TestUsageHook(unittest.TestCase):
         bot.vision_api_url = "https://api.test/v1/chat/completions"
         bot.vision_api_key = "test-key"
         bot.chat_temperature = 0.7
-        bot.vision_max_tokens = 1024
+        bot.reply_max_tokens = 1024
         with mock.patch("wechat_bot.requests.post", return_value=fake_resp(500)):
             out = bot.call_vision_api([{"type": "text", "text": "hi"}], chat_id=None)
         self.assertIsNone(out)

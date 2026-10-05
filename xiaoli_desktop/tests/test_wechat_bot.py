@@ -1122,7 +1122,7 @@ class TestCallVisionApi(unittest.TestCase):
         # 单模型化：call_vision_api 的 model 取 chat_model（无独立 vision_model）
         bot.chat_model = "deepseek-v4-flash"
         bot.chat_temperature = 0.7
-        bot.vision_max_tokens = 10000
+        bot.reply_max_tokens = 10000
         bot._model_lock = threading.RLock()
         bot._memory_lock = threading.RLock()
         bot._deep_count = {}
@@ -1659,7 +1659,7 @@ class TestVisionRouteImmersion(unittest.TestCase):
         bot.vision_api_key = "test-key"
         bot.chat_model = "test-model"
         bot.chat_temperature = 0.7
-        bot.vision_max_tokens = 10000
+        bot.reply_max_tokens = 10000
         bot._model_lock = threading.RLock()
         bot._memory_lock = threading.RLock()
         bot._deep_count = {}
@@ -1702,7 +1702,7 @@ class TestVisionRoutePersona(unittest.TestCase):
         bot.vision_api_key = "test-key"
         bot.chat_model = "deepseek-v4-flash"
         bot.chat_temperature = 0.7
-        bot.vision_max_tokens = 10000
+        bot.reply_max_tokens = 10000
         bot._model_lock = threading.RLock()
         bot._memory_lock = threading.RLock()
         bot._deep_count = {}

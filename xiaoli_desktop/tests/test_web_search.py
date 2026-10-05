@@ -369,7 +369,7 @@ def make_bot():
     bot._get_history = lambda chat_id: []
     bot.vision_api_url = bot.api_url
     bot.vision_api_key = bot.api_key
-    bot.vision_max_tokens = 100
+    bot.reply_max_tokens = 100
     return bot
 
 

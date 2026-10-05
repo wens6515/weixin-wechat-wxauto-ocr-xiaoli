@@ -322,13 +322,12 @@ class WeChatBot(MediaCaptureMixin):
         self.chat_model = strip_model_prefix(cfg["chat_model"])
         self.chat_temperature = cfg.get("chat_temperature", 0.7)
         self.chat_top_p = cfg.get("chat_top_p", 0.9)
-        # 单模型化后视觉调用随聊天链路：模型取 chat_model、温度取
-        # chat_temperature、system 取 system_prompt（vision_prompt/vision_temp
-        # 已随「图片复述」路径废弃删除）。vision_max_tokens 保留历史键名，
-        # 现在就是**两条链路共用的回复长度上限**（默认 REPLY_MAX_TOKENS，
-        # 见文件头常量）；chat 链路读 reply_max_tokens——同源赋值，不做两套默认。
-        self.vision_max_tokens = int(cfg.get("vision_max_tokens", REPLY_MAX_TOKENS))
-        self.reply_max_tokens = self.vision_max_tokens
+        # 回复长度物理上限：两条链路共用（历史键名 vision_max_tokens 已由
+        # config_store 一次性迁移到 reply_max_tokens——单键名，不再双语义）。
+        # 带推理的模型 max_tokens 包含思考 token，压太狠会出空回复（空
+        # content 已有降级保护），调高场景见 AI_DEFAULTS 注释。
+        self.reply_max_tokens = max(
+            100, int(cfg.get("reply_max_tokens", REPLY_MAX_TOKENS)))
         self.system_prompt = cfg.get("system_prompt", AI_DEFAULTS["system_prompt"])
         self.max_history = cfg.get("max_history", AI_DEFAULTS["max_history"])
         # 上下文预算（chat/vision 两条链路共用的 fit_messages_in_budget 裁剪依据）
@@ -1102,7 +1101,7 @@ class WeChatBot(MediaCaptureMixin):
         payload = {
             "model": model,
             "messages": messages,
-            "max_tokens": self.vision_max_tokens,
+            "max_tokens": self.reply_max_tokens,
             "temperature": temp,
             "tools": tools,
             "tool_choice": "auto",

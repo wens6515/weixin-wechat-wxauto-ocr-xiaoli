@@ -228,6 +228,12 @@ class TestRoundTrip(unittest.TestCase):
                   "system_prompt", "bot_nickname",
                   "chat_temperature", "chat_top_p", "max_history"):
             self.assertIn(k, cfg1, k)
+        # vision_max_tokens → reply_max_tokens 一次性改名迁移（单键化：
+        # 老配置不丢值，返回的 cfg 与写回的文件里旧键都不存在）
+        self.assertEqual(cfg1["reply_max_tokens"], 10000)
+        self.assertNotIn("vision_max_tokens", cfg1)
+        with open(self.cfg_path, "r", encoding="utf-8") as f:
+            self.assertNotIn("vision_max_tokens", f.read())
         # 单模型化：视觉端点沿用聊天端点（call_vision_api 的 model 取 chat_model）
         self.assertEqual(cfg1["vision_api_url"], cfg1["ai_api_url"])
         self.assertEqual(cfg1["vision_api_key"], cfg1["ai_api_key"])
