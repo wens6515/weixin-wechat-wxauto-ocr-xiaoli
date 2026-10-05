@@ -13,7 +13,8 @@ usage.jsonl.imported 留档（不删除，用户可回溯/手动清理）。导�
 幂等：库中已有数据只归档不再导入；导入半途失败不归档，下次完整重试。
 
 埋点位置：wechat_bot.WeChatBot._post_chat_completions 的终态分支（一个
-逻辑调用含内部重试只记一条，latency 为各次尝试之和）。
+逻辑调用含内部重试只记一条；latency 口径 = 成功时只计成功那次尝试的耗时
+（退避等待不计），失败时保留全程耗时——那反映的是用户真实等待）。
 """
 import json
 import logging
@@ -62,7 +63,7 @@ _COLS = ("ts, kind, model, prompt_tokens, completion_tokens, ok, status, "
 def _empty_bucket():
     return {"calls": 0, "ok": 0, "fail": 0, "prompt": 0, "completion": 0,
             "latency_sum": 0.0, "cache_hit": 0, "cache_miss": 0,
-            "reasoning": 0, "total": 0}
+            "reasoning": 0, "total": 0, "est_calls": 0}
 
 
 def hit_ratio(bucket):
@@ -233,7 +234,8 @@ class UsageStore:
                         "COALESCE(SUM(cache_hit), 0), "
                         "COALESCE(SUM(cache_miss), 0), "
                         "COALESCE(SUM(reasoning), 0), "
-                        "COALESCE(SUM(total_tokens), 0) "
+                        "COALESCE(SUM(total_tokens), 0), "
+                        "COALESCE(SUM(CASE WHEN src = 'est' THEN 1 ELSE 0 END), 0) "
                         "FROM usage WHERE kind IS NOT 'reply' AND ts >= ? "
                         "GROUP BY m, d",
                         (start,)).fetchall()
@@ -246,7 +248,7 @@ class UsageStore:
                     conn.close()
         except (sqlite3.Error, OSError):
             rows, replies = [], []
-        def _acc(bucket, calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt):
+        def _acc(bucket, calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt, est):
             bucket["calls"] += calls
             bucket["ok"] += ok_n
             bucket["fail"] += fail_n
@@ -257,13 +259,14 @@ class UsageStore:
             bucket["cache_miss"] += cm
             bucket["reasoning"] += rt
             bucket["total"] += tt
+            bucket["est_calls"] += est
 
-        for (_m, d, calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt) in rows:
-            _acc(total, calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt)
+        for (_m, d, calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt, est) in rows:
+            _acc(total, calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt, est)
             _acc(by_day.setdefault(d, _empty_bucket()),
-                 calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt)
+                 calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt, est)
             _acc(by_model.setdefault(_m, _empty_bucket()),
-                 calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt)
+                 calls, ok_n, fail_n, p, c, lat, ch, cm, rt, tt, est)
         for (m, cnt, lat) in replies:
             b = reply_by_model.setdefault(m, {"count": 0, "latency_sum": 0.0})
             b["count"] += cnt
