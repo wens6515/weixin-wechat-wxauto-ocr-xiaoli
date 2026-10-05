@@ -26,6 +26,12 @@ from wx_backend.visual_backend import (
     position_window_visible,
 )
 from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
+from xiaoli_app.file_text import (_FILE_TOKEN_LOOSE_RE, _FILE_TOKEN_RE,
+                                  _extract_file_name_token,
+                                  extract_file_display_name,
+                                  extract_file_text,
+                                  extract_office_com_text)
+from xiaoli_app.media_capture import MediaCaptureMixin
 from xiaoli_app.usage_store import UsageStore
 from xiaoli_app.tts import (GptSovitsClient, TtsError, strip_unspeakable,
                             synthesize_with_emotion, wav_duration_seconds)
@@ -159,18 +165,6 @@ FRIENDLY_API_ERROR_REPLIES = (
 )
 
 
-# 纯图/表情消息的 vision 单调用指令（与 xiaoli_bot.VISION_ROUTE_PROMPT 同一
-# 分流语义的纯图变体：看图后角色化回复，任务材料则投递）。历史缺陷：此路径
-# 曾用旧两段式时代的 vision_prompt（「专业图像描述AI，客观复述图片」），把
-# 复述文本当角色回复原样发出——已废弃统一到角色化链路。
-VISION_IMAGE_PROMPT = (
-    "有人给你发来了一张或多张图片（没有附带文字；多张时按发送顺序给出，"
-    "可能相互关联，请结合起来看）。照你平时的样子回他——可以评价、接梗、"
-    "回答图里的问题；如果图片明显是任务材料（如文档截图、带指令的截图、"
-    "需要处理的内容），调用 dispatch_task 工具把活交出去，任务描述写在工具参数里。"
-)
-
-
 # memory 键归一化 + memory.json v2 迁移 + 深层 jsonl 文件级操作已抽到
 # xiaoli_app.memory_store（文件瘦身）；同名 re-export 保持既有导入路径
 # （tests / 记忆管理页直接 from wechat_bot import 这些名字）。
@@ -185,36 +179,8 @@ from xiaoli_app.memory_store import (
 )
 
 
-_FILE_TOKEN_RE = re.compile(
-    r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]*?"
-    r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|jpe?g|gif|mp4|mp3)",
-    re.I)
-# 兜底：已知扩展名一个都没匹配到（OCR 把后缀读花，真机事故 xlsx→xIsx）时，
-# 用「字母开头的 2~5 位字母数字后缀」再扫一遍——主干 ≥2 字符、后缀首字符
-# 必须是字母，避免把文件大小「19.6K」（后缀 6K 以数字开头）当成文件名。
-# 只在文件卡片流程里用（strict 未命中才落到这里），误配由按名查找兜底。
-_FILE_TOKEN_LOOSE_RE = re.compile(
-    r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]+?"
-    r"\.(?:[A-Za-z][A-Za-z0-9]{1,4})(?![A-Za-z0-9])")
-
-
-def _extract_file_name_token(text):
-    """从 OCR 文本拆出干净文件名 token（含常见文档扩展名，去掉大小/图标字符）。
-
-    '部门简介+纳新宣传.docx 20.1K W' → '部门简介+纳新宣传.docx'
-    文件卡片 OCR 会把文件名、大小（20.1K 带小数点）、图标字符（W/P/?）读成
-    一串——整串当文件名传给 os.path.splitext 时，20.1K 的小数点会被误当
-    扩展名分隔符，导致主干匹配失败。先拆出真实文件名 token。
-
-    OCR 换行会把文件名切成两半（真机 '…二轮面 试评分表.xlsx'）——token 只
-    取到空格后那段是预期行为：_find_file_by_display_name 走主干子串匹配，
-    片段命中全名，容忍这种截断。后缀读花（xlsx → xIsx）时走宽松后缀兜底。
-    """
-    toks = _FILE_TOKEN_RE.findall(text or "")
-    if toks:
-        return toks[0]
-    toks = _FILE_TOKEN_LOOSE_RE.findall(text or "")
-    return toks[0] if toks else None
+# 文件名 token 提取/文件文本解析已拆至 xiaoli_app.file_text（re-export 保持
+# 既有导入路径：xiaoli_bot 与 tests 直接 from wechat_bot import 这些名字）。
 
 
 # OCR 对文件名里的分隔符常漏读（真机事故：磁盘名「小漓_深海小剧场.html」
@@ -339,7 +305,7 @@ def _tool_arg(tc, key):
     return str(args.get(key) or "").strip() if isinstance(args, dict) else ""
 
 
-class WeChatBot:
+class WeChatBot(MediaCaptureMixin):
     def __init__(self, cfg, stop_event=None, max_connect_retries=None):
         """stop_event：微信连接重试可被外部中断（GUI 引擎停止时用，None=不中断）。
         max_connect_retries：连接失败重试上限（None=无限重试，CLI 模式保留）；
@@ -1219,376 +1185,19 @@ class WeChatBot:
         方 finally 负责清理，覆写方需在返回前同步消费）。"""
         return None
 
-    # 视觉模型输入最长边上限：屏幕截图（可能 4K 全窗口）base64 直发体积过大
-    MAX_IMAGE_EDGE = 2048
-
-    def _save_screenshot_compressed(self, image, path):
-        """缩放 + JPEG 压缩保存截图（pillow 已在依赖）。返回文件字节数。
-        最长边超 MAX_IMAGE_EDGE 时等比缩放到上限内；PIL 不可用/失败时
-        退回原样 PNG 保存（保证图片处理链路不因压缩失败中断）。"""
-        try:
-            from PIL import Image
-            img = image.convert("RGB")
-            w, h = img.size
-            longest = max(w, h)
-            if longest > self.MAX_IMAGE_EDGE:
-                scale = self.MAX_IMAGE_EDGE / longest
-                img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
-                                 Image.LANCZOS)
-            img.save(path, format="JPEG", quality=88, optimize=True)
-        except Exception as e:
-            logger.error(f"[处理] 图片压缩失败，退回原样保存: {e}")
-            try:
-                image.save(path, format="PNG")
-            except Exception as e2:
-                logger.error(f"[处理] 退回保存也失败: {e2}")
-        return os.path.getsize(path) if os.path.isfile(path) else 0
-
-    def _capture_media_images(self, chat_name, min_top=None, exclude_rows=None):
-        """捕获消息区对方本轮全部新媒体，返回临时文件路径列表（时间正序）。
-
-        min_top：消息区 1x 下沿阈值（上层传 analyze_window 的 bot_bottom =
-        分析区上沿）——只捕获 top ≥ 阈值的媒体框，排除 bot 自己的历史媒体；
-        None = 不过滤（全量）。
-        exclude_rows：消息区 1x 坐标 y 区间 [(top, bottom), ...]，与该区间
-        垂直相交的媒体框剔除；保留仅为兼容旧调用——文件卡片的类型图标已在
-        像素层剔除（面板内部的框一律不算媒体），调用不再需要传。
-
-        每张独立走「点击 → 查看器判定分支」——微信 PC 每条消息各带一个
-        头像，多张图片是多个独立媒体框（连通域按背景缝隙切分，不会被粘连）：
-        - 真图片：点击打开「图片和视频」查看器 → Ctrl+C 复制原图进剪贴板
-          （CF_HDROP 原始分辨率，替代旧预览窗截屏——截屏受窗口尺寸/DPI
-          限制且被遮挡会截到遮挡物）→ ESC 关查看器。ESC 只在确认查看器
-          存在时才按（表情路径按 ESC 会关掉微信主窗口，真机事故）。剪贴板
-          为空（复制失败）→ 落表情路线兜底（先关查看器，避免遮挡裁剪区）
-        - 没开（表情包）：全程不碰 ESC/Ctrl+C，截微信主窗口按媒体矩形
-          裁剪表情本体送视觉模型（动图取当前帧）
-        单张失败（复制为空/裁剪越界/异常）跳过该张，不拖垮整批。
-
-        微信 RWTemp 临时文件生命周期不受控，复制一份到自己的临时文件再返回。
-        """
-        boxes_fn = getattr(self.wx, "media_screen_boxes", None)
-        rects = (boxes_fn(min_top=min_top, exclude_rows=exclude_rows)
-                 if boxes_fn is not None else [])
-        paths = []
-        for (ml, mt, mr, mb) in rects:
-            try:
-                pyautogui.click((ml + mr) // 2, (mt + mb) // 2)
-                time.sleep(1.0)  # 等预览窗打开
-                viewer_open = find_window_by_title("图片和视频") is not None
-                copied = self._copy_image_from_viewer() if viewer_open else None
-                if viewer_open:
-                    pyautogui.press('esc')  # 关查看器（确认存在才按，全库唯一 ESC 点）
-                    time.sleep(0.3)
-                if copied:
-                    paths.append(copied)
-                    continue
-                if viewer_open:
-                    logger.warning("[图片复制] 剪贴板复制失败，落表情路线兜底")
-                p = self._crop_media_region(ml, mt, mr, mb)
-                if p:
-                    paths.append(p)
-            except Exception as e:
-                logger.error(f"[图片捕获] 单张失败，跳过: {e}")
-        return paths
-
-    def _copy_image_from_viewer(self):
-        """查看器已打开时：Ctrl+C 复制原图 → 读剪贴板 → 返回临时文件路径。
-
-        不负责开关查看器（调用方确认存在并统一 ESC 关闭）；返回 None =
-        复制失败，调用方落表情路线。"""
-        tmp_path = None
-        try:
-            pyautogui.hotkey('ctrl', 'c')
-            time.sleep(0.5)
-            from PIL import ImageGrab
-            grabbed = ImageGrab.grabclipboard()
-            if isinstance(grabbed, (list, tuple)):
-                files = [x for x in grabbed
-                         if isinstance(x, str) and os.path.isfile(x)]
-                if not files:
-                    logger.warning("[图片复制] 剪贴板无有效文件路径")
-                    return None
-                import shutil
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
-                    tmp_path = tmpfile.name
-                shutil.copyfile(files[0], tmp_path)
-                return tmp_path
-            if grabbed is not None:
-                # 兜底：剪贴板直接是位图（非文件路径），压缩保存
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
-                    tmp_path = tmpfile.name
-                self._save_screenshot_compressed(grabbed, tmp_path)
-                return tmp_path
-            logger.warning("[图片复制] 剪贴板为空（可能未复制成功）")
-            return None
-        except Exception as e:
-            logger.error(f"[图片复制] 异常: {e}")
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
-            return None
-
-    def _crop_media_region(self, ml, mt, mr, mb):
-        """表情路线：截微信主窗口并按媒体矩形裁剪表情本体，返回临时文件路径。
-
-        点击无查看器的媒体 = 表情包——截主窗口当前画面裁出该块（动图取
-        当前帧）。矩形是点击前测得的屏幕坐标，表情点击不改变布局，仍有效。"""
-        try:
-            hwnd = find_window_by_title("微信")
-            if not hwnd:
-                logger.warning("[表情] 未找到微信主窗口")
-                return None
-            ensure_window_visible(hwnd)
-            wr = window_rect(hwnd)
-            if not wr:
-                return None
-            shot = pyautogui.screenshot(region=wr)
-            # 屏幕坐标平移到主窗口图内坐标并夹紧边界（表情不可能越界，
-            # 夹紧只是防测量瞬间窗口移动的脏数据）
-            l = max(0, ml - wr[0])
-            t = max(0, mt - wr[1])
-            r = min(shot.width, mr - wr[0])
-            b = min(shot.height, mb - wr[1])
-            if r - l < 10 or b - t < 10:
-                logger.warning("[表情] 媒体矩形越界，放弃裁剪")
-                return None
-            crop = shot.crop((l, t, r, b))
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmpfile:
-                tmp_path = tmpfile.name
-            self._save_screenshot_compressed(crop, tmp_path)
-            logger.info(f"[表情] 点击无查看器，按表情路线裁剪 ({r - l}x{b - t})")
-            return tmp_path
-        except Exception as e:
-            logger.error(f"[表情] 裁剪异常: {e}")
-            return None
-
-    def _process_pure_image(self, chat_name, min_top=None):
-        """纯图/表情消息处理：捕获对方本轮全部新媒体 → vision 单调用（全部
-        图 + 人设 + 历史，一次看图角色化回复/任务判定）→ dict 原样路由给
-        _route_vision_result（不压文本；img_paths 由调用方 finally 清理，
-        覆写方需在返回前同步消费）。sender 无独立来源，以 chat_name 兜底。
-        与图+文路径（_vision_route）同一链路语义：角色化回复而非旧两段式
-        的客观图片复述。"""
-        tmp_paths = self._capture_media_images(chat_name, min_top=min_top)
-        if not tmp_paths:
-            return None
-        content = [{"type": "text", "text": VISION_IMAGE_PROMPT}]
-        try:
-            for p in tmp_paths:
-                with open(p, 'rb') as f:
-                    img_bytes = f.read()
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{base64.b64encode(img_bytes).decode()}"}},
-                )
-            result = self.call_vision_api(content, chat_id=chat_name)
-            if result:
-                return self._route_vision_result(chat_name, chat_name, result,
-                                                 img_paths=tmp_paths)
-            return None
-        except Exception as e:
-            logger.error(f"[图片处理] 异常: {e}")
-            return None
-        finally:
-            for p in tmp_paths:
-                try:
-                    os.unlink(p)
-                except Exception:
-                    pass
+    # ---------- 文件文本提取 / 媒体捕获 ----------
+    # 实现在 xiaoli_app.file_text（模块函数）与 xiaoli_app.media_capture
+    # （MediaCaptureMixin）；这里保留方法形态，tests / xiaoli_bot 的实例级
+    # 调用与 mock.patch.object 打点不变。
 
     def _extract_file_text(self, filepath):
-        """从文件中提取文本内容，支持纯文本、docx/doc（Office COM）、xlsx/xls、pdf（pypdf）。"""
-        filename = os.path.basename(filepath)
-        ext = os.path.splitext(filepath)[1].lower()
-
-        # 纯文本文件
-        text_extensions = {
-            '.txt', '.py', '.java', '.js', '.ts', '.html', '.css', '.json',
-            '.xml', '.yaml', '.yml', '.md', '.csv', '.log', '.ini', '.cfg',
-            '.sh', '.bat', '.c', '.cpp', '.h', '.hpp', '.rs', '.go', '.rb',
-            '.php', '.sql', '.r', '.m', '.swift', '.kt', '.scala', '.lua',
-            '.toml', '.tex', '.svg', '.pl', '.ps1', '.conf', '.properties',
-        }
-        if ext in text_extensions:
-            for enc in ('utf-8', 'gbk', 'gb2312', 'latin-1'):
-                try:
-                    with open(filepath, 'r', encoding=enc) as f:
-                        return f.read()
-                except (UnicodeDecodeError, UnicodeError):
-                    continue
-            logger.warning(f"[文件] 无法以任何编码读取: {filename}")
-            return None
-
-        # .docx
-        if ext == '.docx':
-            try:
-                import docx
-                doc = docx.Document(filepath)
-                text = '\n'.join([para.text for para in doc.paragraphs])
-                return text if text.strip() else None
-            except ImportError:
-                logger.warning("[文件] 未安装 python-docx 库")
-                return None
-            except Exception as e:
-                logger.warning(f"[文件] 读取 docx 失败: {e}")
-                return None
-
-        # .pdf（pypdf 纯 Python，零系统依赖；扫描件无文本层时提取为空走 None）
-        if ext == '.pdf':
-            try:
-                from pypdf import PdfReader
-                pages = []
-                for page in PdfReader(filepath).pages:
-                    t = page.extract_text() or ""
-                    if t.strip():
-                        pages.append(t.strip())
-                text = '\n'.join(pages)
-                return text if text.strip() else None
-            except ImportError:
-                logger.warning("[文件] 未安装 pypdf 库")
-                return None
-            except Exception as e:
-                logger.warning(f"[文件] 读取 pdf 失败: {e}")
-                return None
-
-        # .doc（旧版 Word）
-        if ext == '.doc':
-            text = self._extract_office_com_text(filepath, 'Word.Application')
-            if text:
-                return text
-            return None
-
-        # .pptx
-        if ext == '.pptx':
-            try:
-                import pptx
-                prs = pptx.Presentation(filepath)
-                slides_text = []
-                for i, slide in enumerate(prs.slides, 1):
-                    slide_lines = [f"--- 幻灯片 {i} ---"]
-                    for shape in slide.shapes:
-                        if shape.has_text_frame:
-                            for para in shape.text_frame.paragraphs:
-                                if para.text.strip():
-                                    slide_lines.append(para.text)
-                    if len(slide_lines) > 1:
-                        slides_text.append('\n'.join(slide_lines))
-                result = '\n\n'.join(slides_text)
-                return result if result.strip() else None
-            except ImportError:
-                logger.warning("[文件] 未安装 python-pptx 库")
-                return None
-            except Exception as e:
-                logger.warning(f"[文件] 读取 pptx 失败: {e}")
-                return None
-
-        # .ppt（旧版 PowerPoint）
-        if ext == '.ppt':
-            text = self._extract_office_com_text(filepath, 'PowerPoint.Application')
-            if text:
-                return text
-            return None
-
-        # .xlsx
-        if ext == '.xlsx':
-            try:
-                import openpyxl
-                wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
-                all_text = []
-                for sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    sheet_lines = [f"--- 工作表: {sheet_name} ---"]
-                    for row in ws.iter_rows(values_only=True):
-                        row_text = '\t'.join([
-                            str(cell) if cell is not None else '' for cell in row
-                        ])
-                        if row_text.strip():
-                            sheet_lines.append(row_text)
-                    all_text.append('\n'.join(sheet_lines))
-                wb.close()
-                result = '\n\n'.join(all_text)
-                return result if result.strip() else None
-            except ImportError:
-                logger.warning("[文件] 未安装 openpyxl 库")
-                return None
-            except Exception as e:
-                logger.warning(f"[文件] 读取 xlsx 失败: {e}")
-                return None
-
-        # .xls（旧版 Excel）
-        if ext == '.xls':
-            # 优先用 xlrd，失败了用 Excel COM
-            try:
-                import xlrd
-                wb = xlrd.open_workbook(filepath)
-                all_text = []
-                for sheet in wb.sheets():
-                    sheet_lines = [f"--- 工作表: {sheet.name} ---"]
-                    for row_idx in range(sheet.nrows):
-                        row_values = sheet.row_values(row_idx)
-                        row_text = '\t'.join([
-                            str(cell) if cell != '' else '' for cell in row_values
-                        ])
-                        if row_text.strip():
-                            sheet_lines.append(row_text)
-                    all_text.append('\n'.join(sheet_lines))
-                result = '\n\n'.join(all_text)
-                return result if result.strip() else None
-            except ImportError:
-                pass
-            except Exception as e:
-                logger.debug(f"[文件] xlrd 读取失败: {e}")
-            # 回退到 Excel COM
-            text = self._extract_office_com_text(filepath, 'Excel.Application')
-            if text:
-                return text
-            return None
-
-        # 未知扩展名（含 PDF，暂不支持解析）尝试按文本读取；二进制读取失败返回 None
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                text = f.read()
-            if text.strip():
-                logger.debug(f"[文件] 未知扩展名 .{ext}，按文本读取成功")
-                return text
-        except Exception:
-            pass
-
-        return None
+        return extract_file_text(filepath)
 
     def _extract_file_display_name(self, msg):
-        """从 FileMessage 提取显示文件名。
-        wxauto4 的 content 格式：'文件\\n<文件名>\\n[<大小>\\n]微信电脑版'
-        （实测：'文件\\n养生规划表.html\\n微信电脑版'）
-        返回文件名或 None"""
-        try:
-            content = getattr(msg, "content", "") or ""
-            m = re.search(r"^文件\n([^\n]+)", content, flags=re.M)
-            if m:
-                return m.group(1).strip()
-            # 兜底：按 repattern 解析
-            rep = getattr(msg, "repattern", None)
-            if rep:
-                m2 = re.search(rep, content)
-                if m2 and m2.group(1):
-                    return m2.group(1).strip()
-            # 视觉后端兼容：content 即显示文件名（无 '文件\n' 前缀）
-            if content and "\\n" not in content and "\n" not in content:
-                # 纯文件名（不含换行/前缀）——视觉后端 file 消息格式。
-                # 但消息区 OCR 可能把多条文件消息合并成一个文本块
-                # （实测 '新宣传.docx 部门简介+纳新宣传.docx W'，文件图标被
-                # OCR 成尾部杂字符）——整串当文件名必然匹配失败，需先拆出
-                # 真实文件名（含常见文档扩展名的 token，取第一个）。
-                name = content.strip()
-                if name:
-                    return _extract_file_name_token(name) or name
-        except Exception as e:
-            logger.error(f"[文件] 提取文件名失败: {e}")
-        return None
+        return extract_file_display_name(msg)
+
+    def _extract_office_com_text(self, filepath, app_name):
+        return extract_office_com_text(filepath, app_name)
 
     def _find_file_by_display_name(self, display_name):
         """按消息中的显示文件名在接收目录定位对方发来的文件。
@@ -1598,79 +1207,6 @@ class WeChatBot:
         return _find_file_by_display_name_impl(self.file_storage_path,
                                                display_name)
 
-    def _extract_office_com_text(self, filepath, app_name):
-        """通过 Office COM 自动化提取旧格式（.doc/.ppt/.xls）文本，失败则二进制兜底"""
-        # 方法1: Office COM 自动化
-        try:
-            import comtypes.client
-            app = comtypes.client.CreateObject(app_name)
-            app.Visible = False
-
-            if 'Word' in app_name:
-                doc = app.Documents.Open(filepath)
-                text = doc.Content.Text
-                doc.Close()
-            elif 'PowerPoint' in app_name:
-                prs = app.Presentations.Open(filepath, WithWindow=False)
-                slides = []
-                for slide in prs.Slides:
-                    for shape in slide.Shapes:
-                        if shape.HasTextFrame:
-                            slides.append(shape.TextFrame.TextRange.Text)
-                text = '\n'.join(slides)
-                prs.Close()
-            elif 'Excel' in app_name:
-                wb = app.Workbooks.Open(filepath)
-                sheets = []
-                for sheet in wb.Sheets:
-                    used = sheet.UsedRange
-                    if used:
-                        rows = []
-                        for row in used.Rows:
-                            cells = []
-                            for cell in row.Cells:
-                                v = cell.Value
-                                cells.append(str(v) if v is not None else '')
-                            rows.append('\t'.join(cells))
-                        sheets.append(
-                            f"--- 工作表: {sheet.Name} ---\n" + '\n'.join(rows)
-                        )
-                text = '\n\n'.join(sheets)
-                wb.Close()
-            else:
-                app.Quit()
-                return None
-
-            app.Quit()
-            if text and text.strip():
-                logger.debug(f"[文件] {app_name} COM 提取成功 ({len(text)} 字符)")
-                return text.strip()
-        except Exception as e:
-            logger.debug(f"[文件] {app_name} COM 失败: {e}")
-
-        # 方法2: 从二进制中提取可读文本（兜底方案）
-        try:
-            with open(filepath, 'rb') as f:
-                data = f.read()
-            text_parts = []
-            buf = []
-            for byte in data:
-                if 32 <= byte < 127 or byte in (9, 10, 13):
-                    buf.append(chr(byte))
-                else:
-                    if len(buf) >= 4:
-                        text_parts.append(''.join(buf))
-                    buf = []
-            if len(buf) >= 4:
-                text_parts.append(''.join(buf))
-            result = '\n'.join(text_parts)
-            if len(result) > 100:
-                logger.debug(f"[文件] 二进制提取成功 ({len(result)} 字符)")
-                return result
-        except Exception as e:
-            logger.debug(f"[文件] 二进制提取失败: {e}")
-
-        return None
 
     def call_chat_ai(self, chat_id, user_msg, sender_name=None, is_group=False, multi_sender=False):
         # per-chat 角色卡绑定：该聊天绑定了卡时，人设/模型/参数/端点以卡为准
