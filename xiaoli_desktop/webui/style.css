@@ -868,6 +868,7 @@ textarea { resize: vertical; line-height: 1.65; min-height: 120px; }
 select { cursor: pointer; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin: 14px 0; }
 .form-grid.three { grid-template-columns: 1fr 1fr 1fr; }
+.form-grid.four { grid-template-columns: repeat(4, 1fr); }
 .form-grid.two { grid-template-columns: 1fr 1fr; }
 .form-item { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; }
 .form-item > span { color: var(--muted); }

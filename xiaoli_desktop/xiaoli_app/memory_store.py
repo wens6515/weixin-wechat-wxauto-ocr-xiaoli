@@ -191,9 +191,11 @@ class MemoryStore:
     的可热改属性，不在本类存快照。
     """
 
-    def __init__(self, memory_file, cap_fn=None):
+    def __init__(self, memory_file, cap_fn=None, step_fn=None):
         self.memory_file = memory_file
         self._cap_fn = cap_fn or (lambda chat_id: 30)
+        # 阶梯滚动步长：0 = 到量立即逐条滚动（旧行为）；默认 30
+        self._step_fn = step_fn or (lambda chat_id: 30)
         self.memory_db = {}
         self.deep_count = {}   # chat -> 深层文件行数（追加时维护，启动时清点）
         self.lock = threading.RLock()
@@ -268,13 +270,21 @@ class MemoryStore:
                 "time": time.strftime("%Y-%m-%d %H:%M:%S")
             })
             cap = max(5, int(self._cap_fn(chat_id)))
-            while len(st["recent"]) > cap:
-                # 溢出归档：深层记忆启用时写入 memory_deep/ 永久保存，
+            # 阶梯滚动（缓存友好）：窗口在 [cap, cap+step] 间波动，攒到
+            # 上限时把溢出段按序一次性弹出归档——两次滚动之间注入序列是
+            # 「旧前缀 + 尾部追加」，API 前缀缓存全程命中。逐条弹出让每轮
+            # 请求的第一条历史都在变，前缀缓存从第一条历史起就失效（用户
+            # 实测命中率无差异的根因）。step=0 即退化为到量立即滚动。
+            step = max(0, int(self._step_fn(chat_id)))
+            overflow_n = len(st["recent"]) - cap
+            if overflow_n > step:
+                overflow = st["recent"][:overflow_n]
+                del st["recent"][:overflow_n]
+                # 溢出归档：深层记忆启用时按序写入 memory_deep/ 永久保存，
                 # 未启用则与旧行为一致（超出窗口即丢弃）
                 if deep_enabled:
-                    self._append_deep_unlocked(chat_id, st["recent"].pop(0))
-                else:
-                    st["recent"].pop(0)
+                    for msg in overflow:
+                        self._append_deep_unlocked(chat_id, msg)
             self.schedule_save()
 
     def load(self, deep_enabled=True):
