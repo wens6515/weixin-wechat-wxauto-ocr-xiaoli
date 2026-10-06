@@ -1258,6 +1258,16 @@ function refreshSettings() {
   $("#edWebProxy").value = m.web_proxy || "";
   $("#cbStateWatch").checked = !!m.state_watch_enabled;
   $("#followSystem").checked = !!u.follow_system;
+  $$("#trigManageSeg button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.v === (m.model_trigger_manage || "off")));
+  $$("#stickerSeg button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.v === (m.sticker_mode || "off")));
+  $("#cbSegWait").checked = m.segment_wait_enabled !== false;
+  $("#spSegWait").value = m.segment_wait_seconds ?? 2;
+  $("#cbSegJitter").checked = !!m.segment_jitter_enabled;
+  $("#spSegJitterMin").value = m.segment_jitter_min ?? 1.5;
+  $("#spSegJitterMax").value = m.segment_jitter_max ?? 3;
+  refreshStickerInfo();
   $$("#fontSeg button").forEach((b) =>
     b.classList.toggle("active", b.dataset.v === (u.font_scale || "medium")));
   $$("#voiceSeg button").forEach((b) =>
@@ -1383,6 +1393,71 @@ $("#cbStateWatch").addEventListener("change", async (e) => {
   const r = await API.save_config({ state_watch_enabled: e.target.checked });
   toast(r.ok ? (e.target.checked ? "状态监视已开启" : "状态监视已关闭") : "保存失败",
     r.ok ? "ok" : "err");
+});
+/* ---- 模型管理触发器（三态，点击即存） ---- */
+$("#trigManageSeg").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
+  const r = await API.save_config({ model_trigger_manage: btn.dataset.v });
+  toast(r.ok ? ({
+    off: "已关闭：AI 只能建触发器，不能删改",
+    lazy: "已开启（仅工具）：AI 被问到时先查询再操作",
+    eager: "已开启（清单注入）：AI 随时知道有哪些约定",
+  }[btn.dataset.v] || "已保存") : "保存失败", r.ok ? "ok" : "err");
+});
+/* ---- 表情包（三态，点击即存） ---- */
+$("#stickerSeg").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
+  const r = await API.save_config({ sticker_mode: btn.dataset.v });
+  toast(r.ok ? ({
+    off: "表情包已关闭",
+    catalog: "已开启（清单注入）：AI 每次都看得到表情包目录",
+    query: "已开启（按需查询）：AI 想发时先搜索再挑",
+  }[btn.dataset.v] || "已保存") : "保存失败", r.ok ? "ok" : "err");
+});
+async function refreshStickerInfo() {
+  const el = $("#stickerCount"), dir = $("#stickerDir");
+  if (!el) return;
+  const r = await API.sticker_info();
+  if (!r.ok) { el.textContent = "表情包库不可用"; dir.textContent = ""; return; }
+  el.textContent = `表情包库：${r.count} 张`;
+  dir.textContent = r.dir || "";
+}
+$("#btnStickerRetag").addEventListener("click", async () => {
+  const r = await API.sticker_retag();
+  if (!r.ok) { toast(r.error || "无法开始打标", "err"); return; }
+  toast("AI 正在逐张看图打标，完成后会提示", "");
+});
+function onStickerRetag(p) {
+  if (p.done != null && p.total != null && p.done >= p.total) {
+    toast(p.message || (p.ok ? "打标完成" : "打标失败"), p.ok ? "ok" : "err");
+    refreshStickerInfo();
+  }
+}
+/* ---- 回复节奏（两互斥开关 + 数字参数，批量保存） ---- */
+$("#cbSegWait").addEventListener("change", (e) => {
+  if (e.target.checked) $("#cbSegJitter").checked = false;
+});
+$("#cbSegJitter").addEventListener("change", (e) => {
+  if (e.target.checked) $("#cbSegWait").checked = false;
+});
+$("#btnSavePace").addEventListener("click", async () => {
+  const jitter = $("#cbSegJitter").checked;
+  const num = (id, dft) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) && v >= 0 ? v : dft;
+  };
+  const r = await API.save_config({
+    segment_wait_enabled: !jitter && $("#cbSegWait").checked,
+    segment_wait_seconds: num("#spSegWait", 2),
+    segment_jitter_enabled: jitter,
+    segment_jitter_min: num("#spSegJitterMin", 1.5),
+    segment_jitter_max: num("#spSegJitterMax", 3),
+  });
+  toast(r.ok ? "回复节奏已保存（热生效）" : "保存失败", r.ok ? "ok" : "err");
 });
 /* ---- 语音 ---- */
 $("#voiceSeg").addEventListener("click", (e) => {
@@ -1602,6 +1677,8 @@ onPush((evt, p) => {
     toast(p.message || (p.ok ? "已发送" : "发送失败"), p.ok ? "ok" : "err");
   } else if (evt === "voice_test") {
     onVoiceTestResult(p);
+  } else if (evt === "sticker_retag") {
+    onStickerRetag(p);
   }
 });
 

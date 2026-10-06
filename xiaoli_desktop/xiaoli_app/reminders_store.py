@@ -140,6 +140,14 @@ class RemindersStore:
     def set_enabled(self, rid, enabled):
         return self._mutate(rid, lambda r: r.update(enabled=bool(enabled)))
 
+    def modify(self, rid, fields):
+        """批量更新触发器字段（模型侧 manage_reminder 与设置页共用底层）。
+
+        合法性校验由调用方完成（时间格式/归属/终态等），这里只做字段白名单
+        外的键照存——存储层不猜语义。返回是否找到并更新。"""
+        fields = {str(k): v for k, v in (fields or {}).items()}
+        return self._mutate(rid, lambda r: r.update(fields))
+
     # ---------- 到期扫描（调度线程调用） ----------
 
     def due(self, now=None, grace=GRACE_SECONDS):

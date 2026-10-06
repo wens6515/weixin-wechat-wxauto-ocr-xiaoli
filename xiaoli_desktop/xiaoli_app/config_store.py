@@ -222,6 +222,14 @@ AI_DEFAULTS = {
     "api_retry": 2,
     "api_timeout": 60,
     "api_wall_budget": 45,
+    # 回复分段节奏（_send_parts 段间停留；两开关互斥、可都关，UI 保证互斥，
+    # 后端抖动优先）：段间等待 = 固定秒数；间隔抖动 = 上下限内随机（更活人
+    # 感）。都关 = 段间零等待。默认等待开/2s = 历史行为不变。
+    "segment_wait_enabled": True,
+    "segment_wait_seconds": 2.0,
+    "segment_jitter_enabled": False,
+    "segment_jitter_min": 1.5,
+    "segment_jitter_max": 3.0,
     "start_paused": True,
     "memory_file": "memory.json",
     # 长记忆（v2）：recent 溢出归档进深层记忆（永不删除，recall_memory
@@ -241,6 +249,16 @@ AI_DEFAULTS = {
     # 每轮一次小调用 + 触发回递，会产生额外 API 调用——是否开启由用户在
     # 设置页决定（默认关）。定时提醒（kind=time）不受此开关影响。
     "state_watch_enabled": False,
+    # 模型侧触发器管理（manage_reminder 工具）三态：off=模型只能创建触发器
+    # （现状）/ lazy=仅注入工具（被问才 list 拿 id）/ eager=工具+活跃触发器
+    # 清单注入尾区（模型直接拿 id，还能主动说出已有约定）。默认 off。
+    "model_trigger_manage": "off",
+    # 表情包发送（send_sticker 工具）三态：off=关闭（不声明工具）/
+    # catalog=表情包清单每轮注入尾区（模型零额外往返直接挑，库大时每请求
+    # token 略涨）/ query=按需查询（模型先 search_stickers 拿候选再挑，多
+    # 一轮 API，token 有界——适合大库）。库 = 应用基目录「表情包」+
+    # manifest.json 描述缓存（见 xiaoli_app/sticker_store）。默认 off。
+    "sticker_mode": "off",
     # 语音发送（音源接口化）：voice_mode off=关闭 / auto=模型自主
     # （send_voice 工具按语境调用）/ always=模型对话回复一律转语音。
     # 端点指向用户自部署的 GPT-SoVITS api_v2 /tts；音色档案 refs 键即

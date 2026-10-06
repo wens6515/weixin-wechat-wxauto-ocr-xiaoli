@@ -71,7 +71,10 @@ const MOCK = (() => {
             memory_compress_model: "", file_storage_path: "C:\\演示\\Documents\\xwechat_files",
             tasks_dir: "D:\\演示\\wxauto", tianshu_workdir: "D:\\演示",
             web_proxy: "", first_prompt_path: "", bot_nickname: "小漓", start_paused: true,
-            web_search_enabled: true, task_enabled: true, state_watch_enabled: false },
+            web_search_enabled: true, task_enabled: true, state_watch_enabled: false,
+            model_trigger_manage: "off", sticker_mode: "off",
+            segment_wait_enabled: true, segment_wait_seconds: 2,
+            segment_jitter_enabled: false, segment_jitter_min: 1.5, segment_jitter_max: 3 },
     voice: { voice_mode: "off", tts_endpoint: "http://演示:9880/tts",
              tts_timeout_seconds: 120, voice_max_seconds: 55,
              voice_profiles: [{ id: "p-demo", name: "演示音色",
@@ -132,6 +135,14 @@ const MOCK = (() => {
     tail_log: () => ({ ok: true, lines: LOG_POOL }),
     voice_ready: () => ({ ok: true, ready: true, missing: [] }),
     voice_selftest: () => ({ ok: true, started: true }),
+    sticker_info: () => ({ ok: true, dir: "D:\\演示\\表情包", count: 2,
+      items: [{ file: "生气1.png", desc: "气到冒烟", tags: ["生气"] },
+              { file: "开心.gif", desc: "开心到飞起", tags: ["开心"] }] }),
+    sticker_retag: () => {
+      setTimeout(() => window.__push("sticker_retag",
+        { ok: true, done: 2, total: 2, indexed: 2, message: "打标完成：2/2" }), 500);
+      return { ok: true, started: true };
+    },
     list_tasks: () => ({ ok: true, rows: [], waiting: 0, done: 0, archived: 0,
                          tasks_dir: "D:\\演示\\wxauto" }),
     delete_task: () => ({ ok: true }),

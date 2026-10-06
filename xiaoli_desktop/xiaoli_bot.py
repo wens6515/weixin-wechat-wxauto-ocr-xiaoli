@@ -377,14 +377,22 @@ class AgentBot(WeChatBot):
             return True
         if kind == "text":
             reply = str(result.get("content") or "").strip()
-            if not reply:
+            sticker_sent = bool(result.get("sticker_sent"))
+            if not reply and not sticker_sent:
                 logger.warning("[vision] text 响应无回复文本，降级")
                 return None
-            logger.info(f"[vision] 判定非任务，直接回复: {reply[:60]}")
+            logger.info(f"[vision] 判定非任务，直接回复: "
+                        f"{reply[:60] if reply else '[纯表情包]'}")
             if user_text:
                 self._add_history(chat_name, "user", user_text)
-            self._add_history(chat_name, "assistant", reply)
-            self._deliver_reply(chat_name, reply)
+            if reply:
+                self._add_history(chat_name, "assistant", reply)
+                self._deliver_reply(chat_name, reply)
+            else:
+                # 纯表情包回复：图已在工具循环内发出，这里只记记忆 + 占位
+                # 归零（实质回复语义，与 _send_text 对齐）
+                self._add_history(chat_name, "assistant", "[发送了表情包]")
+                self._pending_placeholders.pop(chat_name, None)
             return True
         logger.warning(f"[vision] 未知响应 kind={kind!r}，降级")
         return None
@@ -485,6 +493,33 @@ class AgentBot(WeChatBot):
         time.sleep(0.6)  # 等微信把文件加入待发送区
         pyautogui.press("enter")
         logger.info(f"[回传] 剪贴板方式已发送文件: {os.path.basename(fpath)}")
+        return True
+
+    def _send_sticker_file(self, fpath):
+        """表情包图片粘贴发送（剪贴板 CF_HDROP + Ctrl+V + Enter，与文件回传
+        同一机制——微信对图片文件粘贴按图片消息发出，GIF 按动图）。
+
+        处理消息期间窗口已停在目标会话（与 _send_text 同一假设），不切会话；
+        粘贴后留 0.6s 等微信把图放进待发送区再回车。返回是否执行成功
+        （fail-closed：剪贴板/输入框定位任一失败都 False，上层放弃不回退）。"""
+        fg = getattr(self.wx, "_foreground", None)
+        if fg is not None:
+            fg()
+        if not set_clipboard_files([fpath]):
+            logger.error(f"[表情包] 剪贴板设置文件失败: {fpath}")
+            return False
+        rect_fn = getattr(self.wx, "_input_box_rect", None)
+        box = rect_fn() if rect_fn is not None else None
+        if not box:
+            logger.warning("[表情包] 无法定位输入框，放弃发送")
+            return False
+        time.sleep(0.2)
+        pyautogui.click(box[0] + box[2] // 2, box[1] + box[3] // 2)
+        time.sleep(0.3)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.6)
+        pyautogui.press("enter")
+        logger.info(f"[表情包] 已粘贴发送: {os.path.basename(fpath)}")
         return True
 
     def _poll_outbox(self):

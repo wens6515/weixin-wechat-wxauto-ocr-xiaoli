@@ -338,6 +338,20 @@ class WeChatBot(MediaCaptureMixin):
         self.api_retry = cfg.get("api_retry", AI_DEFAULTS["api_retry"])
         self.api_timeout = cfg.get("api_timeout", AI_DEFAULTS["api_timeout"])
         self.api_wall_budget = cfg.get("api_wall_budget", AI_DEFAULTS["api_wall_budget"])
+        # 回复分段节奏（_send_parts 段间停留；两开关互斥、可都关——UI 保证
+        # 互斥，后端抖动优先于等待）：参数热改即时生效
+        self.segment_wait_enabled = bool(cfg.get("segment_wait_enabled", True))
+        self.segment_wait_seconds = max(
+            0.0, float(cfg.get("segment_wait_seconds",
+                               AI_DEFAULTS["segment_wait_seconds"])))
+        self.segment_jitter_enabled = bool(
+            cfg.get("segment_jitter_enabled", False))
+        self.segment_jitter_min = max(
+            0.0, float(cfg.get("segment_jitter_min",
+                               AI_DEFAULTS["segment_jitter_min"])))
+        self.segment_jitter_max = max(
+            0.0, float(cfg.get("segment_jitter_max",
+                               AI_DEFAULTS["segment_jitter_max"])))
         # 用量统计：每次 LLM 调用终态追加一行 JSONL（埋点在 _post_chat_completions）
         self.usage_store = UsageStore()
         # 微信窗口定位：None=默认右半屏；[x,y,w,h]=自定义；"off"=保持手动
@@ -371,6 +385,17 @@ class WeChatBot(MediaCaptureMixin):
         # 决定（默认关）。关闭时工具分支直接友好告知，不降级普通聊天
         # （降级会让模型凭空答应没做到的提醒）。
         self.state_watch_enabled = bool(cfg.get("state_watch_enabled", False))
+        # 模型侧触发器管理（manage_reminder 工具）三态：off=模型只能创建
+        # （现状）/ lazy=仅注入工具（被问才 list 拿 id）/ eager=工具+活跃
+        # 触发器清单注入尾区（模型直接拿 id 一步操作，还能主动说出已有约定）。
+        # 默认 off——新能力不主动开，老用户升级零变化。
+        self.model_trigger_manage = str(
+            cfg.get("model_trigger_manage", "off") or "off").strip().lower()
+        # 表情包发送（send_sticker 工具）三态：off / catalog（清单每轮注入）/
+        # query（先 search_stickers 再挑）。库位置不进配置——与应用基目录的
+        # 「表情包」目录绑定（与壁纸库同一发现模式，见 sticker_store）。
+        self.sticker_mode = str(
+            cfg.get("sticker_mode", "off") or "off").strip().lower()
         # 语音发送（音源接口化）：voice_mode off/auto/always。端点与音色档案
         # 由用户配置（模型/参考音频在用户自部署的服务端），配置不全时语音
         # 链路整体不激活（工具不注入、回复走文本）。
@@ -477,6 +502,270 @@ class WeChatBot(MediaCaptureMixin):
             return bool(self.reminders.list_conditions())
         except Exception:
             return False
+
+    # ---------- 触发器模型侧管理（manage_reminder 工具） ----------
+    # 执行发生在 call_vision_api 的工具循环内（与 web_search 同一机制：结果
+    # 作为 tool 消息回填，模型拿到回执后继续作答），绝不在这里直接发送——
+    # 发送归主循环节点。只读查询/取消/改字段，固定 fail-closed：
+    # 只动当前聊天的触发器、终态条目不可操作、URL 不可改（改 URL 等于重新
+    # 看页面，让模型取消后重新创建）。
+
+    @staticmethod
+    def _trigger_belongs(item, chat_id):
+        """触发器是否属于当前聊天：memory 口径归一化后严格相等（ ownership
+        判定宁严勿宽——不用双向子串兜底，防止把相近名字聊天的触发器放给
+        别的聊天操作）。"""
+        a = _memory_key(str(item.get("chat") or ""))
+        b = _memory_key(str(chat_id or ""))
+        return bool(a) and a == b
+
+    @staticmethod
+    def _trigger_active(item):
+        """触发器是否仍可操作：启用中，且条件监视未到终态（met/expired/dead）。"""
+        if not item.get("enabled"):
+            return False
+        if item.get("kind") == "condition":
+            return not item.get("done")
+        return True
+
+    @staticmethod
+    def _trigger_brief_line(item):
+        """触发器一行摘要（清单注入与 list 回执共用同一格式，模型两次看到的
+        口径一致）。"""
+        if item.get("kind") == "condition":
+            exp = item.get("expire_at")
+            exp_s = time.strftime("%m-%d %H:%M", time.localtime(exp)) \
+                if exp else "无截止"
+            return (f"[{item.get('id')}] 状态监视"
+                    f"「{str(item.get('condition') or '')[:30]}」"
+                    f"（每 {item.get('interval_seconds')}s 查一次，截止 {exp_s}）")
+        fire = item.get("fire_at") or 0
+        return (f"[{item.get('id')}] 定时 "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(fire))}"
+                f"（{item.get('repeat')}）")
+
+    def _active_triggers_brief(self, chat_id):
+        """eager 注入用：当前聊天活跃触发器清单（system 消息正文）。无条目
+        返回空串（不注入空消息）。条目数封顶防 token 膨胀——超出的提示用
+        list 查询。"""
+        store = getattr(self, "reminders", None)
+        if store is None or not chat_id:
+            return ""
+        try:
+            items = [r for r in store.list()
+                     if self._trigger_belongs(r, chat_id)
+                     and self._trigger_active(r)]
+        except Exception as e:
+            logger.debug(f"[触发器管理] 清单读取失败: {e}")
+            return ""
+        if not items:
+            return ""
+        cap = 12
+        lines = [self._trigger_brief_line(r) for r in items[:cap]]
+        if len(items) > cap:
+            lines.append(f"…另有 {len(items) - cap} 条，用 manage_reminder 的 "
+                         "list 查看全部")
+        return ("你之前为本聊天创建、仍在进行的触发器（方括号内是 id，"
+                "管理时直接引用）：\n" + "\n".join(lines))
+
+    def _exec_manage_reminder(self, chat_id, raw_args):
+        """manage_reminder 工具执行入口（call_vision_api 工具循环调用）。
+        返回 tool 消息文本（回执），绝不抛异常——失败转文字让模型自行措辞。"""
+        store = getattr(self, "reminders", None)
+        if store is None or not chat_id:
+            return "触发器管理不可用"
+        if str(getattr(self, "model_trigger_manage", "off") or "off") == "off":
+            return "触发器管理未开启"
+        try:
+            args = json.loads(raw_args or "{}")
+        except (ValueError, TypeError):
+            return "manage_reminder 参数解析失败"
+        if not isinstance(args, dict):
+            return "manage_reminder 参数解析失败"
+        action = str(args.get("action") or "").strip().lower()
+        try:
+            mine = [r for r in store.list() if self._trigger_belongs(r, chat_id)]
+        except Exception as e:
+            return f"触发器读取失败：{e}"
+        if action == "list":
+            active = [r for r in mine if self._trigger_active(r)]
+            if not active:
+                return "当前聊天没有进行中的触发器"
+            return "当前聊天的活跃触发器：\n" + "\n".join(
+                self._trigger_brief_line(r) for r in active)
+        rid = str(args.get("id") or "").strip()
+        if not rid:
+            return "缺少触发器 id（先 action=list 查询）"
+        target = next((r for r in mine if str(r.get("id")) == rid), None)
+        if target is None:
+            return (f"本聊天没有 id 为 {rid} 的触发器（可能属于别的聊天或"
+                    "不存在，用 action=list 核对）")
+        if not self._trigger_active(target):
+            return f"触发器 {rid} 已结束（已触发/已过期/已失效），不能再操作"
+        if action == "cancel":
+            desc = self._trigger_brief_line(target)
+            if not store.remove(rid):
+                return f"取消失败（触发器 {rid} 可能刚被删除）"
+            logger.info(f"[触发器管理] {chat_id!r} 取消: {desc}")
+            return f"已取消触发器：{desc}"
+        if action == "modify":
+            return self._modify_trigger(store, target, args, rid)
+        return f"未知 action: {action!r}（可用 list/cancel/modify）"
+
+    def _modify_trigger(self, store, target, args, rid):
+        """modify 分支：按 kind 校验字段白名单（time 改 time/repeat；condition
+        改关键词/间隔/截止/切片——URL 与判定方式不可改），通过后写回。"""
+        fields = {}
+        if target.get("kind") == "condition":
+            if "met_keywords" in args:
+                kws = args.get("met_keywords")
+                if isinstance(kws, str):
+                    kws = re.split(r"[,，、\s]+", kws)
+                kws = [str(k).strip() for k in (kws or []) if str(k).strip()]
+                if str(target.get("judge") or "local") == "local" and not kws:
+                    return "local 判定的状态监视不能清空关键词（要换条件请取消后重建）"
+                fields["met_keywords"] = kws
+            if "interval_seconds" in args:
+                try:
+                    fields["interval_seconds"] = max(
+                        10, int(float(args["interval_seconds"])))
+                except (TypeError, ValueError):
+                    return "interval_seconds 非法（秒数）"
+            if "expire_at" in args:
+                raw = str(args.get("expire_at") or "").strip()
+                if raw:
+                    try:
+                        exp = time.mktime(time.strptime(raw, "%Y-%m-%d %H:%M"))
+                    except (ValueError, TypeError):
+                        return "expire_at 格式应为 YYYY-MM-DD HH:MM"
+                    if exp <= time.time():
+                        return "expire_at 已经过去"
+                    fields["expire_at"] = exp
+                else:
+                    fields["expire_at"] = None
+            for key in ("scope_start", "scope_end"):
+                if key in args:
+                    fields[key] = str(args.get(key) or "").strip() or None
+        else:
+            if "time" in args:
+                raw = str(args.get("time") or "").strip()
+                try:
+                    fire = time.mktime(time.strptime(raw, "%Y-%m-%d %H:%M"))
+                except (ValueError, TypeError):
+                    return "time 格式应为 YYYY-MM-DD HH:MM"
+                if fire <= time.time():
+                    return "新触发时间已过去"
+                fields["fire_at"] = fire
+            if "repeat" in args:
+                rep = str(args.get("repeat") or "").strip()
+                if rep not in ("once", "daily", "weekly"):
+                    return "repeat 只能是 once/daily/weekly"
+                fields["repeat"] = rep
+        if not fields:
+            return "没有给出要修改的字段"
+        if not store.modify(rid, fields):
+            return f"修改失败（触发器 {rid} 可能刚被删除）"
+        if "interval_seconds" in fields:
+            # 间隔变了就按新节奏立刻可查，不等旧 next_check_at
+            store.schedule_next(rid, time.time(), reset_fail=True)
+        merged = dict(target)
+        merged.update(fields)
+        logger.info(f"[触发器管理] 已修改 {rid}: {', '.join(sorted(fields))}")
+        return (f"已修改触发器（{', '.join(sorted(fields))}）。"
+                f"现在的样子：{self._trigger_brief_line(merged)}")
+
+    # ---------- 表情包（send_sticker / search_stickers 工具） ----------
+    # 三态（sticker_mode）：off 不激活；catalog = 清单每轮注入尾区（模型
+    # 零额外往返直接挑）；query = 先 search_stickers 拿候选（多一轮 API，
+    # token 有界）。发送执行在 call_vision_api 工具循环内（结果回填，模型
+    # 可只发表情不说话、也可表情+文字继续作答）；窗口粘贴实现在
+    # AgentBot._send_sticker_file（处理消息期间窗口已停在目标会话，与
+    # _send_text 同一假设）。
+
+    def _sticker_store(self):
+        """StickerStore 惰性构建（stickers_dir 热改时自动重建）。目录不存在
+        返回 None——库整体不激活，工具不声明。"""
+        from xiaoli_app.sticker_store import StickerStore, default_stickers_dir
+        d = default_stickers_dir()
+        if not os.path.isdir(d):
+            return None
+        store = self.__dict__.get("_sticker_store_inst")
+        if store is None or store.dir != d:
+            store = StickerStore(d)
+            self.__dict__["_sticker_store_inst"] = store
+        return store
+
+    def _sticker_catalog_text(self):
+        """catalog 态注入正文：清单 + 使用说明。空库返回空串（不注入）。"""
+        store = self._sticker_store()
+        if store is None:
+            return ""
+        try:
+            lines = store.catalog_lines()
+        except Exception as e:
+            logger.debug(f"[表情包] 清单读取失败: {e}")
+            return ""
+        if not lines:
+            return ""
+        return ("你可以发送表情包（调 send_sticker，file 填下面清单里的文件"
+                "名；可以只发表情包不说话，也可以表情包+文字）：\n"
+                + "\n".join(lines))
+
+    def _exec_search_stickers(self, query):
+        """search_stickers 工具执行：本地关键词搜索（零 API），返回候选行。"""
+        if str(getattr(self, "sticker_mode", "off") or "off") == "off":
+            return "表情包功能未开启"
+        store = self._sticker_store()
+        if store is None:
+            return "表情包库不可用"
+        try:
+            hits = store.search(query, limit=5)
+        except Exception as e:
+            return f"表情包搜索失败：{e}"
+        if not hits:
+            return "没有匹配的表情包（换个关键词，或不用表情包直接回复）"
+        return ("找到这些（用 send_sticker 发送，file 填文件名）：\n"
+                + "\n".join(f"{it['file']}｜{it['desc']}"
+                            + (f"｜{' '.join(it['tags'])}" if it["tags"] else "")
+                            for it in hits))
+
+    def _exec_send_sticker(self, chat_id, fname):
+        """send_sticker 工具执行：即时发送（窗口粘贴，实现在
+        AgentBot._send_sticker_file）。返回 (ok, tool 回执文本)。fail-closed：
+        未开启/无库/无此图/粘贴失败 → False——贴图是点缀，不回退文本。"""
+        if str(getattr(self, "sticker_mode", "off") or "off") == "off":
+            return False, "表情包功能未开启"
+        store = self._sticker_store()
+        if store is None:
+            return False, "表情包库不可用"
+        path = store.resolve(fname)
+        if path is None:
+            return False, (f"表情包库里没有 {str(fname)[:40]!r}"
+                           "（query 模式先 search_stickers；catalog 模式按"
+                           "清单里的文件名来）")
+        sender = getattr(self, "_send_sticker_file", None)
+        if sender is None:
+            return False, "当前运行模式不支持发送表情包"
+        try:
+            sent = bool(sender(path))
+        except Exception as e:
+            logger.error(f"[表情包] 发送异常: {e}")
+            sent = False
+        if not sent:
+            logger.warning(f"[表情包] 发送未确认，放弃: {fname}")
+            return False, "这张没发出去（微信没接住粘贴），你直接文字回复吧"
+        logger.info(f"[表情包] 已发送给 {chat_id!r}: {fname}")
+        return True, f"表情包已发出：{fname}"
+
+    def _describe_sticker(self, image_path):
+        """单张表情包视觉打标（设置页全库优化 / 日后懒补共用）。失败抛异常
+        由调用方决定。"""
+        from xiaoli_app.sticker_store import describe_sticker
+        with self._model_lock:
+            model = self.chat_model or VISION_MODEL_DEFAULT
+        return describe_sticker(self._post_chat_completions,
+                                self.vision_api_url, self.vision_api_key,
+                                model, image_path)
 
     # ---------- 语音发送（音源接口化，实现在 xiaoli_app.tts + 后端 send_voice）----------
 
@@ -945,6 +1234,117 @@ class WeChatBot(MediaCaptureMixin):
                     },
                 },
             })
+            # 触发器模型侧管理（三态开关，默认 off）：list/cancel/modify
+            # 在工具循环内执行（_exec_manage_reminder）。eager 态另有活跃
+            # 清单注入（call_vision_api 尾区），描述随态区分——有清单就
+            # 让模型直接用 id，没清单让它先 list。
+            if str(getattr(self, "model_trigger_manage", "off") or "off") != "off":
+                manage_eager = str(getattr(self, "model_trigger_manage")) == "eager"
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": "manage_reminder",
+                        "description": (
+                            "管理你之前为当前聊天创建的触发器（定时/状态监视）："
+                            "查询、取消、修改。只能操作本聊天的触发器，动不了"
+                            "别的聊天的；已结束（触发/过期/失效）的不能操作。"
+                            + ("当前活跃触发器清单已在系统消息里给出，直接用"
+                               "上面的 id 操作，不确定就先 list 核对。"
+                               if manage_eager else
+                               "先 action=list 拿到 id，再 cancel/modify。")
+                            + "要改状态监视的监控网页（url）时不能直接改——"
+                              "先 cancel 再重新创建（新网页要先看过内容）。"),
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string",
+                                           "enum": ["list", "cancel", "modify"],
+                                           "description": "list=查询本聊天活跃"
+                                                          "触发器；cancel=取消；"
+                                                          "modify=修改"},
+                                "id": {"type": "string",
+                                       "description": "cancel/modify 必填："
+                                                      "触发器 id"},
+                                "time": {"type": "string",
+                                         "description": "modify 定时触发器："
+                                                        "新触发时间 "
+                                                        "YYYY-MM-DD HH:MM"},
+                                "repeat": {"type": "string",
+                                           "enum": ["once", "daily", "weekly"],
+                                           "description": "modify 定时触发器："
+                                                          "重复规则"},
+                                "met_keywords": {"type": "array",
+                                                 "items": {"type": "string"},
+                                                 "description": "modify 状态监视："
+                                                                "新判定关键词数组"},
+                                "interval_seconds": {"type": "integer",
+                                                     "description": "modify 状态"
+                                                                    "监视：轮询间"
+                                                                    "隔秒（最小 10）"},
+                                "expire_at": {"type": "string",
+                                              "description": "modify 状态监视："
+                                                             "新截止时间 "
+                                                             "YYYY-MM-DD HH:MM"},
+                                "scope_start": {"type": "string",
+                                                "description": "modify 状态监视："
+                                                               "切片起始标记"},
+                                "scope_end": {"type": "string",
+                                              "description": "modify 状态监视："
+                                                             "切片结束标记"},
+                            },
+                            "required": ["action"],
+                        },
+                    },
+                })
+        # 表情包工具（三态，默认 off）：send_sticker 两个非 off 态都声明；
+        # search_stickers 仅 query 态（catalog 态清单已在系统消息，不用查）。
+        # 库目录不存在 = 整体不激活（模型看不到工具）。
+        _sticker_mode = str(getattr(self, "sticker_mode", "off") or "off")
+        if _sticker_mode in ("catalog", "query") \
+                and self._sticker_store() is not None:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "send_sticker",
+                    "description": (
+                        "发送一个表情包（微信表情图片）。"
+                        + ("可用表情包清单已在系统消息里给出，file 直接从"
+                           "清单里选。" if _sticker_mode == "catalog" else
+                           "先用 search_stickers 搜到合适的，再拿文件名"
+                           "发送。")
+                        + "可以只发表情包不说话（调用后不再输出文字），"
+                          "也可以表情包+文字一起回（表情先发、文字后发）；"
+                          "一次一张，别连发"),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file": {"type": "string",
+                                     "description": "要发送的表情包文件名"
+                                                    "（清单/搜索结果里给的）"},
+                        },
+                        "required": ["file"],
+                    },
+                },
+            })
+            if _sticker_mode == "query":
+                tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": "search_stickers",
+                        "description": "按情绪/场景关键词搜索可发送的表情包"
+                                       "（如「生气」「开心」「猫猫」），返回"
+                                       "最相关的候选。挑好了用 send_sticker "
+                                       "发送",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string",
+                                          "description": "情绪或场景关键词"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                })
         # 联网搜索工具（零配置：百度/必应/搜狗并发合并，见 xiaoli_app/web_search）。
         # 有效开关按聊天取（feature_enabled：per-chat 覆盖优先）——关闭时
         # 整体不声明，模型看不到就不会调用。query 描述写明真机校准的措辞
@@ -1092,6 +1492,20 @@ class WeChatBot(MediaCaptureMixin):
         # 一条 system，消除空 messages 隐患。
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
         messages.append({"role": "system", "content": f"当前时间：{current_time}"})
+        # eager 态触发器清单注入（manage_reminder 配套）：紧跟当前时间的尾区
+        # ——清单变化极少（创建/取消才变），放这里不打碎「人设+历史」前缀
+        # 缓存；模型拿到 id 后取消/修改可一轮完成，还能主动说出已有约定。
+        if chat_id and str(getattr(self, "model_trigger_manage", "off")
+                           or "off") == "eager":
+            listing = self._active_triggers_brief(chat_id)
+            if listing:
+                messages.append({"role": "system", "content": listing})
+        # catalog 态表情包清单注入（同一尾区语义：清单只在库变化时变）
+        if chat_id and str(getattr(self, "sticker_mode", "off")
+                           or "off") == "catalog":
+            cat = self._sticker_catalog_text()
+            if cat:
+                messages.append({"role": "system", "content": cat})
         # always 语音模式纪律：每条回复必须经 send_voice 发出（模型挑情绪的
         # 唯一通道）。放当前时间之后、user 之前——它不随轮次变化，且位于
         # 每秒变化的时间消息之后，不影响缓存前缀。模式取该聊天的语音有效
@@ -1137,6 +1551,9 @@ class WeChatBot(MediaCaptureMixin):
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
         try:
+            # sticker_sent：本次调用里已成功发出过表情包——随后模型不再输出
+            # 文字 = 纯表情包回复（不降级），输出了文字 = 表情包+文字
+            sticker_sent = False
             for _round in range(VISION_TOOL_ROUNDS):
                 data = self._post_chat_completions(
                     ov.get("ai_api_url") or self.vision_api_url, headers,
@@ -1149,20 +1566,29 @@ class WeChatBot(MediaCaptureMixin):
                 message = choices[0].get("message", {}) or {}
                 tool_calls = message.get("tool_calls") or []
                 if not tool_calls:
-                    content = (message.get("content") or "").strip()
+                    content = strip_reply_prefix(
+                        (message.get("content") or "").strip())
                     if not content:
+                        if sticker_sent:
+                            # 纯表情包回复：图已发出（工具循环内），空文本
+                            # 是预期终态，绝不降级闲聊
+                            return {"kind": "text", "content": "",
+                                    "sticker_sent": True}
                         logger.warning("视觉模型返回空 content")
                         return None
-                    # 回复前缀过滤：时间戳 [ts]、[私聊 - 名字]、[群聊 - 名字]
-                    # （模型偶发把注入的历史/装饰前缀复读进回复时去除）
-                    content = strip_reply_prefix(content)
+                    if sticker_sent:
+                        return {"kind": "text", "content": content,
+                                "sticker_sent": True}
                     return {"kind": "text", "content": content}
                 # 任务/提醒工具调用优先原样返回（既有单次语义不变，不让查询
-                # 工具往返延迟任务投递）；查询型工具（搜索/抓取/记忆检索）
-                # 回填结果继续循环
+                # 工具往返延迟任务投递）；查询型工具（搜索/抓取/记忆检索/
+                # 触发器管理/表情包）回填结果继续循环——manage_reminder 常要
+                # list→cancel/modify 连环操作，必须在循环内回执
                 other = [tc for tc in tool_calls
                          if _tool_call_name(tc) not in
-                         ("web_search", "web_fetch", "recall_memory")]
+                         ("web_search", "web_fetch", "recall_memory",
+                          "manage_reminder", "send_sticker",
+                          "search_stickers")]
                 if other:
                     fn = other[0].get("function", {}) or {}
                     return {"kind": "tool_call",
@@ -1199,6 +1625,22 @@ class WeChatBot(MediaCaptureMixin):
                             except Exception as e:
                                 tool_text = f"记忆检索失败：{e}"
                         logger.info(f"[记忆检索] {query!r} -> {tool_text[:60]}")
+                    elif name == "manage_reminder":
+                        raw_args = ((tc or {}).get("function") or {})\
+                            .get("arguments") or "{}"
+                        tool_text = self._exec_manage_reminder(chat_id, raw_args)
+                        logger.info(
+                            f"[触发器管理] {chat_id!r} -> {tool_text[:80]}")
+                    elif name == "send_sticker":
+                        ok, tool_text = self._exec_send_sticker(
+                            chat_id, _tool_arg(tc, "file"))
+                        if ok:
+                            sticker_sent = True
+                    elif name == "search_stickers":
+                        tool_text = self._exec_search_stickers(
+                            _tool_arg(tc, "query"))
+                        logger.info(
+                            f"[表情包搜索] {tool_text[:60]}")
                     else:  # web_fetch（任务/提醒已在 other 分支返回）
                         url = _tool_arg(tc, "url")
                         if not url:
@@ -1365,8 +1807,25 @@ class WeChatBot(MediaCaptureMixin):
                 parts.append(part)
         return parts
 
+    def _segment_hold(self):
+        """段间停留秒数（_send_parts 每段粘贴进输入框之后、回车之前）。
+
+        两个互斥开关（UI 保证互斥，后端抖动优先，可都关）：
+        - 间隔抖动开 → [下限, 上限] 均匀随机（活人感：固定间隔是机器味）
+        - 段间等待开 → 固定秒数（历史行为，默认 2s）
+        - 都关 → 0（下一段立即回车）
+        参数热改即时生效；下限>上限时收敛为下限（防设置页存出反区间）。"""
+        if getattr(self, "segment_jitter_enabled", False):
+            lo = max(0.0, float(getattr(self, "segment_jitter_min", 1.5)))
+            hi = max(lo, float(getattr(self, "segment_jitter_max", 3.0)))
+            return random.uniform(lo, hi)
+        if getattr(self, "segment_wait_enabled", True):
+            return max(0.0, float(getattr(self, "segment_wait_seconds", 2.0)))
+        return 0.0
+
     def _send_parts(self, chat, text):
-        """逐段发送（段间节奏 REPLY_SEGMENT_INTERVAL_SECONDS）。
+        """逐段发送（段间节奏见 _segment_hold：默认固定 2s，可换上下限随机
+        或关闭）。
 
         节奏口径（用户定案）：间隔发生在**下一段粘贴进输入框之后、回车
         之前**——对方端在这段停留里看到「对方正在输入…」，多条消息有活人
@@ -1379,7 +1838,7 @@ class WeChatBot(MediaCaptureMixin):
         """
         parts = self._split_reply_parts(text)
         for i, part in enumerate(parts):
-            hold = 0.0 if i == 0 else REPLY_SEGMENT_INTERVAL_SECONDS
+            hold = 0.0 if i == 0 else self._segment_hold()
             self.wx.send_text(chat, part, hold_after_paste=hold)
             preview = part[:50].replace('\n', ' ')
             logger.info(f"🤖 → [{chat}]: {preview}")
