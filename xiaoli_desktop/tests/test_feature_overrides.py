@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xiaoli_app import config_store
 from xiaoli_app.reminders_store import RemindersStore
-from xiaoli_bot import AgentBot, VISION_CHAT_PROMPT, VISION_ROUTE_PROMPT
+from xiaoli_bot import (AgentBot, VISION_CHAT_PROMPT, VISION_NEUTRAL_PROMPT,
+                        VISION_ROUTE_PROMPT)
 from wechat_bot import WeChatBot
 
 PROFILE = {
@@ -220,13 +221,17 @@ class TestApplyVisionResultGating(unittest.TestCase):
 
 
 class TestRoutePromptVariant(unittest.TestCase):
-    """任务桥关闭时 vision prompt 换纯聊天变体（不提 dispatch_task）。"""
+    """任务桥关闭时 vision prompt 换变体：其他工具有效（语音/搜索/闹钟）
+    → 中性变体（不点名 dispatch_task，也不说「不要调用任何工具」——那会
+    压制已声明工具）；一个工具都没有 → 纯聊天变体（防幻觉句保留）。"""
 
     def test_prompt_constant_mentions_no_tool(self):
         self.assertNotIn("dispatch_task", VISION_CHAT_PROMPT)
+        self.assertNotIn("dispatch_task", VISION_NEUTRAL_PROMPT)
         self.assertIn("dispatch_task", VISION_ROUTE_PROMPT)
 
-    def test_vision_route_uses_chat_prompt_when_task_off(self):
+    def test_vision_route_uses_neutral_prompt_when_task_off_with_tools(self):
+        """任务桥关 + 闹钟工具可用（reminders 存在）→ 中性变体。"""
         b = _make_bot()
         b.chat_feature_overrides = {"林小满": {"task": False}}
         captured = {}
@@ -239,8 +244,28 @@ class TestRoutePromptVariant(unittest.TestCase):
         b._deliver_reply = lambda chat, text, trigger=False: None
         r = b._vision_route("林小满", "王", "在吗")
         self.assertTrue(r)
-        self.assertIn(VISION_CHAT_PROMPT, captured["text"])
+        self.assertIn(VISION_NEUTRAL_PROMPT, captured["text"])
+        self.assertNotIn("不要调用任何工具", captured["text"],
+                         "其他工具可用时不得注入抑制句（会压制 set_reminder 等）")
         self.assertNotIn(VISION_ROUTE_PROMPT, captured["text"])
+
+    def test_vision_route_uses_chat_prompt_when_no_tools(self):
+        """任务桥关 + 其他工具全不可用（无 reminders/语音/搜索/深层记忆）
+        → 纯聊天变体（防幻觉句保留）。"""
+        b = _make_bot(reminders=None, web_search_enabled=False,
+                      memory_deep_enabled=False, voice_mode="off",
+                      tts_endpoint="")
+        b.chat_feature_overrides = {"林小满": {"task": False}}
+        captured = {}
+
+        def fake_call_vision_api(content, chat_id=None, related_memory=None):
+            captured["text"] = content[0]["text"]
+            return {"kind": "text", "content": "嗯嗯"}
+
+        b.call_vision_api = fake_call_vision_api
+        b._deliver_reply = lambda chat, text, trigger=False: None
+        b._vision_route("林小满", "王", "在吗")
+        self.assertIn(VISION_CHAT_PROMPT, captured["text"])
 
     def test_vision_route_uses_route_prompt_when_task_on(self):
         b = _make_bot()

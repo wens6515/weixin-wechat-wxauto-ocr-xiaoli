@@ -80,12 +80,21 @@ VISION_ROUTE_PROMPT = (
 )
 
 
-# 任务桥按聊天关闭（feature_enabled(task)=False）时的纯聊天 prompt 变体：
-# 文字里完全不提 dispatch_task，与「工具不声明」配套——提示词提一个没声明
-# 的工具会诱导模型幻觉调用。
+# 任务桥按聊天关闭且**其他工具也不可用**（语音/搜索/闹钟/回忆全无）时的
+# 纯聊天 prompt 变体：文字里完全不提任何工具名，与「工具不声明」配套——
+# 提示词提一个没声明的工具会诱导模型幻觉调用。
 VISION_CHAT_PROMPT = (
     "有人给你发了条消息，照你平时的样子回他。\n"
     "普通的闲聊、打招呼、问问题、要资料都直接回他，不要调用任何工具。"
+)
+
+
+# 中性路由变体：任务桥关闭但其他工具（语音/搜索/闹钟/回忆）可用时使用。
+# 不能说「不要调用任何工具」（会压制已声明的工具——实测事故：任务桥关 +
+# 文字设闹钟，模型无工具可调只能闲聊）；也不提 dispatch_task（工具未声明，
+# 提了会诱导幻觉调用）。
+VISION_NEUTRAL_PROMPT = (
+    "有人给你发了条消息，照你平时的样子回他。"
 )
 
 
@@ -282,10 +291,14 @@ class AgentBot(WeChatBot):
                 decorated = f"群聊：{chat_name}：{text}"
         else:
             decorated = f"私聊 - {sender}：{text}" if sender else f"私聊：{text}"
-        # 任务桥按聊天取有效开关：关闭时用纯聊天 prompt 变体（不提
-        # dispatch_task，与「工具不声明」配套，防模型幻觉调用未声明工具）
+        # 提示词与工具注入同一套条件（_vision_tools 是 call_vision_api 的
+        # 声明单一事实源）：任务桥开 → 提 dispatch_task 的路由变体；任务桥
+        # 关但语音/搜索/闹钟等工具可用 → 中性变体（「不要调用任何工具」会
+        # 压制已声明工具）；一个工具都没有 → 纯聊天变体防幻觉。
         if self.feature_enabled(chat_name, "task"):
             route_prompt = VISION_ROUTE_PROMPT
+        elif self._vision_tools(chat_name):
+            route_prompt = VISION_NEUTRAL_PROMPT
         else:
             route_prompt = VISION_CHAT_PROMPT
         prompt = f"{route_prompt}\n\n用户消息：\n{decorated}"
@@ -990,7 +1003,8 @@ class AgentBot(WeChatBot):
         附件只由文件消息路径投递（_process_file_with_instruction，用户确实
         发了文件时才带）。纯文字任务不带任何附件——历史缺陷：文本路径无条件
         找接收目录"最新"文件，用户没发文件时把无关旧文件投给 agent 造成误判。
-        vision 调用失败（None）时降级回退普通聊天（API 失败默认非任务，与现状一致）。
+        恒走 vision 单调用（工具按各自开关在 _vision_tools 逐项注入）；调用
+        失败（None）时降级回退普通聊天。
         """
         is_group = getattr(self.wx, "_current_is_group", None)
         if is_group is None:
@@ -1002,14 +1016,16 @@ class AgentBot(WeChatBot):
                 content = "你好呀～"  # 与基类 process_new_messages 群聊空内容文案一致
         question = content.strip()
         logger.info(f"[MSG] [{chat_name}] {sender}: {question[:80]}")
-        if self.feature_enabled(chat_name, "task"):
-            resp = self._vision_route(
-                chat_name, sender, question,
-                msg_id=msg_id, raw_message=content,
-                is_group=is_group, multi_sender=multi_sender)
-            if resp is not None:
-                return True
-            # vision 降级（None）：API 失败默认非任务，回退普通聊天（与现状一致）
+        # 恒走 vision 单调用：任务桥只是 dispatch_task 一项的开关，不再把守
+        # 整条链路——否则任务桥关闭时语音/搜索/闹钟工具对文字消息全部陪葬
+        #（实测事故：任务桥关 +「明天9:30提醒我」，模型无工具可调只能闲聊）
+        resp = self._vision_route(
+            chat_name, sender, question,
+            msg_id=msg_id, raw_message=content,
+            is_group=is_group, multi_sender=multi_sender)
+        if resp is not None:
+            return True
+        # vision 降级（None）：API 失败回退普通聊天
         reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
         self._deliver_reply(chat_name, reply)
         return True
@@ -1312,24 +1328,25 @@ class AgentBot(WeChatBot):
         非任务 → 直接回复（不再两段式：GLM-4V 描述转述 + 主模型二次回复）。
         vision 调用失败（None）→ 降级回退纯文字处理（保持现状）。
         """
-        if self.task_enabled:
-            img_paths = self._capture_media_images(chat_name, min_top=min_top)
-            try:
-                resp = self._vision_route(
-                    chat_name, sender, text_content, img_paths=img_paths,
-                    msg_id=None, raw_message=text_content,
-                    multi_sender=multi_sender)
-                if resp is not None:
-                    return True
-            finally:
-                # dispatch 同步复制附件进任务目录，路由返回后临时文件即无用；
-                # 文本/触发器/降级分支同样不留残留（与 _process_pure_image 对齐）
-                for p in (img_paths or []):
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
-        # 降级：vision 失败或任务桥关闭 → 回退纯文字处理
+        # 恒走 vision 单调用（旧闸下任务桥关闭时图+文直接掉进纯文字处理，
+        # 图片内容完全丢失）；工具由 _vision_tools 按开关逐项注入
+        img_paths = self._capture_media_images(chat_name, min_top=min_top)
+        try:
+            resp = self._vision_route(
+                chat_name, sender, text_content, img_paths=img_paths,
+                msg_id=None, raw_message=text_content,
+                multi_sender=multi_sender)
+            if resp is not None:
+                return True
+        finally:
+            # dispatch 同步复制附件进任务目录，路由返回后临时文件即无用；
+            # 文本/触发器/降级分支同样不留残留（与 _process_pure_image 对齐）
+            for p in (img_paths or []):
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        # 降级：vision 失败 → 回退纯文字处理
         return self._handle_text(
             chat_name, sender, text_content, None, multi_sender=multi_sender)
 

@@ -36,6 +36,7 @@ def _make_bot(voice_mode="off", profile=None, web_search=True):
     bot.vision_api_key = "k"
     bot.chat_model = "test-model"
     bot.chat_temperature = 0.7
+    bot.chat_top_p = 0.9
     bot.reply_max_tokens = REPLY_MAX_TOKENS
     bot._model_lock = threading.RLock()
     bot.memory_compress_enabled = False
@@ -161,6 +162,39 @@ class TestWebSearchGating(unittest.TestCase):
         names = _tool_names(bot)
         self.assertNotIn("web_search", names)
         self.assertNotIn("web_fetch", names)
+
+
+class TestVisionPayloadShape(unittest.TestCase):
+    """拆闸后的 payload 形态：top_p 对齐 chat 链路（文本回复恒走 vision，
+    top_p 不得静默失效）+ 空工具集不带 tools/tool_choice 键（部分厂商对
+    空数组 + tool_choice 返回 400）+ 任务桥关不连带闹钟工具。"""
+
+    def _payload(self, bot):
+        bot.call_vision_api([{"type": "text", "text": "hi"}])
+        return bot._post_chat_completions.call_args.args[2]
+
+    def test_payload_includes_top_p(self):
+        bot = _make_bot(voice_mode="off", web_search=True)
+        self.assertEqual(self._payload(bot)["top_p"], 0.9)
+
+    def test_all_tools_off_omits_tool_keys(self):
+        bot = _make_bot(voice_mode="off", web_search=False)
+        bot.task_enabled = False
+        bot.reminders = None
+        bot.memory_deep_enabled = False
+        payload = self._payload(bot)
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("tool_choice", payload)
+
+    def test_task_off_keeps_reminder_tool(self):
+        """任务桥关只影响 dispatch_task：set_reminder（闹钟）照常声明——
+        实测事故回归（任务桥关 + 文字设闹钟，模型无工具可调只能闲聊）。"""
+        bot = _make_bot(voice_mode="off", web_search=False)
+        bot.task_enabled = False
+        bot.reminders = object()  # 仅需非 None（_vision_tools 的存在性判据）
+        names = _tool_names(bot)
+        self.assertIn("set_reminder", names)
+        self.assertNotIn("dispatch_task", names)
 
 
 if __name__ == "__main__":
