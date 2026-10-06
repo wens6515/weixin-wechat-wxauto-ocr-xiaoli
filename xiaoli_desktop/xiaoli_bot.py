@@ -8,7 +8,7 @@
 
 运行：python xiaoli_bot.py --run     自检：python xiaoli_bot.py --test
 """
-import json, os, sys, time, re, tempfile, subprocess, logging, traceback, shutil, uuid, struct, base64
+import json, os, sys, time, re, traceback, base64
 import queue
 import threading
 import requests as req
@@ -71,20 +71,6 @@ def load_merged_config(path="config.json"):
     return cfg
 
 
-# =====================================================================
-# 任务桥核心（模块函数，可独立测试，不依赖微信）
-# =====================================================================
-
-CLASSIFY_PROMPT = (
-    "你是微信机器人小漓的『任务路由器』。判断用户发来的消息是否是一个需要由 AI 代理（天枢）"
-    "实际执行的任务请求——例如：根据文档做一个网站、做一个 PPT、写一段代码、分析一份数据、"
-    "整理文件、生成文档、下载并处理内容等需要动手完成的工作。\n"
-    "普通的闲聊、打招呼、问问题、要资料等不算任务。\n"
-    "只输出一个 JSON 对象，不要输出任何其他文字：\n"
-    '{"is_task": true 或 false, "task": "当 is_task 为 true 时，用一句清晰的话描述要完成的任务"}'
-)
-
-
 VISION_ROUTE_PROMPT = (
     "有人给你发了条消息，照你平时的样子回他。\n"
     "只有当这件事确实需要动手做出来时才调用 dispatch_task 把活交出去"
@@ -108,7 +94,8 @@ VISION_CHAT_PROMPT = (
 # 既有导入路径（tests / xiaoli_app.setup / xiaoli_web）不变。
 # =====================================================================
 from xiaoli_app.task_bridge import (
-    acquire_single_instance, activate_window_by_title, classify_task_with_llm,
+    CLASSIFY_PROMPT, acquire_single_instance, activate_window_by_title,
+    classify_task_with_llm,
     clipboard_set_text, dispatch_task, find_window_by_title, generate_task_id,
     has_active_tasks, list_windows, poll_outbox, read_clipboard_files,
     release_single_instance, resolve_result_file, scan_task_status,

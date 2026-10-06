@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+from PIL import Image
+
 from .visual_regions import _normalize_region, _SESSION_REGION_RATIO
 
 logger = logging.getLogger(__name__)

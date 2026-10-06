@@ -103,7 +103,7 @@ def extract_file_text(filepath):
 
     # .doc（旧版 Word）
     if ext == '.doc':
-        text = self._extract_office_com_text(filepath, 'Word.Application')
+        text = extract_office_com_text(filepath, 'Word.Application')
         if text:
             return text
         return None
@@ -134,7 +134,7 @@ def extract_file_text(filepath):
 
     # .ppt（旧版 PowerPoint）
     if ext == '.ppt':
-        text = self._extract_office_com_text(filepath, 'PowerPoint.Application')
+        text = extract_office_com_text(filepath, 'PowerPoint.Application')
         if text:
             return text
         return None
@@ -189,7 +189,7 @@ def extract_file_text(filepath):
         except Exception as e:
             logger.debug(f"[文件] xlrd 读取失败: {e}")
         # 回退到 Excel COM
-        text = self._extract_office_com_text(filepath, 'Excel.Application')
+        text = extract_office_com_text(filepath, 'Excel.Application')
         if text:
             return text
         return None
