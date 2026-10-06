@@ -929,3 +929,64 @@ class TestDispatchAttachmentWritable(unittest.TestCase):
             self.assertTrue(os.access(dest, os.W_OK),
                             "投递后的附件必须可写，否则任务目录删不掉")
             os.unlink(dest)  # 真删一次（只读位没清会在这里报错）
+
+
+class TestToolInjectionNoTaskGate(unittest.TestCase):
+    """拆闸回归（实测事故）：任务桥关闭时文字 / 图+文消息必须仍走 vision
+    单调用——工具在 _vision_tools 里按各自开关逐项注入，任务桥只管
+    dispatch_task 一项。旧闸下文字消息直落 call_chat_ai（零工具声明），
+    「明天9:30提醒我」被模型当闲聊敷衍（真机日志：模型答「我没工具嘛」）。
+    vision 调用失败仍降级回 call_chat_ai（网络容错不变）。"""
+
+    def _bot(self):
+        bot = _make_bot()
+        bot.task_enabled = False
+        bot.web_search_enabled = True
+        bot.voice_mode = "off"
+        bot.tts_endpoint = ""
+        bot.voice_profiles = []
+        bot.active_voice_profile_id = ""
+        bot.memory_deep_enabled = False
+        bot.call_chat_ai = lambda *a, **k: "降级回复"
+        bot._send_text = lambda *a, **k: None
+        bot._add_history = lambda *a, **k: None
+        bot._deliver_reply = lambda chat, text, trigger=False: None
+        return bot
+
+    def test_text_routes_vision_with_task_off(self):
+        bot = self._bot()
+        seen = []
+
+        def fake_vision(content, chat_id=None, related_memory=None):
+            seen.append(content)
+            return {"kind": "text", "content": "好呀"}
+
+        bot.call_vision_api = fake_vision
+        sent = []
+        bot._deliver_reply = lambda chat, text, trigger=False: sent.append(text)
+        r = bot._handle_text("小明", "王", "明天9:30提醒我洗被子", "m1")
+        self.assertTrue(r)
+        self.assertEqual(len(seen), 1,
+                         "任务桥关闭时文字消息必须仍走 vision 工具链路")
+        self.assertEqual(sent, ["好呀"])
+
+    def test_text_falls_back_to_chat_when_vision_fails(self):
+        bot = self._bot()
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
+        calls = []
+        bot.call_chat_ai = lambda *a, **k: calls.append(a) or "降级回复"
+        bot._handle_text("小明", "王", "在吗", None)
+        self.assertEqual(len(calls), 1, "vision 失败必须降级普通聊天")
+
+    def test_image_with_text_routes_vision_with_task_off(self):
+        """旧闸下任务桥关闭时图+文直接掉进纯文字处理（图片内容完全丢失）。"""
+        bot = self._bot()
+        seen = []
+        bot.call_vision_api = lambda content, chat_id=None, related_memory=None: \
+            seen.append(content) or {"kind": "text", "content": "看到了"}
+        bot._capture_media_images = \
+            lambda chat, min_top=None, exclude_rows=None: []
+        r = bot._handle_image_with_text("小明", "王", "这是什么")
+        self.assertTrue(r)
+        self.assertEqual(len(seen), 1,
+                         "任务桥关闭时图+文不得掉进纯文字路径丢图")

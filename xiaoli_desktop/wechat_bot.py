@@ -821,106 +821,21 @@ class WeChatBot(MediaCaptureMixin):
                            wall_budget=float(getattr(
                                self, "api_wall_budget", API_WALL_BUDGET_DEFAULT)))
 
-    def call_vision_api(self, content, chat_id=None, related_memory=None):
-        """单调用视觉识别（OpenAI 兼容 / chat.completions）。
-
-        content：块列表 list[dict]，格式
-          [{"type": "text", "text": ...},
-           {"type": "image_url", "image_url": {"url": "data:image/..."}}]
-        图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
-        消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
-        带图返回 400）。消息布局（缓存友好：稳定前缀在前、每轮变化区在尾）：
-          [system 人设] → [system 回复纪律] → [历史(带[ts])] →
-          [system 重要记忆] → [system 相关记忆] → [system 当前时间] → [user content]
-        人设（self.system_prompt）前置为 system 纯文本消息（空人设则不插入人设
-        system 消息）；重要记忆/相关记忆来自长记忆压缩产出（per-chat，未启用
-        或无内容时缺省），放在历史之后的尾区——压缩提交会改写重要记忆，插在
-        历史之前时每次提交都把整条「人设+历史」前缀缓存作废，挪到尾区后只
-        作废尾巴一小截；「当前时间」system 紧贴当前消息——它每秒变化，绝不能
-        插在历史之前打断缓存前缀。
-
-        chat_id 可选（默认 None）：非空时注入重要记忆块与 _get_history(chat_id)
-        近期历史（语义逐字对齐 call_chat_ai：有 time 字段带 [ts] 前缀，否则
-        原文；不重排）。为空时仍注入当前时间 system（图片/文件描述路径自动
-        受益；persona 为空时本条保证 messages 至少一条 system）。
-
-        payload 声明 dispatch_task / set_reminder / recall_memory / web_search /
-        web_fetch 工具（tool_choice=auto）。web_search/web_fetch/recall_memory
-        是查询型工具循环：模型调用后本方法执行（搜索/抓正文/记忆检索），把
-        结果作为 tool 消息回填、继续补全，直到给出最终答复。整个调用最多
-        VISION_TOOL_ROUNDS 次补全，循环耗尽仍未收敛返回 None（调用方降级）。
-        dispatch_task/set_reminder 调用优先原样返回（既有单次语义不变，查询
-        往返不延迟任务投递）。工具往返只存在于本次调用的 messages，不写入
-        对话历史。
-
-        返回结构化结果（供上层按 dict 处理）：
-        - message.tool_calls 含 dispatch_task/set_reminder →
-          {'kind': 'tool_call', 'name': ..., 'arguments': ...}（arguments 为原始 JSON 字符串）
-        - 仅 message.content（含经工具循环后的最终答复）→
-          {'kind': 'text', 'content': ...}
-        - 非 200 / 无 choices / content 空白 / 循环耗尽 → None
+    def _vision_tools(self, chat_id):
+        """call_vision_api 的工具声明集（单一事实源）：每个工具按自己的
+        开关单独注入，互不连带——
+        - dispatch_task ← 任务桥开关（全局 + per-chat 覆盖）
+        - send_voice ← 该聊天语音有效三态（voice_state）+ TTS 配置齐全
+        - set_reminder ← 恒注入（定时提醒不产生额外 API 成本，无独立开关；
+          状态监视开关只在创建时拦 kind=condition，见 _create_condition_watch）
+        - web_search / web_fetch ← 联网搜索开关
+        - recall_memory ← 深层记忆开关
+        _vision_route 选提示词变体时复用本方法——同一套条件，防两处漂移；
+        返回空列表时调用方 payload 不带 tools/tool_choice 键。
         """
-        # per-chat 角色卡绑定：该聊天绑定了卡时，人设/参数/端点以卡为准
-        ov = self._chat_overrides(chat_id)
-        headers = {"Authorization": f"Bearer {ov.get('ai_api_key') or self.vision_api_key}",
-                   "Content-Type": "application/json"}
-        # 人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
-        # 只能进 user 消息）；persona 为空时不插入空 system 消息。
-        persona = (ov.get("system_prompt")
-                   or getattr(self, "system_prompt", "") or "").strip()
-        messages = [{"role": "system", "content": persona}] if persona else []
-        # 回复风格纪律：运行时统一注入（与角色卡解耦——卡只管「她是谁」）。
-        # 位置紧跟人设、在重要记忆之前：仍属稳定前缀区，不破坏缓存布局。
-        if REPLY_STYLE_RULES:
-            messages.append({"role": "system", "content": REPLY_STYLE_RULES})
-        if chat_id:
-            # 历史注入：语义逐字对齐 call_chat_ai（system 之后、user 之前；
-            # 有 time 字段带 [ts] 前缀，否则原文；不重排——_get_history 返回
-            # 列表本身已按时间有序）
-            for h in self._get_history(chat_id):
-                if "time" in h:
-                    ts = h["time"]
-                    msg_content = f"[{ts}] {h['content']}"
-                else:
-                    msg_content = h['content']
-                messages.append({"role": h["role"], "content": msg_content})
-        # 重要记忆（压缩产出）在历史之后的尾区：缓存布局见 docstring
-        important = self._important_block(chat_id) if chat_id else None
-        if important:
-            messages.append({"role": "system", "content": important})
-        if related_memory:
-            messages.append({"role": "system", "content": related_memory})
-        # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
-        # 插在历史前会打断缓存前缀）；persona 为空时本条保证 messages 至少
-        # 一条 system，消除空 messages 隐患。
-        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
-        # always 语音模式纪律：每条回复必须经 send_voice 发出（模型挑情绪的
-        # 唯一通道）。放当前时间之后、user 之前——它不随轮次变化，且位于
-        # 每秒变化的时间消息之后，不影响缓存前缀。模式取该聊天的语音有效
-        # 状态（voice_state：per-chat 覆盖优先，缺省跟随全局）；配置校验用
-        # _voice_profile_ready（不含模式——单聊强制开时全局可为 off）。
-        voice_profile = self._voice_profile_ready()
-        v_state = self.voice_state(chat_id)
-        if voice_profile is not None and v_state == "always":
-            messages.append({"role": "system", "content": ALWAYS_VOICE_RULES})
-        messages.append({"role": "user", "content": content})
-        with self._model_lock:
-            # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
-            # 空则兜底 vision-exp 纯名（防空 model / 带前缀兜底 → API 400）；
-            # 温度随聊天温度（vision_temp 已删）；绑定卡带模型/参数时以卡为准
-            model = strip_model_prefix(ov.get("chat_model") or "") \
-                or self.chat_model or VISION_MODEL_DEFAULT
-            temp = float(ov["temperature"]) if ov.get("temperature") is not None \
-                else self.chat_temperature
-        # 上下文预算裁剪：超长历史/文件全文会撑爆模型上下文上限
-        # （实测请求 272 万 token → API 400 "maximum context length"）。
-        # 逐字对齐 call_chat_ai：从最旧历史开始丢弃，保证单次请求不超模型上下文。
-        messages = fit_messages_in_budget(
-            messages, budget=getattr(self, "max_context_tokens", 100000))
+        tools = []
         # 任务投递工具：按聊天有效开关声明（全局关 + 单聊强制开 = 该聊天
         # 仍可投；关闭 = 不声明，模型看不到就不会调用）
-        tools = []
         if self.feature_enabled(chat_id, "task"):
             tools.append({
                 "type": "function",
@@ -941,6 +856,8 @@ class WeChatBot(MediaCaptureMixin):
         # 是**强制回复通道**——每条回复都必须经它发出（纪律见
         # ALWAYS_VOICE_RULES system 消息），模型借 emotion 挑情绪。
         # off 或配置不全时不注入。
+        voice_profile = self._voice_profile_ready()
+        v_state = self.voice_state(chat_id)
         if voice_profile is not None and v_state in ("auto", "always"):
             tools.append(self._send_voice_tool(voice_profile, v_state))
         if getattr(self, "reminders", None) is not None:
@@ -1098,14 +1015,127 @@ class WeChatBot(MediaCaptureMixin):
                     },
                 },
             })
+        return tools
+
+    def call_vision_api(self, content, chat_id=None, related_memory=None):
+        """单调用视觉识别（OpenAI 兼容 / chat.completions）。
+
+        content：块列表 list[dict]，格式
+          [{"type": "text", "text": ...},
+           {"type": "image_url", "image_url": {"url": "data:image/..."}}]
+        图片块可选——无图时只含 text 块（调用方构造，本方法原样透传进 user
+        消息；DeepSeek vision 限制：图片只能出现在 user 消息，system/assistant
+        带图返回 400）。消息布局（缓存友好：稳定前缀在前、每轮变化区在尾）：
+          [system 人设] → [system 回复纪律] → [历史(带[ts])] →
+          [system 重要记忆] → [system 相关记忆] → [system 当前时间] → [user content]
+        人设（self.system_prompt）前置为 system 纯文本消息（空人设则不插入人设
+        system 消息）；重要记忆/相关记忆来自长记忆压缩产出（per-chat，未启用
+        或无内容时缺省），放在历史之后的尾区——压缩提交会改写重要记忆，插在
+        历史之前时每次提交都把整条「人设+历史」前缀缓存作废，挪到尾区后只
+        作废尾巴一小截；「当前时间」system 紧贴当前消息——它每秒变化，绝不能
+        插在历史之前打断缓存前缀。
+
+        chat_id 可选（默认 None）：非空时注入重要记忆块与 _get_history(chat_id)
+        近期历史（语义逐字对齐 call_chat_ai：有 time 字段带 [ts] 前缀，否则
+        原文；不重排）。为空时仍注入当前时间 system（图片/文件描述路径自动
+        受益；persona 为空时本条保证 messages 至少一条 system）。
+
+        payload 的工具集由 _vision_tools 按开关逐项声明（dispatch_task /
+        send_voice / set_reminder / web_search / web_fetch / recall_memory；
+        tool_choice=auto；集合为空时 payload 不带 tools/tool_choice 键）。
+        web_search/web_fetch/recall_memory 是查询型工具循环：模型调用后本
+        方法执行（搜索/抓正文/记忆检索），把结果作为 tool 消息回填、继续
+        补全，直到给出最终答复。整个调用最多 VISION_TOOL_ROUNDS 次补全，
+        循环耗尽仍未收敛返回 None（调用方降级）。dispatch_task/set_reminder
+        调用优先原样返回（既有单次语义不变，查询往返不延迟任务投递）。工具
+        往返只存在于本次调用的 messages，不写入对话历史。
+
+        返回结构化结果（供上层按 dict 处理）：
+        - message.tool_calls 含 dispatch_task/set_reminder →
+          {'kind': 'tool_call', 'name': ..., 'arguments': ...}（arguments 为原始 JSON 字符串）
+        - 仅 message.content（含经工具循环后的最终答复）→
+          {'kind': 'text', 'content': ...}
+        - 非 200 / 无 choices / content 空白 / 循环耗尽 → None
+        """
+        # per-chat 角色卡绑定：该聊天绑定了卡时，人设/参数/端点以卡为准
+        ov = self._chat_overrides(chat_id)
+        headers = {"Authorization": f"Bearer {ov.get('ai_api_key') or self.vision_api_key}",
+                   "Content-Type": "application/json"}
+        # 人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
+        # 只能进 user 消息）；persona 为空时不插入空 system 消息。
+        persona = (ov.get("system_prompt")
+                   or getattr(self, "system_prompt", "") or "").strip()
+        messages = [{"role": "system", "content": persona}] if persona else []
+        # 回复风格纪律：运行时统一注入（与角色卡解耦——卡只管「她是谁」）。
+        # 位置紧跟人设、在重要记忆之前：仍属稳定前缀区，不破坏缓存布局。
+        if REPLY_STYLE_RULES:
+            messages.append({"role": "system", "content": REPLY_STYLE_RULES})
+        if chat_id:
+            # 历史注入：语义逐字对齐 call_chat_ai（system 之后、user 之前；
+            # 有 time 字段带 [ts] 前缀，否则原文；不重排——_get_history 返回
+            # 列表本身已按时间有序）
+            for h in self._get_history(chat_id):
+                if "time" in h:
+                    ts = h["time"]
+                    msg_content = f"[{ts}] {h['content']}"
+                else:
+                    msg_content = h['content']
+                messages.append({"role": h["role"], "content": msg_content})
+        # 重要记忆（压缩产出）在历史之后的尾区：缓存布局见 docstring
+        important = self._important_block(chat_id) if chat_id else None
+        if important:
+            messages.append({"role": "system", "content": important})
+        if related_memory:
+            messages.append({"role": "system", "content": related_memory})
+        # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
+        # 插在历史前会打断缓存前缀）；persona 为空时本条保证 messages 至少
+        # 一条 system，消除空 messages 隐患。
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
+        # always 语音模式纪律：每条回复必须经 send_voice 发出（模型挑情绪的
+        # 唯一通道）。放当前时间之后、user 之前——它不随轮次变化，且位于
+        # 每秒变化的时间消息之后，不影响缓存前缀。模式取该聊天的语音有效
+        # 状态（voice_state：per-chat 覆盖优先，缺省跟随全局）；配置校验用
+        # _voice_profile_ready（不含模式——单聊强制开时全局可为 off）。
+        voice_profile = self._voice_profile_ready()
+        v_state = self.voice_state(chat_id)
+        if voice_profile is not None and v_state == "always":
+            messages.append({"role": "system", "content": ALWAYS_VOICE_RULES})
+        messages.append({"role": "user", "content": content})
+        with self._model_lock:
+            # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
+            # 空则兜底 vision-exp 纯名（防空 model / 带前缀兜底 → API 400）；
+            # 温度随聊天温度（vision_temp 已删）；绑定卡带模型/参数时以卡为准
+            model = strip_model_prefix(ov.get("chat_model") or "") \
+                or self.chat_model or VISION_MODEL_DEFAULT
+            temp = float(ov["temperature"]) if ov.get("temperature") is not None \
+                else self.chat_temperature
+            # top_p 随聊天参数（绑定卡带参数时以卡为准）——对齐 call_chat_ai
+            top_p = float(ov["top_p"]) if ov.get("top_p") is not None \
+                else getattr(self, "chat_top_p", 0.9)
+        # 上下文预算裁剪：超长历史/文件全文会撑爆模型上下文上限
+        # （实测请求 272 万 token → API 400 "maximum context length"）。
+        # 逐字对齐 call_chat_ai：从最旧历史开始丢弃，保证单次请求不超模型上下文。
+        messages = fit_messages_in_budget(
+            messages, budget=getattr(self, "max_context_tokens", 100000))
+        # 工具按「每个工具单独注入」语义逐项声明——单一事实源在
+        # _vision_tools（任务/语音/闹钟/搜索/记忆检索各看各的开关；
+        # _vision_route 选提示词变体时复用同一套条件，防两处漂移）
+        tools = self._vision_tools(chat_id)
         payload = {
             "model": model,
             "messages": messages,
             "max_tokens": self.reply_max_tokens,
             "temperature": temp,
-            "tools": tools,
-            "tool_choice": "auto",
+            # top_p 对齐 call_chat_ai：文本回复恒走本链路后，top_p 不能
+            # 对文字回复静默失效
+            "top_p": top_p,
         }
+        # 工具为空时不带 tools/tool_choice 键（部分厂商对空数组 +
+        # tool_choice 返回 400；无工具即纯补全）
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
         try:
             for _round in range(VISION_TOOL_ROUNDS):
                 data = self._post_chat_completions(
