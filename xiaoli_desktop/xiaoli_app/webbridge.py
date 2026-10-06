@@ -159,8 +159,10 @@ _ALLOWED_KEYS = {
     "memory_compress_batch", "memory_important_max", "memory_compress_model",
     "memory_rolling_step",
     "max_context_tokens", "reply_max_tokens",
+    "segment_wait_enabled", "segment_wait_seconds",
+    "segment_jitter_enabled", "segment_jitter_min", "segment_jitter_max",
     "file_storage_path", "web_search_enabled", "web_proxy", "task_enabled",
-    "state_watch_enabled",
+    "state_watch_enabled", "model_trigger_manage", "sticker_mode",
     "voice_mode", "tts_endpoint", "tts_timeout_seconds", "voice_max_seconds",
     "voice_profiles", "active_voice_profile_id",
     "chat_feature_overrides", "first_prompt_path", "bot_nickname",
@@ -170,9 +172,12 @@ _ALLOWED_KEYS = {
 # 写 cfg 后需要同步热写到 bot 属性的键（旧 UI 设置页语义：先落盘再热写）。
 _BOT_HOT_KEYS = {
     "web_search_enabled", "task_enabled", "state_watch_enabled",
+    "model_trigger_manage", "sticker_mode",
     "memory_deep_enabled", "memory_compress_enabled", "memory_keep_recent",
     "memory_compress_batch", "memory_important_max", "memory_rolling_step",
     "max_context_tokens", "reply_max_tokens",
+    "segment_wait_enabled", "segment_wait_seconds",
+    "segment_jitter_enabled", "segment_jitter_min", "segment_jitter_max",
     "file_storage_path",
     "voice_mode", "tts_endpoint", "voice_max_seconds", "voice_profiles",
     "active_voice_profile_id",
@@ -439,6 +444,11 @@ class BridgeApi:
             "memory_compress_model": cfg.get("memory_compress_model", ""),
             "max_context_tokens": cfg.get("max_context_tokens", 100000),
             "reply_max_tokens": cfg.get("reply_max_tokens", 400),
+            "segment_wait_enabled": cfg.get("segment_wait_enabled", True),
+            "segment_wait_seconds": cfg.get("segment_wait_seconds", 2.0),
+            "segment_jitter_enabled": cfg.get("segment_jitter_enabled", False),
+            "segment_jitter_min": cfg.get("segment_jitter_min", 1.5),
+            "segment_jitter_max": cfg.get("segment_jitter_max", 3.0),
             "file_storage_path": cfg.get("file_storage_path", ""),
             "tasks_dir": cfg.get("tasks_dir", ""),
             "tianshu_workdir": cfg.get("tianshu_workdir", ""),
@@ -449,6 +459,8 @@ class BridgeApi:
             "web_search_enabled": cfg.get("web_search_enabled", True),
             "task_enabled": cfg.get("task_enabled", True),
             "state_watch_enabled": cfg.get("state_watch_enabled", False),
+            "model_trigger_manage": cfg.get("model_trigger_manage", "off"),
+            "sticker_mode": cfg.get("sticker_mode", "off"),
         }
         voice = {
             "voice_mode": cfg.get("voice_mode", "off"),
@@ -912,7 +924,9 @@ class BridgeApi:
                              "fail": b["fail"], "cache": hit_ratio(b),
                              "avg_reply": avg, "est": b.get("est_calls", 0)})
         # 近 7 天按天按模型调用量（排除端到端耗时记录 kind=reply 与本地
-        # 估算行 src=est——折线图只画实测口径）
+        # 估算行 src=est——折线图只画实测口径）。天键必须走 _day_key：
+        # SQLite 迁移后 ts 是 epoch 浮点，按字符串切片得到的是秒数前缀，
+        # 永远匹配不上日期键（历史缺陷：折线图七天全零贴底不动）
         import datetime
         day_names = [(datetime.date.today() - datetime.timedelta(days=i))
                      .isoformat() for i in range(6, -1, -1)]
@@ -920,7 +934,7 @@ class BridgeApi:
         for r in records:
             if r.get("kind") == "reply" or r.get("src") == "est":
                 continue
-            day = str(r.get("ts") or "")[:10]
+            day = store._day_key(r.get("ts") or time.time())
             if day in day_model and r.get("model"):
                 m = day_model[day]
                 m[r["model"]] = m.get(r["model"], 0) + 1
@@ -1022,6 +1036,71 @@ class BridgeApi:
 
         threading.Thread(target=worker, daemon=True,
                          name="xiaoli-voice-test").start()
+        return {"ok": True, "started": True}
+
+    # ---------- 表情包库 ----------
+
+    @_safe
+    def sticker_info(self) -> dict:
+        """表情包库信息（设置页卡片）：目录、文件清单与描述（文件名播种 +
+        manifest 缓存）。目录不存在返回空清单（功能整体不激活）。"""
+        from .sticker_store import StickerStore, default_stickers_dir
+        d = default_stickers_dir()
+        store = StickerStore(d)
+        entries = store.entries()
+        return {"ok": True, "dir": d, "count": len(entries), "items": entries}
+
+    @_safe
+    def sticker_retag(self) -> dict:
+        """全库 AI 打标（长操作：daemon 线程 + push('sticker_retag') 进度）。
+
+        优先走运行中 bot 的视觉调用（重试/用量埋点同链路）；bot 未运行时
+        按投影配置直连。打标结果写回 manifest.json。"""
+        if getattr(self, "_sticker_retagging", False):
+            return {"ok": False, "error": "打标已在进行中"}
+        self._sticker_retagging = True
+
+        def worker():
+            try:
+                from .sticker_store import StickerStore, default_stickers_dir
+                store = StickerStore(default_stickers_dir())
+                bot = getattr(self.ctx.engine, "bot", None)
+                describe = None
+                if bot is not None and hasattr(bot, "_describe_sticker"):
+                    describe = bot._describe_sticker
+                else:
+                    from .llm_client import LlmClient
+                    from wechat_bot import strip_model_prefix
+                    client = LlmClient()
+                    url = str(self.ctx.cfg.get("ai_api_url") or "")
+                    key = str(self.ctx.cfg.get("ai_api_key") or "")
+                    model = strip_model_prefix(
+                        str(self.ctx.cfg.get("chat_model") or ""))
+
+                    def describe(path):
+                        from .sticker_store import describe_sticker
+                        return describe_sticker(client.post, url, key,
+                                                model, path)
+                if describe is None:
+                    self.push("sticker_retag",
+                              {"ok": False, "message": "视觉调用不可用"})
+                    return
+                ok, total = store.reindex(
+                    describe, progress_cb=lambda done, t:
+                    self.push("sticker_retag",
+                              {"ok": True, "done": done, "total": t}))
+                self.push("sticker_retag",
+                          {"ok": True, "done": total, "total": total,
+                           "indexed": ok,
+                           "message": f"打标完成：{ok}/{total}"})
+            except Exception as e:
+                self.push("sticker_retag",
+                          {"ok": False, "message": f"{type(e).__name__}: {e}"})
+            finally:
+                self._sticker_retagging = False
+
+        threading.Thread(target=worker, daemon=True,
+                         name="xiaoli-sticker-retag").start()
         return {"ok": True, "started": True}
 
     # ---------- 任务桥（任务页） ----------

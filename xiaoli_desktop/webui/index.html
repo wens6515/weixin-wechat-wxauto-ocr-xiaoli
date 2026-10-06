@@ -645,7 +645,51 @@
             <div class="feat-text"><b>启用状态监视</b><small>轮询固定网页本地关键词判定，达成 / 到期统一回递由 AI 按人设回复（有额外 API 成本）</small></div>
             <label class="switch"><input type="checkbox" id="cbStateWatch"><span class="track"></span></label>
           </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>模型管理触发器</b><small>让 AI 能查询 / 取消 / 修改它建过的闹钟和监视（仅限当前聊天，改监控网页需取消重建）；「清单注入」会把进行中的触发器随请求告知 AI，AI 还能主动提起约定</small></div>
+            <div class="seg tri" id="trigManageSeg">
+              <button data-v="off">关闭</button><button data-v="lazy">仅工具</button><button data-v="eager">清单注入</button>
+            </div>
+          </div>
           <div class="editor-actions"><button class="mini-btn" id="btnManageTriggers"><svg class="ic"><use href="#i-bell"/></svg>管理触发器…</button></div>
+        </div>
+
+        <!-- 回复节奏 -->
+        <div class="glass sec-card" id="sec-pace">
+          <div class="card-title"><svg class="ic"><use href="#i-clock"/></svg>回复节奏</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>段间等待</b><small>多段回复时，下一段粘贴后停留固定秒数再发送（对方端看到「对方正在输入…」）</small></div>
+            <label class="switch"><input type="checkbox" id="cbSegWait"><span class="track"></span></label>
+          </div>
+          <div class="form-grid">
+            <label class="form-item"><span>段间间隔（秒）</span><input id="spSegWait" type="number" min="0" max="30" step="0.5"></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>间隔抖动</b><small>每段在上下限内随机停留，更像真人打字（与段间等待互斥：开一个自动关另一个，也可都关）</small></div>
+            <label class="switch"><input type="checkbox" id="cbSegJitter"><span class="track"></span></label>
+          </div>
+          <div class="form-grid">
+            <label class="form-item"><span>抖动下限（秒）</span><input id="spSegJitterMin" type="number" min="0" max="30" step="0.5"></label>
+            <label class="form-item"><span>抖动上限（秒）</span><input id="spSegJitterMax" type="number" min="0" max="30" step="0.5"></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnSavePace">保存节奏设置</button></div>
+        </div>
+
+        <!-- 表情包 -->
+        <div class="glass sec-card" id="sec-sticker">
+          <div class="card-title"><svg class="ic"><use href="#i-image"/></svg>表情包</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>发送模式</b><small>AI 可以只回一张表情包，也可以表情包+文字一起回；「清单注入」每次请求带上全部表情包目录（库小更省事），「按需查询」AI 想发时先搜索再挑（库大更省 token）</small></div>
+            <div class="seg tri" id="stickerSeg">
+              <button data-v="off">关闭</button><button data-v="catalog">清单注入</button><button data-v="query">按需查询</button>
+            </div>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b id="stickerCount">表情包库加载中…</b><small id="stickerDir">往库文件夹里加图即可扩充（png/jpg/gif），点下方按钮让 AI 重新看图写标签</small></div>
+            <div class="form-btns">
+              <button class="mini-btn" id="btnStickerRetag"><svg class="ic"><use href="#i-spark"/></svg>AI 优化标签</button>
+            </div>
+          </div>
         </div>
       </section>
 

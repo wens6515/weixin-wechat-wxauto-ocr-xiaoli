@@ -187,5 +187,31 @@ class TestUsageStore(unittest.TestCase):
         self.assertEqual(len(self.store.load_records(days=7)), 1)
 
 
+class TestGetUsageTrendDayKey(unittest.TestCase):
+    """用量页折线图回归：ts 是 epoch 浮点（SQLite 迁移后），按字符串切片
+    得不到日期键 → 七天全零贴底。get_usage 必须走 _day_key 归一天键。"""
+
+    def test_trend_counts_today_calls(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        from xiaoli_app.webbridge import BridgeApi
+        store = UsageStore(os.path.join(tempfile.mkdtemp(), "usage.db"))
+        store.record(kind="chat", model="m1", ok=True, src="api",
+                     ts=time.time())
+        store.record(kind="vision", model="m1", ok=True, src="api",
+                     ts=time.time())
+        store.record(kind="reply", model="m1", ok=True, ts=time.time())
+        store.record(kind="chat", model="m2", ok=True, src="est",
+                     ts=time.time())
+        bridge = BridgeApi(SimpleNamespace(cfg={}))
+        with mock.patch("xiaoli_app.webbridge.UsageStore",
+                        return_value=store):
+            r = bridge.get_usage()
+        today = time.strftime("%Y-%m-%d")
+        # 只画实测口径（src=api、排除 reply）：m1 两条，est/reply 不计
+        self.assertEqual(r["day_model"].get(today, {}).get("m1"), 2)
+        self.assertNotIn("m2", r["day_model"].get(today, {}))
+
+
 if __name__ == "__main__":
     unittest.main()

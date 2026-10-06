@@ -85,6 +85,64 @@ class TestSendTextSplit(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+class _HoldWx:
+    """记录每段 hold_after_paste 的假后端"""
+    def __init__(self):
+        self.holds = []
+    def send_text(self, chat, text, hold_after_paste=0.0):
+        self.holds.append(hold_after_paste)
+
+
+class TestSegmentHold(unittest.TestCase):
+    """段间节奏：两互斥开关（抖动优先于等待，可都关）。默认 = 固定 2s
+    （历史行为不变）；参数走 getattr 缺省——老测试桩/半初始化实例不炸。"""
+
+    def _bot(self, **attrs):
+        bot = _make_bot()
+        bot.wx = _HoldWx()
+        for k, v in attrs.items():
+            setattr(bot, k, v)
+        return bot
+
+    def test_default_fixed_two_seconds(self):
+        bot = self._bot()
+        self.assertEqual(bot._segment_hold(), 2.0)
+
+    def test_wait_off_jitter_off_zero(self):
+        bot = self._bot(segment_wait_enabled=False,
+                        segment_jitter_enabled=False)
+        self.assertEqual(bot._segment_hold(), 0.0)
+
+    def test_wait_custom_seconds(self):
+        bot = self._bot(segment_wait_enabled=True, segment_wait_seconds=1.0)
+        self.assertEqual(bot._segment_hold(), 1.0)
+
+    def test_jitter_takes_priority_over_wait(self):
+        from unittest import mock
+        bot = self._bot(segment_wait_enabled=True,
+                        segment_wait_seconds=2.0,
+                        segment_jitter_enabled=True,
+                        segment_jitter_min=1.5, segment_jitter_max=3.0)
+        with mock.patch("wechat_bot.random.uniform", return_value=2.25):
+            self.assertEqual(bot._segment_hold(), 2.25)
+
+    def test_jitter_inverted_bounds_clamp_to_min(self):
+        from unittest import mock
+        bot = self._bot(segment_jitter_enabled=True,
+                        segment_jitter_min=2.0, segment_jitter_max=1.0)
+        with mock.patch("wechat_bot.random.uniform",
+                        side_effect=lambda lo, hi: (lo + hi) / 2) as mu:
+            self.assertEqual(bot._segment_hold(), 2.0)
+            mu.assert_called_once_with(2.0, 2.0)
+
+    def test_send_parts_holds_first_zero_then_rhythm(self):
+        from unittest import mock
+        bot = self._bot(segment_wait_enabled=True, segment_wait_seconds=2.0)
+        with mock.patch.object(bot, "_segment_hold", return_value=2.0):
+            bot._send_parts("小明", "甲\n\n乙\n\n丙")
+        self.assertEqual(bot.wx.holds, [0.0, 2.0, 2.0])
+
     def test_single_newline_split(self):
         """单换行也分次发送（用户定案：模型用单 \n 分句时旧逻辑整段一起发）"""
         bot = _make_bot()
