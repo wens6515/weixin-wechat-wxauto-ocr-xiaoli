@@ -245,7 +245,7 @@ class TestPollOutboxIdempotent(unittest.TestCase):
         try:
             self._make_task(tasks, "t1")
             delivered = []
-            with _mock.patch("xiaoli_bot.shutil.move",
+            with _mock.patch("xiaoli_app.task_bridge.shutil.move",
                              side_effect=OSError("文件被占用")):
                 poll_outbox(tasks, lambda d, i, r: delivered.append(1))
             self.assertEqual(delivered, [], "move 失败不得 deliver")

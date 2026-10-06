@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import struct
+import sys
 import time
 import uuid
 
@@ -20,6 +21,16 @@ import pyautogui
 import requests as req
 
 logger = logging.getLogger("xiaoli")
+
+# 任务分类 prompt（classify_task_with_llm 的 system 消息，自 xiaoli_bot 迁入）
+CLASSIFY_PROMPT = (
+    "你是微信机器人小漓的『任务路由器』。判断用户发来的消息是否是一个需要由 AI 代理（天枢）"
+    "实际执行的任务请求——例如：根据文档做一个网站、做一个 PPT、写一段代码、分析一份数据、"
+    "整理文件、生成文档、下载并处理内容等需要动手完成的工作。\n"
+    "普通的闲聊、打招呼、问问题、要资料等不算任务。\n"
+    "只输出一个 JSON 对象，不要输出任何其他文字：\n"
+    '{"is_task": true 或 false, "task": "当 is_task 为 true 时，用一句清晰的话描述要完成的任务"}'
+)
 
 def generate_task_id():
     """时间戳 + 4 位随机：YYYYmmddHHMMSSxxxx"""

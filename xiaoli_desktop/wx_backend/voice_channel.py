@@ -12,6 +12,8 @@ import time
 
 from .visual_win32 import capture_window
 
+u32 = ctypes.windll.user32
+
 logger = logging.getLogger(__name__)
 
 # ---------- 语音发送（VB-CABLE 虚拟声卡 + SendInput 右 Alt 触发微信录音） ----------
