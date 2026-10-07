@@ -298,6 +298,12 @@ function syncSlidersToTheme() {
 /* 启动时按 cfg 应用外观 */
 function applyStartupAppearance() {
   const u = S.ui || {};
+  // 启动应用保存的主题（历史缺陷：这里从未设置 data-theme——HTML 默认
+  // abyss，换任何主题重启都渲染回深海小漓；配置本身一直存得是对的）。
+  // follow_system 开启时紧随其后的 applyFollowSystem 会按系统深浅色覆盖。
+  const theme = u.theme || "abyss";
+  document.documentElement.dataset.theme = theme;
+  markThemeThumb(theme);
   if (u.blur_level != null) setBlur(u.blur_level);
   if (u.card_opacity != null) setCardOp(u.card_opacity);
   if (u.wall_opacity != null) setWallOp(u.wall_opacity);
