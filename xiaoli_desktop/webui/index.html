@@ -572,7 +572,7 @@
             <div class="feat-text"><b>启用任务桥</b><small>识别任务请求 → 投递天枢 CLI → 成果文件自动回传微信（关闭 = 模型看不到任务工具）</small></div>
             <label class="switch"><input type="checkbox" id="cbTaskBridge"><span class="track"></span></label>
           </div>
-          <div class="editor-actions"><button class="mini-btn ghost" id="btnOpenTasks"><svg class="ic"><use href="#i-ext"/></svg>打开任务目录</button></div>
+          <div class="editor-actions"><button class="mini-btn ghost" id="btnOpenTasks"><svg class="ic"><use href="#i-ext"/></svg>打开任务目录</button><button class="mini-btn ghost" id="btnTianshuGuide"><svg class="ic"><use href="#i-terminal"/></svg>天枢配置引导</button></div>
         </div>
 
         <!-- 联网搜索 -->
@@ -864,6 +864,20 @@
       <span style="flex:1"></span>
       <button class="mini-btn" id="calibSave" disabled><svg class="ic"><use href="#i-check"/></svg>保存并验证</button>
     </div>
+  </div>
+
+  <!-- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） -->
+  <div class="modal glass" id="modalTianshuGuide" hidden>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>天枢配置引导</b></div>
+    <p class="confirm-text" id="tgStatus">正在检测天枢 CLI…</p>
+    <div class="install-bar" id="tgInstallBar" hidden><span></span></div>
+    <pre class="guide-pre" id="tgText"></pre>
+    <div class="editor-actions">
+      <button class="mini-btn ghost" id="tgInstall" hidden>一键安装天枢</button>
+      <button class="mini-btn" id="tgOpen">① 打开天枢 CLI</button>
+      <button class="mini-btn" id="tgDone"><svg class="ic"><use href="#i-check"/></svg>② 我已配置完成</button>
+    </div>
+    <p class="calib-legend" style="margin-top:10px">配置一次即可，之后小漓投递任务时会自动唤起天枢（全自动模式）。也可稍后到「设置 → 任务桥 → 天枢配置引导」重跑。</p>
   </div>
 </div>
 

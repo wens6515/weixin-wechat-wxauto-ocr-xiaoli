@@ -498,15 +498,21 @@ $("#btnInstallTianshu").addEventListener("click", async () => {
   if (!r.ok) toast(r.error || "安装任务启动失败", "err");
 });
 function onInstallProgress(p) {
-  const bar = $("#installBar");
+  const bars = [$("#installBar"), $("#tgInstallBar")].filter(Boolean);
   if (p.done) {
-    bar.hidden = true;
+    bars.forEach((b) => (b.hidden = true));
     toast(p.ok ? "天枢安装完成 ✓" : "安装失败：" + (p.error || "未知错误"),
       p.ok ? "ok" : "err");
-    if (p.ok) checkEnv();
+    if (p.ok) {
+      checkEnv();
+      // 引导弹窗开着时刷新状态（安装完应能点「打开天枢 CLI」了）
+      if (!$("#modalTianshuGuide").hidden) openTianshuGuide();
+    }
   } else {
-    bar.hidden = false;
-    bar.querySelector("span").style.width = (p.pct || 0) + "%";
+    bars.forEach((b) => {
+      b.hidden = false;
+      b.querySelector("span").style.width = (p.pct || 0) + "%";
+    });
   }
 }
 $("#btnSendPrompt").addEventListener("click", async () => {
@@ -1401,8 +1407,13 @@ $("#btnOpenTasks").addEventListener("click", () => {
 });
 $("#cbTaskBridge").addEventListener("change", async (e) => {
   const r = await API.save_config({ task_enabled: e.target.checked });
-  toast(r.ok ? (e.target.checked ? "任务桥已开启（热生效）" : "任务桥已关闭（模型看不到任务工具）")
-    : "保存失败", r.ok ? "ok" : "err");
+  if (!r.ok) { toast("保存失败", "err"); return; }
+  if (!e.target.checked) { toast("任务桥已关闭（模型看不到任务工具）", "ok"); return; }
+  // 首次开启（天枢还没配置过）→ 走一次性配置引导：CLI 安装/打开 + API key 配置
+  const info = await API.tianshu_guide_info();
+  if (info && info.ok && info.guided) { toast("任务桥已开启（热生效）", "ok"); return; }
+  toast("任务桥已开启——先完成一次天枢配置（会自动唤起 CLI）", "ok");
+  openTianshuGuide();
 });
 $("#cbWebSearch").addEventListener("change", async (e) => {
   const r = await API.save_config({ web_search_enabled: e.target.checked });
@@ -1945,6 +1956,49 @@ $("#btnWxSizeRead").addEventListener("click", async () => {
   $("#edWxH").value = r.current[1];
   toast(`已读取当前窗口 ${r.current[0]}×${r.current[1]}，点「保存并应用」生效`, "ok");
 });
+/* ---------- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） ---------- */
+async function openTianshuGuide() {
+  openModal("modalTianshuGuide");
+  $("#tgText").textContent = "";
+  $("#tgStatus").textContent = "正在检测天枢 CLI…";
+  $("#tgInstall").hidden = true;
+  const r = await API.tianshu_guide_info();
+  if (!r || !r.ok) {
+    $("#tgStatus").textContent = (r && r.error) || "检测失败，稍后可从设置页重试";
+    return;
+  }
+  $("#tgText").textContent = r.prompt_text || "";
+  $("#tgInstall").hidden = r.installed;
+  $("#tgStatus").textContent = r.installed
+    ? (r.window
+        ? "已检测到天枢 CLI 窗口。若已在窗口里选好模型、填好 API key，点「② 我已配置完成」。"
+        : "天枢 CLI 可用。点「① 打开天枢 CLI」，在弹出的窗口里完成配置：选模型 → 输 API key → 回车确认。")
+    : "未检测到天枢 CLI（需要 Node.js）。点「一键安装天枢」自动安装（npm install -g tianshu-tui）。";
+}
+$("#btnTianshuGuide").addEventListener("click", () => openTianshuGuide());
+$("#tgInstall").addEventListener("click", async () => {
+  const r = await API.install_tianshu();
+  if (!r || !r.ok) { toast((r && r.error) || "安装启动失败", "err"); return; }
+  $("#tgInstallBar").hidden = false;
+  toast("开始安装天枢 CLI（首次约 1-3 分钟），进度见进度条", "ok");
+});
+$("#tgOpen").addEventListener("click", async () => {
+  const r = await API.tianshu_guide_open();
+  if (!r || !r.ok) {
+    toast((r && r.detail) || "打开失败——请手动打开命令行输入 rivet 启动", "err");
+    return;
+  }
+  toast("已打开天枢 CLI，完成配置后回来点「② 我已配置完成」", "ok");
+});
+$("#tgDone").addEventListener("click", async () => {
+  const r = await API.tianshu_guide_finish();
+  if (!r || !r.ok) { toast((r && r.error) || "检测失败", "err"); return; }
+  closeModal();
+  toast("天枢已就绪 ✓ 已开启全自动模式，任务桥可以放心使用", "ok");
+  const cfg = await API.get_config();
+  if (cfg.ok) { S.ui = cfg.ui; S.misc = cfg.misc; refreshSettings(); }
+});
+
 $("#btnWxSizeSave").addEventListener("click", async () => {
   const w = parseInt($("#edWxW").value, 10) || 0;
   const h = parseInt($("#edWxH").value, 10) || 0;
