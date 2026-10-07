@@ -297,5 +297,35 @@ class TestRegionCalibVerify(_CalibBridgeTest):
         self.assertFalse(r["ok"])
 
 
+class TestCalibNudge(_CalibBridgeTest):
+    """升级用户一次性标定提示：无标定文件且从未提示过才弹（新用户走首启
+    第 2 步，不弹这个）。"""
+
+    def test_show_when_uncalibrated_and_never_nudged(self):
+        with mock.patch.object(vb, "_load_region_config", return_value=None):
+            r = self.bridge.region_calib_nudge_info()
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["show"])
+
+    def test_no_show_when_calibrated(self):
+        with mock.patch.object(vb, "_load_region_config",
+                               return_value={"session": (0.1, 0.1, 0.4, 0.9)}):
+            r = self.bridge.region_calib_nudge_info()
+        self.assertFalse(r["show"])
+
+    def test_no_show_after_marked(self):
+        self.bridge.ctx.cfg["region_calib_nudge_done"] = True
+        with mock.patch.object(vb, "_load_region_config", return_value=None):
+            r = self.bridge.region_calib_nudge_info()
+        self.assertFalse(r["show"])
+
+    def test_done_marks_and_persists(self):
+        with mock.patch("xiaoli_app.webbridge.config_store.save_config") as save:
+            r = self.bridge.region_calib_nudge_done()
+        self.assertTrue(r["ok"])
+        self.assertTrue(self.bridge.ctx.cfg["region_calib_nudge_done"])
+        save.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

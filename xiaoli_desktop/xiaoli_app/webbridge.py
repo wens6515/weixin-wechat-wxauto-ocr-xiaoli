@@ -1209,6 +1209,29 @@ class BridgeApi:
 
     # ---------- 微信画面标定 ----------
 
+    @_safe
+    def region_calib_nudge_info(self) -> dict:
+        """升级用户的一次性标定提示：无标定文件且从未提示过 → show=True。
+
+        新用户不需要（首启向导第 2 步就是标定，走到那一步即标记提示已消费）；
+        升级用户既不弹首启向导、安装版里也从来没有标定文件，窗口又不再被自动
+        摆放——没有任何提示的话，布局不一致会静默读错消息。"""
+        from wx_backend import visual_backend as vb
+        if self.ctx.cfg.get("region_calib_nudge_done"):
+            return {"ok": True, "show": False}
+        try:
+            calibrated = bool(vb._load_region_config())
+        except Exception:
+            calibrated = False
+        return {"ok": True, "show": not calibrated}
+
+    @_safe
+    def region_calib_nudge_done(self) -> dict:
+        """标记一次性提示已消费（弹过即标记，无需等用户真的标定）。"""
+        self.ctx.cfg["region_calib_nudge_done"] = True
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        return {"ok": True}
+
     def _calib_shot(self):
         """截取当前微信窗口（标定底图）。返回 (PIL Image, window_rect) 或
         (None, None, 错误文案)。先置前微信——完全遮挡时 PrintWindow 返回黑图。"""
