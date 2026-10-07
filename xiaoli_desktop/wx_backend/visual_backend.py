@@ -49,7 +49,7 @@ from .visual_win32 import (
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
     _near_color, drop_panel_contents, detect_avatar_tops,
-    detect_bubble_colors, find_bubble_boxes, find_media_boxes,
+    detect_bubble_colors, estimate_theme, find_bubble_boxes, find_media_boxes,
     find_panel_icon, filter_media_boxes, region_changed,
 )
 from .visual_badge import (
@@ -66,6 +66,13 @@ from .voice_channel import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 界面主题：两套主题的像素判据分叉点（visual_vision 里按 colors["theme"] 选）。
+_THEME_LABELS = {"light": "浅色", "dark": "深色"}
+# 选中行高亮色（会话条目背景）两套主题的真机实测值：深色 (13,168,105)、
+# 浅色 (21,172,112)（后者与深色默认值各通道差 ≤8，容差 12 内本就判得中，
+# 这里按主题给初值是为了首帧就准，不依赖容差兜）。
+_SELECTED_ROW_COLOR = {"dark": (13, 168, 105), "light": (21, 172, 112)}
 
 # 用户圈定配置：wx_ocr_region.json（应用内画面标定生成，见 webbridge 标定方法面）。
 # 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
@@ -394,6 +401,11 @@ class VisualBackend:
 
     实现 wx_backend.WeChatBackend 协议。所有读操作：截图 → 区域 diff →
     有变化才 OCR。发送：坐标点击聚焦 + 键盘输入 + Enter。
+
+    双主题：微信浅色/深色两套界面的像素判据不同（气泡与背景的明暗关系相反、
+    色差量级也不同），初始化时识别一次主题并落 `_theme`，运行时每次分析由
+    `detect_bubble_colors` 回带本帧主题、变化即跟随（用户在设置里切主题不用
+    重启程序）。判据分叉点全在 visual_vision 的 `colors["theme"]` 上。
     """
 
     name = "visual"
@@ -407,12 +419,14 @@ class VisualBackend:
         self._current_chat: str | None = None  # 当前选中的会话（微信 toggle 行为：已选中再点会取消）
         self._current_title: str | None = None  # 当前会话标题（read_title 权威名称）
         self._current_is_group: bool = False  # 当前会话是否群聊（标题含括号人数）
-        # 选中行高亮色：真机采样固定值（深色主题 WeChat 4.x，RGB(13,168,105)，
-        # 与消息气泡绿 (53,210,141) 是两个不同色值）。命中该色 = 已选中，
-        # 调用方不点击防 toggle 取消选中——像素判定零 OCR，事件热路径第一道闸。
-        # 微信切浅色主题时该值会变：点击成功后 _learn_selected_row_color 会
-        # 重新采样覆盖；也可直接改这里的默认值。
-        self._selected_row_color: tuple[int, int, int] = (13, 168, 105)
+        # 界面主题：None = 尚未识别（connect 时按会话列表区∪消息区判定）。
+        # 未知期间一律按深色判据（历史行为，且深色判据在浅色下只是退化不会崩）。
+        self._theme: str | None = None
+        # 选中行高亮色：命中该色 = 微信已选中该会话，调用方不点击防 toggle
+        # 取消选中——像素判定零 OCR，事件热路径第一道闸。默认值按主题取真机
+        # 实测色（深色 (13,168,105) / 浅色 (21,172,112)）；点击成功后
+        # _learn_selected_row_color 会重采样覆盖，主题切换时回到该主题初值。
+        self._selected_row_color: tuple[int, int, int] = _SELECTED_ROW_COLOR["dark"]
         # 用户圈定区域（应用内画面标定生成）；无配置回退模块默认常量
         self._apply_regions(_load_region_config())
 
@@ -433,6 +447,43 @@ class VisualBackend:
                 "message": self._message_region,
                 "title": self._title_region}
 
+    # ---- 界面主题（浅色 / 深色）----
+
+    @property
+    def theme(self) -> str | None:
+        """当前生效的界面主题："light" / "dark"；尚未识别时为 None。"""
+        return self._theme
+
+    def detect_theme(self, shot: Image.Image | None = None) -> str | None:
+        """识别微信界面主题（"light"/"dark"），截图失败返回 None。
+
+        取会话列表区 ∪ 消息区的像素中位亮度判定。**不喂整窗**：微信 4.x 的
+        窗口顶栏两套主题下都是深色（跟系统主题走），整窗中位会被它带偏；也不
+        只看消息区：窗口刚打开时消息区可能空着。两区判定不一致时以会话列表区
+        为准（列表任何时候都有内容，消息区可能被一张大图占满）。
+        """
+        if shot is None:
+            shot = self._refresh(force=True, foreground=False)
+        if shot is None:
+            return None
+        w, h = shot.size
+        themes = []
+        for (rl, rt, rr, rb) in (self._session_region, self._message_region):
+            crop = shot.crop((int(w * rl), int(h * rt), int(w * rr), int(h * rb)))
+            themes.append(estimate_theme(crop))
+        return themes[0] if themes[0] == themes[1] else themes[0]
+
+    def _note_theme(self, theme: str | None) -> None:
+        """记录本帧主题；变化时套用主题相关默认值并记日志（主题未知忽略）。"""
+        if theme not in ("light", "dark") or theme == self._theme:
+            return
+        prev = self._theme
+        self._theme = theme
+        self._selected_row_color = _SELECTED_ROW_COLOR[theme]
+        if prev is not None:
+            logger.info(f"🎨 微信界面主题切换：{_THEME_LABELS[prev]} → "
+                        f"{_THEME_LABELS[theme]}（像素判据已跟随）")
+
     # ---- 协议：连接 ----
 
     def connect(self) -> bool:
@@ -448,6 +499,13 @@ class VisualBackend:
         if shot is None:
             raise BackendUnavailableError("PrintWindow 截图失败")
         self._last_shot = shot
+        theme = self.detect_theme(shot)
+        self._note_theme(theme)
+        if theme:
+            logger.info(f"🎨 识别到微信界面：{_THEME_LABELS[theme]}模式"
+                        f"（气泡/媒体判据按该主题工作）")
+        else:
+            logger.warning("🎨 未识别到微信界面主题（截图区域为空），暂按深色判据工作")
         logger.info(f"✅ 视觉后端已连接（窗口 0x{hwnd:x} {shot.size[0]}x{shot.size[1]}）")
         return True
 
@@ -1105,6 +1163,7 @@ class VisualBackend:
                 # 同一张截图——OCR 坐标与块几何必须同源）。气泡颜色只用于结构
                 # （找面板/媒体框/文件卡片图标），归属一律走头像。
                 colors = detect_bubble_colors(region_1x)
+                self._note_theme(colors.get("theme"))
                 bot_tops = detect_avatar_tops(region_1x, colors.get("bg"), "right")
                 other_tops = detect_avatar_tops(region_1x, colors.get("bg"), "left")
                 info = analyze_blocks(region_1x, colors, bot_tops, other_tops,
@@ -1434,6 +1493,7 @@ class VisualBackend:
             int(w * self._message_region[2]), int(h * self._message_region[3]),
         ))
         colors = detect_bubble_colors(region)
+        self._note_theme(colors.get("theme"))
         if not (colors.get("self") or colors.get("other")):
             return []
         # 面板（气泡框）内部的框一律不算媒体：文件卡片的类型图标会跳出成
@@ -1524,6 +1584,7 @@ class VisualBackend:
             ))
             rw, rh = region.size
             colors = detect_bubble_colors(region)
+            self._note_theme(colors.get("theme"))
             # 头像检测：右侧窄带 = bot 头像，左侧 = 对方头像（全流程唯一归属判据）。
             # 真机实测：bot 文件 r/w=0.83、对方长文字 r/w=0.80——宽度阈值切不开，
             # 头像一右一左天然分离，无需模板/颜色/宽度判据。
