@@ -475,6 +475,7 @@ async function checkEnv() {
   envCard("#envTianshu", "#envTianshuDetail", rp.tianshu);
   $("#btnInstallTianshu").hidden = rp.tianshu.ok !== false;
   envCard("#envPrompt", "#envPromptDetail", rp.first_prompt);
+  S.envWechat = rp.wechat;
 }
 /* 慢操作按钮的 busy 态：转圈 + 禁点，让「点了有没有反应」看得见 */
 async function withBusy(btn, fn) {
@@ -1808,15 +1809,19 @@ async function openCalib(firstRun = false) {
   $("#calibStage").hidden = true;
   $("#calibLoading").hidden = false;
   $("#calibSave").disabled = true;
+  $("#calibWarn").hidden = true;
   $("#calibHint").textContent = "正在截取微信窗口…（需微信在电脑端登录）";
   openModal("modalCalib");
   const r = await API.region_calib_start();
   $("#calibLoading").hidden = true;
   if (!r.ok) {
-    $("#calibHint").textContent =
-      r.error || "无法截取微信窗口，请确认微信已登录后重试";
+    // 保险：微信没开/没登录完时给醒目提醒（不是只把文案塞进 hint）
+    $("#calibHint").textContent = "暂时截不到微信画面";
+    $("#calibWarn").textContent = r.error || "无法截取微信窗口";
+    $("#calibWarn").hidden = false;
     return;
   }
+  $("#calibWarn").hidden = true;
   calib.W = r.width; calib.H = r.height;
   calib.session = r.prefill.session_box.map(Number);
   calib.chat = r.prefill.chat_box.map(Number);
@@ -2182,6 +2187,10 @@ requestAnimationFrame(() =>
   ]);
   refreshSettings();
   setInterval(refreshTriggerBadge, 8000);
+  if (S.envWechat && !S.envWechat.ok) {
+    // 保险：微信没开/没登录完成时主动提醒（环境卡的红点太静默）
+    toast("没检测到微信窗口——请先打开并登录电脑端微信，小漓才能开始工作", "warn");
+  }
   if (cfg.first_run_needed) showFirstRun();
   else maybeCalibNudge();
 })();

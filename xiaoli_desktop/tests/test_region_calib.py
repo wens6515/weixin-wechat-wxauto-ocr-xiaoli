@@ -297,6 +297,42 @@ class TestRegionCalibVerify(_CalibBridgeTest):
         self.assertFalse(r["ok"])
 
 
+class TestWechatMissingHint(_CalibBridgeTest):
+    """微信窗口缺失的「保险」提示：进程在跑但没主窗口（登录没走完）与
+    进程都没有（微信没开）给不同的下一步动作。"""
+
+    def _hint(self, tasklist_stdout):
+        from xiaoli_app.webbridge import _wechat_missing_hint
+        fake = mock.Mock(stdout=tasklist_stdout, returncode=0)
+        with mock.patch("subprocess.run", return_value=fake):
+            return _wechat_missing_hint()
+
+    def test_process_running_without_window(self):
+        # 字节匹配：真实 tasklist 是 OEM 编码，测试直接用 bytes
+        hint = self._hint(b"WeChat.exe                  1234 Console  1  100,000 K")
+        self.assertIn("检测到微信进程", hint)
+        self.assertIn("完成登录", hint)
+
+    def test_not_running(self):
+        hint = self._hint(b"chrome.exe    999 Console  1  200,000 K")
+        self.assertIn("微信没开", hint)
+
+    def test_tasklist_failure_falls_back(self):
+        from xiaoli_app.webbridge import _wechat_missing_hint
+        with mock.patch("subprocess.run", side_effect=OSError("no tasklist")):
+            hint = _wechat_missing_hint()
+        self.assertIn("微信没开", hint)
+
+    def test_calib_start_surfaces_hint(self):
+        with mock.patch.object(vb, "find_wechat_window", return_value=None):
+            with mock.patch("xiaoli_app.webbridge._wechat_missing_hint",
+                            return_value="微信没开——请先打开并登录电脑端微信，然后点「重新截图」"):
+                r = self.bridge.region_calib_start()
+        self.assertFalse(r["ok"])
+        self.assertIn("微信没开", r["error"])
+        self.assertIn("重新截图", r["error"])
+
+
 class TestCalibNudge(_CalibBridgeTest):
     """升级用户一次性标定提示：无标定文件且从未提示过才弹（新用户走首启
     第 2 步，不弹这个）。"""
