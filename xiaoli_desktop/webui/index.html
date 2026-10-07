@@ -455,6 +455,8 @@
           <button class="anchor" data-anchor="sec-voice">语音发送</button>
           <button class="anchor" data-anchor="sec-override">按聊天覆盖</button>
           <button class="anchor" data-anchor="sec-remind">定时与监视</button>
+          <button class="anchor" data-anchor="sec-pace">回复节奏</button>
+          <button class="anchor" data-anchor="sec-sticker">表情包</button>
         </div>
 
         <!-- 外观主题 -->
@@ -685,12 +687,22 @@
             </div>
           </div>
           <div class="feat-row slim">
-            <div class="feat-text"><b id="stickerCount">表情包库加载中…</b><small id="stickerDir">往库文件夹里加图即可扩充（png/jpg/gif），点下方按钮让 AI 重新看图写标签</small></div>
+            <div class="feat-text"><b id="stickerCount">表情包库加载中…</b><small id="stickerDir">往库文件夹里加图即可扩充（png/jpg/gif），点下方按钮让 AI 重新看图写标签</small>
+              <div class="retag-progress" id="retagProgress" hidden><div class="retag-fill" id="retagFill"></div></div>
+              <small class="retag-hint" id="retagHint" hidden></small>
+            </div>
             <div class="form-btns">
+              <button class="mini-btn" id="btnStickerManage"><svg class="ic"><use href="#i-image"/></svg>管理表情包…</button>
+              <button class="mini-btn" id="btnStickerPreview">预览注入清单</button>
               <button class="mini-btn" id="btnStickerRetag"><svg class="ic"><use href="#i-spark"/></svg>AI 优化标签</button>
             </div>
           </div>
         </div>
+
+        <!-- 回到顶部（设置页滚动越过导航后出现，见 app.js 滚动监听） -->
+        <button class="backtop" id="btnBackTop" hidden title="回到顶部">
+          <svg class="ic"><use href="#i-upload"/></svg>
+        </button>
       </section>
 
     </main>
@@ -712,6 +724,34 @@
       <tbody id="trigTbody"></tbody>
     </table>
     <p class="trig-detail" id="trigDetail"></p>
+  </div>
+
+  <!-- 表情包管理 -->
+  <div class="modal glass" id="modalStickers" hidden>
+    <div class="modal-head"><svg class="ic"><use href="#i-image"/></svg><b>表情包管理</b>
+      <button class="win-btn modal-close" data-close><svg class="ic"><use href="#i-x"/></svg></button></div>
+    <div class="modal-actions">
+      <button class="mini-btn" id="btnStickerAddFiles"><svg class="ic"><use href="#i-plus"/></svg>添加图片…</button>
+      <button class="mini-btn" id="btnStickerAddFolder"><svg class="ic"><use href="#i-folder"/></svg>添加文件夹…</button>
+      <button class="mini-btn ghost" id="btnStickerOpenDir"><svg class="ic"><use href="#i-ext"/></svg>打开库目录</button>
+    </div>
+    <div class="sticker-scroll">
+      <table class="model-table sticker-table">
+        <thead><tr><th style="width:58px">预览</th><th style="width:150px">文件</th>
+          <th>描述（AI 什么时候用这张）</th><th>标签（逗号分开）</th><th style="width:56px"></th></tr></thead>
+        <tbody id="stickerTbody"></tbody>
+      </table>
+    </div>
+    <p class="trig-detail">描述与标签就是 AI 挑图的依据；新增的图先用文件名当描述，可点「AI 优化标签」批量看图重写。同名文件添加时会被跳过（先删旧的再加）。</p>
+  </div>
+
+  <!-- 清单注入预览 -->
+  <div class="modal glass narrow" id="modalStickerPreview" hidden>
+    <div class="modal-head"><svg class="ic"><use href="#i-eye"/></svg><b>清单注入预览</b>
+      <button class="win-btn modal-close" data-close><svg class="ic"><use href="#i-x"/></svg></button></div>
+    <p class="trig-detail" id="stickerPreviewMeta"></p>
+    <pre class="preview-pre" id="stickerPreviewText"></pre>
+    <p class="trig-detail">这就是「清单注入」模式下每次对话请求里多出来的 system 消息原文（逐字一致，token 为同口径估算）。觉得太长就换「按需查询」。</p>
   </div>
 
   <!-- 新增定时提醒 -->

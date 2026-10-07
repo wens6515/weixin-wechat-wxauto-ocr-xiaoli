@@ -187,6 +187,32 @@ class TestStickerStore(unittest.TestCase):
         self.assertEqual(by_file["a.png"]["tags"], ["测试"])
         self.assertEqual(by_file["b.png"]["desc"], "b")  # 失败回退文件名播种
 
+    def test_set_entry_manual_edit(self):
+        d = _make_lib()
+        st = StickerStore(d)
+        self.assertTrue(st.set_entry("生气1.png", "气到冒烟", "生气, 愤怒 干饭"))
+        row = {e["file"]: e for e in st.entries()}["生气1.png"]
+        self.assertEqual(row["desc"], "气到冒烟")
+        self.assertEqual(row["tags"], ["生气", "愤怒", "干饭"])  # 字符串拆分
+        # 其他条目不受影响，且 desc 留空回退文件名播种
+        self.assertTrue(st.set_entry("猫猫.png", "", []))
+        row2 = {e["file"]: e for e in st.entries()}["猫猫.png"]
+        self.assertEqual(row2["desc"], "猫猫")
+        self.assertEqual(len(st.entries()), 3)
+
+    def test_set_entry_rejects_missing_or_escape(self):
+        st = StickerStore(_make_lib())
+        self.assertFalse(st.set_entry("不存在.png", "x", []))
+        self.assertFalse(st.set_entry("../memory.json", "x", []))
+        self.assertFalse(st.set_entry("manifest.json", "x", []))
+
+    def test_catalog_text_roundtrip(self):
+        from xiaoli_app.sticker_store import catalog_text
+        self.assertEqual(catalog_text([]), "")
+        text = catalog_text(["a.png｜生气"])
+        self.assertTrue(text.startswith("你可以发送表情包"))
+        self.assertIn("a.png｜生气", text)
+
 
 class TestToolDeclaration(_LibBotTest):
     def test_off_no_tools(self):

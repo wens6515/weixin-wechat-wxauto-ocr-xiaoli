@@ -696,7 +696,10 @@ class WeChatBot(MediaCaptureMixin):
         return store
 
     def _sticker_catalog_text(self):
-        """catalog 态注入正文：清单 + 使用说明。空库返回空串（不注入）。"""
+        """catalog 态注入正文：清单 + 使用说明。空库返回空串（不注入）。
+        正文构造统一走 sticker_store.catalog_text——设置页「预览注入清单」
+        复用同一函数，保证预览与实际请求逐字一致。"""
+        from xiaoli_app.sticker_store import catalog_text
         store = self._sticker_store()
         if store is None:
             return ""
@@ -705,11 +708,7 @@ class WeChatBot(MediaCaptureMixin):
         except Exception as e:
             logger.debug(f"[表情包] 清单读取失败: {e}")
             return ""
-        if not lines:
-            return ""
-        return ("你可以发送表情包（调 send_sticker，file 填下面清单里的文件"
-                "名；可以只发表情包不说话，也可以表情包+文字）：\n"
-                + "\n".join(lines))
+        return catalog_text(lines)
 
     def _exec_search_stickers(self, query):
         """search_stickers 工具执行：本地关键词搜索（零 API），返回候选行。"""
