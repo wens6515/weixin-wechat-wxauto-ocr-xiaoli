@@ -1344,10 +1344,11 @@ class BridgeApi:
 
     @_safe
     def region_calib_verify(self) -> dict:
-        """标定验证：按当前生效区域现读一帧，返回标题/列表/最近消息三探针。
+        """标定验证：按当前生效区域现读一帧，返回主题/标题/列表/最近消息四探针。
 
         独立实现（模块级 capture_window + ocr_image，不经 VisualBackend
-        实例）——首启时引擎未初始化同样可用。"""
+        实例）——首启时引擎未初始化同样可用。主题探针把「当前按浅色还是深色
+        判据工作」摆给用户看（两套像素判据自动切换，见 visual_vision）。"""
         import re as _re
         from wx_backend import visual_backend as vb
         from wx_backend.visual_regions import parse_title
@@ -1375,6 +1376,12 @@ class BridgeApi:
             return out
 
         items = []
+        # 主题探针（第一个）：浅色/深色两套像素判据，用户看得见当前按哪套走
+        theme = vb.estimate_theme(_crop(session))
+        items.append({
+            "key": "theme", "label": "界面主题", "ok": True,
+            "detail": f"{'浅色' if theme == 'light' else '深色'}模式"
+                      f"（气泡/图片判据按该主题工作，微信里切主题后自动跟随）"})
         t_join = "".join(
             t["text"] for t in
             sorted(vb.ocr_image(_crop(title)), key=lambda i: i["x"])

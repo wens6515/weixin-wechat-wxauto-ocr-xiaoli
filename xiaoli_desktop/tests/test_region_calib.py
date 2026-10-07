@@ -263,7 +263,7 @@ class TestRegionCalibVerify(_CalibBridgeTest):
                 with mock.patch.object(vb, "ocr_image", side_effect=ocr_side):
                     return self.bridge.region_calib_verify()
 
-    def test_verify_reports_three_probes(self):
+    def test_verify_reports_probes(self):
         def ocr(_img):
             # 依次：标题 / 列表 / 消息（区域均为小图，ocr_image 被裁剪图调用）
             return ocr.side.pop(0)
@@ -280,6 +280,9 @@ class TestRegionCalibVerify(_CalibBridgeTest):
         self.assertIn("群聊", by_key["title"]["detail"])
         self.assertIn("林小满", by_key["list"]["detail"])
         self.assertIn("带伞", by_key["msg"]["detail"])
+        # 主题探针：浅色/深色二选一（合成帧为浅色底），恒 ok
+        self.assertTrue(by_key["theme"]["ok"])
+        self.assertIn("模式", by_key["theme"]["detail"])
 
     def test_verify_title_miss_marks_bad(self):
         def ocr(_img):
