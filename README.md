@@ -4,7 +4,7 @@
   <p><b>微信 AI 机器人 · 视觉版</b></p>
   <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x</sub></p>
   <p>
-    <img src="https://img.shields.io/badge/version-3.0.1-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
+    <img src="https://img.shields.io/badge/version-3.1.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
     <img src="https://img.shields.io/badge/WeChat_PC-4.x-35C48D?style=flat-square&amp;labelColor=0B2540" alt="WeChat PC 4.x">
     <img src="https://img.shields.io/badge/Windows-10+-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=windows&amp;logoColor=white" alt="Windows 10+">
     <img src="https://img.shields.io/badge/Python-3.12-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=python&amp;logoColor=white" alt="Python 3.12">
@@ -31,7 +31,7 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
-> **v3.0.1「缓存命中工程 · 语音自检 · 任务页」** · 近期记忆阶梯滚动 + 重要记忆挪尾区（前缀缓存全程命中） · 语音就绪灯与自检试听 · 文件判据纯视觉化
+> **v3.1.0「工具按开关注入 · 触发器可管理 · 表情包」** · 每个工具按自己的开关独立注入（拆任务桥总闸） · AI 能取消/修改/查询它建过的闹钟和监视 · 新增表情包发送（内置默认表情包库） · 回复节奏可调 · 用量折线与主题重启修复
 
 ## 目录
 
@@ -49,9 +49,9 @@
 
 ## 下载安装（桌面版）
 
-**v3.0.1 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 托盘常驻）：
+**v3.1.0 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 表情包库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v3.0.1.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.0.1/xiaoli-setup-v3.0.1.exe)
+👉 [点击下载 `xiaoli-setup-v3.1.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.1.0/xiaoli-setup-v3.1.0.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -251,6 +251,7 @@ assets/                      # README 展示图（mascot / showcase-voice / soci
 
 ## 更新记录
 
+- [v3.1.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.0.md)（工具按开关单独注入/触发器可管理/表情包发送/回复节奏可调/用量折线与主题重启修复）
 - [v3.0.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.0.1.md)（近期记忆阶梯滚动/重要记忆挪尾区提缓存命中/语音通用保存修复+就绪灯+自检试听/文件判据纯视觉/reply_max_tokens 单键化/用量页校准/任务页）
 - [v3.0.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.0.0.md)（Web 前端开源/头像锚定归属重构/文件卡片视觉判定/消息文字范围规则/文件名定位下载时间优先）
 - [v2.9.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.2.md)（回复段首时间戳剥除修复/消息归属判定诊断日志）
