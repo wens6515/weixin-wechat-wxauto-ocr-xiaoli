@@ -54,7 +54,6 @@ def make_backend(world, selected_color=(13, 168, 105)):
     b._hwnd = 12345
     b._session_region = SESSION_REGION
     b._selected_row_color = selected_color
-    b._badge_coords = {}
     b._session_coords = {}
     b._current_chat = None
     b._last_shot = None

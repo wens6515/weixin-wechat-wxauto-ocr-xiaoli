@@ -33,7 +33,6 @@ def make_backend(titles, highlight=False, current="联系人丁"):
     b._hwnd = 1
     b._current_chat = current
     b._session_coords = {TARGET: (300, 179)}
-    b._badge_coords = {}
     b._selected_row_color = (13, 168, 105)
     seq = list(titles)
 

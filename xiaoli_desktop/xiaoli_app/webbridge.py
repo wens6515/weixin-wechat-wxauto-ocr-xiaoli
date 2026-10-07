@@ -1204,6 +1204,156 @@ class BridgeApi:
                          name="xiaoli-sticker-retag").start()
         return {"ok": True, "started": True}
 
+    # ---------- 微信画面标定 ----------
+
+    def _calib_shot(self):
+        """截取当前微信窗口（标定底图）。返回 (PIL Image, window_rect) 或
+        (None, None, 错误文案)。先置前微信——完全遮挡时 PrintWindow 返回黑图。"""
+        from wx_backend import visual_backend as vb
+        hwnd = vb.find_wechat_window()
+        if not hwnd:
+            return None, None, "未检测到微信窗口——请先在电脑端登录微信"
+        vb.ensure_window_visible(hwnd)
+        shot = vb.capture_window(hwnd)
+        if shot is None:
+            return None, None, "截图失败（窗口句柄失效？），请重试"
+        return shot, vb.window_rect(hwnd), None
+
+    @_safe
+    def region_calib_start(self) -> dict:
+        """标定第一步：截微信窗口作框选底图 + 返回两框预填。
+
+        底图与运行时截图同走 capture_window（PrintWindow）——框选坐标系与
+        运行时比例换算天然一致，无 DPI 坑。预填优先级：已标定配置的两框
+        原始值 → 现配置三区域反推 → 模块默认三区域反推（未标定用户看到的
+        就是当前生效区域）。"""
+        from wx_backend import visual_backend as vb
+        from wx_backend.visual_regions import boxes_from_regions
+        shot, _wr, err = self._calib_shot()
+        if shot is None:
+            return {"ok": False, "error": err}
+        cfg = vb._load_region_config()
+        prefill = None
+        if cfg and all(k in cfg for k in ("session_box", "chat_box", "split")):
+            prefill = {"session_box": list(cfg["session_box"]),
+                       "chat_box": list(cfg["chat_box"]),
+                       "split": cfg["split"]}
+        else:
+            session = cfg["session"] if cfg else vb._SESSION_REGION_RATIO
+            message = cfg["message"] if cfg else vb._MESSAGE_REGION_RATIO
+            title = (cfg.get("title") if cfg else None) or vb._TITLE_REGION_RATIO
+            prefill = boxes_from_regions(session, message, title)
+        if prefill:
+            prefill = {"session_box": list(prefill["session_box"]),
+                       "chat_box": list(prefill["chat_box"]),
+                       "split": prefill["split"]}
+        buf = io.BytesIO()
+        shot.convert("RGB").save(buf, format="JPEG", quality=85)
+        return {"ok": True,
+                "image": "data:image/jpeg;base64,"
+                         + base64.b64encode(buf.getvalue()).decode(),
+                "width": shot.width, "height": shot.height,
+                "prefill": prefill, "calibrated": bool(cfg)}
+
+    @_safe
+    def region_calib_save(self, session_box, chat_box, split) -> dict:
+        """标定第二步：两框 + 分隔线 → 派生运行时三区域 → 写
+        wx_ocr_region.json（frozen 感知路径）。引擎运行中同步热更新 bot
+        后端区域，无需重启。"""
+        from wx_backend import visual_backend as vb
+        from wx_backend.visual_regions import derive_regions
+        try:
+            s_box = [float(v) for v in (session_box or [])]
+            c_box = [float(v) for v in (chat_box or [])]
+            k = float(split)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "区域参数须为数字"}
+        regions = derive_regions(s_box, c_box, k)
+        if regions is None:
+            return {"ok": False, "error": "区域值非法（须 [0,1] 且 l<r、t<b）"}
+        data = {"session_region": list(regions["session"]),
+                "message_region": list(regions["message"]),
+                "title_region": list(regions["title"]),
+                "session_box": s_box, "chat_box": c_box, "split": k}
+        _shot, wr, err = self._calib_shot()
+        if wr:
+            data["window_rect"] = {"x": wr[0], "y": wr[1],
+                                   "width": wr[2], "height": wr[3]}
+        elif err:
+            logger.debug(f"[标定] 保存时取窗口 rect 失败（不阻塞保存）: {err}")
+        path = vb.save_region_config(data)
+        hot = False
+        bot = getattr(self.ctx.engine, "bot", None)
+        wx = getattr(bot, "wx", None)
+        if wx is not None and hasattr(wx, "reload_regions"):
+            wx.reload_regions()
+            hot = True
+        return {"ok": True, "path": path, "hot": hot,
+                "regions": {key: list(val) for key, val in regions.items()}}
+
+    @_safe
+    def region_calib_verify(self) -> dict:
+        """标定验证：按当前生效区域现读一帧，返回标题/列表/最近消息三探针。
+
+        独立实现（模块级 capture_window + ocr_image，不经 VisualBackend
+        实例）——首启时引擎未初始化同样可用。"""
+        import re as _re
+        from wx_backend import visual_backend as vb
+        from wx_backend.visual_regions import parse_title
+        shot, _wr, err = self._calib_shot()
+        if shot is None:
+            return {"ok": False, "error": err}
+        cfg = vb._load_region_config()
+        session = cfg["session"] if cfg else vb._SESSION_REGION_RATIO
+        message = cfg["message"] if cfg else vb._MESSAGE_REGION_RATIO
+        title = (cfg.get("title") if cfg else None) or vb._TITLE_REGION_RATIO
+        w, h = shot.size
+
+        def _crop(region, top=None):
+            l, t, r, b = region
+            if top is not None:
+                t = t + (b - t) * top
+            return shot.crop((int(w * l), int(h * t), int(w * r), int(h * b)))
+
+        def _texts(img):
+            out = []
+            for it in sorted(vb.ocr_image(img), key=lambda i: i["y"]):
+                txt = (it.get("text") or "").strip()
+                if len(txt) >= 2 and _re.search(r"[\u4e00-\u9fffA-Za-z0-9]", txt):
+                    out.append(txt)
+            return out
+
+        items = []
+        t_join = "".join(
+            t["text"] for t in
+            sorted(vb.ocr_image(_crop(title)), key=lambda i: i["x"])
+            if len((t.get("text") or "").strip()) >= 2).strip()
+        name, is_group, count = parse_title(t_join)
+        items.append({
+            "key": "title", "label": "会话标题", "ok": bool(name),
+            "detail": (f"{'群聊' if is_group else '私聊'}：{name}"
+                       + (f"（{count} 人）" if is_group and count else ""))
+                      if name else
+                      "标题区没读到文字——分隔线可能拖太高，试着拖到标题栏下方"})
+
+        seen = []
+        for n in _texts(_crop(session)):
+            if n not in seen:
+                seen.append(n)
+        items.append({
+            "key": "list", "label": "会话列表",
+            "ok": bool(seen),
+            "detail": ("、".join(seen[:3]) + ("…" if len(seen) > 3 else ""))
+                      if seen else "列表区没读到会话——检查左框是否套住会话列表"})
+
+        msgs = _texts(_crop(message, top=0.66))
+        items.append({
+            "key": "msg", "label": "最近消息",
+            "ok": True,
+            "detail": (msgs[-1][:40] + ("…" if len(msgs[-1]) > 40 else ""))
+                       if msgs else "消息区暂无文字（当前会话可能为空）"})
+        return {"ok": True, "items": items}
+
     # ---------- 任务桥（任务页） ----------
 
     @_safe
