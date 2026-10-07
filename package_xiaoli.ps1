@@ -2,7 +2,8 @@
 # 默认【重置测试区】：PyInstaller 重建 dist\小漓 后不恢复运行时数据，
 # 打包产物为纯净状态（exe + _internal + 壁纸 + fonts + 表情包），首次启动
 # 走全新安装流程，角色卡使用最新模板。config.json / memory.json / cards /
-# wxauto / memory_deep 会被一并清掉；打包成功后还会清空用户目录（%USERPROFILE%\小漓）
+# wxauto / memory_deep / wx_ocr_region.json（应用内画面标定）会被一并清掉；
+# 打包成功后还会清空用户目录（%USERPROFILE%\小漓）
 # 的 usage.jsonl / reminders.json——重置 = 彻底全新，上一轮测试的用量
 # 统计与定时提醒不带入。需要保留运行时数据时加 -KeepRuntime 参数：
 #   powershell -ExecutionPolicy Bypass -File .\package_xiaoli.ps1 -KeepRuntime
@@ -15,7 +16,7 @@ $dist   = Join-Path $root 'dist\小漓'
 $backup = Join-Path $root 'dist_runtime_backup'
 $venvPy = Join-Path $root 'xiaoli_desktop\.venv\Scripts\python.exe'
 $spec   = Join-Path $root '小漓.spec'
-$runtimeItems = @('config.json','memory.json','cards','wxauto','memory_deep')
+$runtimeItems = @('config.json','memory.json','cards','wxauto','memory_deep','wx_ocr_region.json')
 
 Write-Host "[0] 仓库根: $root"
 if (-not (Test-Path $venvPy)) { throw "找不到虚拟环境 python: $venvPy（请确认 xiaoli_desktop\.venv 存在）" }

@@ -466,6 +466,7 @@ class BridgeApi:
             "model_trigger_manage": cfg.get("model_trigger_manage", "off"),
             "sticker_mode": cfg.get("sticker_mode", "off"),
             "wechat_window_size": cfg.get("wechat_window_size"),
+            "tianshu_guided": bool(cfg.get("tianshu_guided")),
         }
         voice = {
             "voice_mode": cfg.get("voice_mode", "off"),
@@ -1414,6 +1415,55 @@ class BridgeApi:
         return {"ok": True, "configured": [w, h], "applied": applied,
                 "error": err}
 
+    # ---------- 天枢配置引导（任务桥首次开启时） ----------
+
+    @_safe
+    def tianshu_guide_info(self) -> dict:
+        """引导弹窗初始状态：CLI 是否可用 / 是否已有 CLI 窗口 / 引导是否完成。
+
+        与老 Qt 版 run_first_run_guide 同一套判据（detect_rivet / CLI 窗口
+        特征），只是把模态弹窗换成 Web 弹窗。"""
+        from . import setup
+        rivet = setup.detect_rivet()
+        title = setup.find_cli_window()
+        return {"ok": True,
+                "installed": bool(rivet),
+                "detail": rivet or "未检测到 rivet 命令（需 npm install -g tianshu-tui）",
+                "window": title,
+                "guided": bool(self.ctx.cfg.get("tianshu_guided")),
+                "prompt_text": setup.GUIDE_PROMPT_TEXT}
+
+    @_safe
+    def tianshu_guide_open(self) -> dict:
+        """打开天枢 CLI 窗口，让用户在窗口里选模型 / 输 API key / 回车确认。"""
+        from . import setup
+        ok, detail = setup.launch_tianshu(self.ctx.cfg)
+        return {"ok": bool(ok), "detail": detail}
+
+    @_safe
+    def tianshu_guide_finish(self) -> dict:
+        """用户确认已在 CLI 完成配置：发首轮提示词（任务协议，best-effort）→
+        发 /yes（全自动，持久化）→ 关闭 CLI 窗口 → 标记 tianshu_guided=True
+        （此后初始化不再引导）。"""
+        from . import setup
+        title = setup.find_cli_window()
+        if not title:
+            return {"ok": False,
+                    "error": "未检测到天枢 CLI 窗口——请确认 CLI 窗口还开着"
+                             "（已关掉的话点「打开天枢 CLI」重开并完成配置）"}
+        # 首轮提示词 = 任务桥协议说明（老 Qt 版在 CLI 窗口存在时自动发）。
+        # 窗口正开着才发得出去，故放在这里；失败不阻塞引导（首页「重发一次」可补）。
+        try:
+            setup.send_prompt_to_tianshu(
+                setup.build_first_prompt(self.ctx.cfg), title)
+        except Exception as e:
+            logger.debug(f"[引导] 首轮提示词发送失败（不阻塞）: {e}")
+        if not setup.send_yes_and_close(title):
+            return {"ok": False, "error": "未能向天枢 CLI 发送 /yes，请重试"}
+        self.ctx.cfg["tianshu_guided"] = True
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        return {"ok": True}
+
     # ---------- 任务桥（任务页） ----------
 
     @_safe
@@ -1542,6 +1592,11 @@ class BridgeApi:
         cfg["file_storage_path"] = str(file_storage_path or "").strip()
         cfg["memory_file"] = str(memory_file or "").strip() or "memory.json"
         cfg["bot_nickname"] = str(bot_nickname or "").strip() or "小漓"
+        # 新装默认关任务桥：天枢 CLI 未配置前开着，模型会投递注定失败的任务。
+        # 引导路径 = 首次打开任务桥开关时的「天枢配置引导」弹窗；用户显式设过
+        # 该键的（老配置）不动。
+        if "task_enabled" not in cfg:
+            cfg["task_enabled"] = False
         config_store.sync_workdir_to_tasks(cfg)
         config_store.save_config(cfg, self.ctx.cfg_path)
         try:

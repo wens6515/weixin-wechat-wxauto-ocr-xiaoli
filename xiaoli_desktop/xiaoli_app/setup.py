@@ -890,6 +890,22 @@ _GUIDE_PROMPT_TEXT = (
     "若 CLI 窗口未出现，请手动打开命令行窗口并输入 rivet 启动。"
 )
 
+# 公开别名：Web 版配置引导（BridgeApi.tianshu_guide_*）直接取用这段文案。
+GUIDE_PROMPT_TEXT = _GUIDE_PROMPT_TEXT
+
+
+def detect_rivet():
+    """rivet 命令路径（npm 全局安装 tianshu-tui 后可见）；无则 None。"""
+    import shutil
+    return shutil.which("rivet") or shutil.which("rivet.cmd")
+
+
+def find_cli_window():
+    """当前存在的天枢 CLI 控制台窗口标题；无则 None。
+
+    引导完成检测与 /yes 发送共用同一判据（_is_cli_feature + 进程证据）。"""
+    return _find_npm_prefix_window()
+
 
 def run_first_run_guide(cfg, parent=None, cfg_path=None,
                         detect_fn=None, install_fn=None, launch_fn=None,
@@ -911,10 +927,7 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
     """
     from xiaoli_app import config_store
     sleep_fn = sleep_fn or time.sleep
-    if detect_fn is None:
-        def detect_fn():
-            import shutil
-            return shutil.which("rivet") or shutil.which("rivet.cmd")
+    detect_fn = detect_fn or detect_rivet
     # ① CLI 检测/安装
     rivet = detect_fn()
     if not rivet:

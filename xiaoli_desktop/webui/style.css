@@ -1270,3 +1270,12 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   color: var(--text);
 }
 .wx-size .wx-x { color: var(--muted); font-size: 12.5px; }
+
+/* ---------- 天枢配置引导 ---------- */
+.guide-pre {
+  margin: 8px 0 12px; padding: 12px 14px; font-size: 12.6px; line-height: 1.85;
+  color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
+  border-radius: var(--r-input); border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  font-family: inherit;
+}
