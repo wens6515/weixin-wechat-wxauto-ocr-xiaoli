@@ -21,9 +21,8 @@ from wx_backend import create_backend
 from wx_backend.visual_backend import (
     ensure_window_visible,
     find_window_by_title,
+    resize_window_visible,
     window_rect,
-    default_right_half_rect,
-    position_window_visible,
 )
 from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
 from xiaoli_app.file_text import (_FILE_TOKEN_LOOSE_RE, _FILE_TOKEN_RE,
@@ -354,8 +353,10 @@ class WeChatBot(MediaCaptureMixin):
                                AI_DEFAULTS["segment_jitter_max"])))
         # 用量统计：每次 LLM 调用终态追加一行 JSONL（埋点在 _post_chat_completions）
         self.usage_store = UsageStore()
-        # 微信窗口定位：None=默认右半屏；[x,y,w,h]=自定义；"off"=保持手动
-        self.wechat_window_rect = cfg.get("wechat_window_rect", None)
+        # 微信窗口尺寸（可见内容物理像素 [w, h]）：初始化时套用、不移动
+        # 位置；None = 不调整。旧键 wechat_window_rect（含位置）由
+        # config_store 一次性迁移取尺寸部分。
+        self.wechat_window_size = cfg.get("wechat_window_size", None)
         self.paused = cfg.get("start_paused", True)
         self.memory_file = cfg.get("memory_file", "memory.json")
         # 长记忆（v2）配置：recent 只保留 memory_keep_recent 条，溢出消息
@@ -890,7 +891,7 @@ class WeChatBot(MediaCaptureMixin):
                 raise RuntimeError("微信连接已取消")
             try:
                 self.wx = create_backend("auto")
-                self._init_position_wechat()
+                self._init_apply_window_size()
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:
@@ -908,52 +909,46 @@ class WeChatBot(MediaCaptureMixin):
                     time.sleep(min(0.5, remain))
                     remain -= 0.5
 
-    def _init_position_wechat(self):
-        """初始化微信窗口定位（连接成功时执行一次，用户定案）。
+    def _init_apply_window_size(self):
+        """初始化套用用户设定的微信窗口大小（只改大小，不移动位置——用户定案）。
 
-        视觉坐标依赖窗口位置/尺寸稳定——初始化即摆到标准位并告知用户
-        勿动，替代旧「不移动窗口」约定。配置 wechat_window_rect：
-        - None（默认）→ 主屏右半边（README 系统要求）
-        - [x, y, w, h] → 自定义矩形（物理像素）
-        - "off" → 完全保持手动（旧行为）
-        运行期不再核对矩形（用户否决每轮像素核对的成本），仅保留最小化
-        哨兵自动恢复（IsIconic 一次系统调用，微秒级）。
+        旧行为是把窗口摆到屏幕右半屏（wechat_window_rect，自动定位 +
+        尺寸一条龙）；现改为：位置由用户自己摆（程序一概不移动），尺寸可
+        由用户在设置页设定并在初始化时套用。区域标定是**比例坐标**，对
+        尺寸变化天然鲁棒，但尺寸漂移会让 OCR 精度与几何阈值退化——固定
+        尺寸保证标定时的阅读条件稳定。
+
+        配置 wechat_window_size：[w, h] 可见内容尺寸（物理像素）；
+        None/非法 = 不调整（保持用户当前尺寸）。
         """
-        rect = getattr(self, "wechat_window_rect", None)
-        if rect == "off":
-            logger.info("[定位] wechat_window_rect=off，保持手动窗口位置")
+        size = getattr(self, "wechat_window_size", None)
+        if not size:
+            logger.info("[窗口] 未设置固定窗口大小，保持当前尺寸（位置由用户自行摆放）")
             return
         hwnd = find_window_by_title("微信")
         if not hwnd:
-            logger.warning("[定位] 未找到微信窗口，跳过定位")
+            logger.warning("[窗口] 未找到微信窗口，跳过尺寸套用")
             return
-        ensure_window_visible(hwnd)  # 最小化先拉起，定位才有意义
+        ensure_window_visible(hwnd)  # 最小化窗口无法有效改大小，先拉起
         try:
             if ctypes.windll.user32.IsZoomed(hwnd):
-                # 最大化先还原再定位：SetWindowPos 对最大化窗口行为不可靠
-                # （可能只改尺寸不改状态，视觉错乱）
+                # 最大化先还原再改大小：SetWindowPos 对最大化窗口行为不可靠
                 ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
                 time.sleep(0.3)
         except Exception:
             pass
-        if isinstance(rect, (list, tuple)) and len(rect) == 4:
-            try:
-                x, y, w, h = (int(v) for v in rect)
-                source = "配置"
-            except (TypeError, ValueError):
-                x, y, w, h = default_right_half_rect()
-                source = "配置非法，回退默认右半屏"
+        try:
+            w, h = int(size[0]), int(size[1])
+        except (TypeError, ValueError, IndexError):
+            logger.warning(f"[窗口] wechat_window_size 非法（{size!r}），跳过套用")
+            return
+        if w < 200 or h < 200:
+            logger.warning(f"[窗口] wechat_window_size 过小（{w}x{h}），跳过套用")
+            return
+        if resize_window_visible(hwnd, w, h):
+            logger.info(f"[窗口] 微信窗口大小已套用：{w}x{h}（位置未改动）")
         else:
-            x, y, w, h = default_right_half_rect()
-            source = "默认右半屏"
-        if position_window_visible(hwnd, x, y, w, h):
-            # 可见内容语义：自动外扩 DWM 不可见边框，可见部分精确贴合目标
-            # （与手动拖窗口到打满的系统行为一致；直接摆窗口矩形会两侧
-            # 各缩进 ~10px——用户实测「右侧有缝隙」）
-            logger.info(f"[定位] 微信窗口已定位（{source}）：可见区 ({x},{y}) {w}x{h}"
-                        "——请勿最小化或调整窗口大小，否则影响消息识别")
-        else:
-            logger.warning("[定位] 微信窗口定位失败，保持当前位置")
+            logger.warning("[窗口] 微信窗口大小套用失败，保持当前尺寸")
 
     # ---------- 记忆（实现在 xiaoli_app.memory_store.MemoryStore；这里全部
     # 委托，保持既有调用形态——MemoryCompressor / CLI / 记忆管理页 / tests

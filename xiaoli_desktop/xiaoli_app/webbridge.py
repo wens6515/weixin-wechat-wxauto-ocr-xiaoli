@@ -19,6 +19,7 @@ evaluate_js 注入 window.__push(evt, payload) 推送事件。
 from __future__ import annotations
 
 import base64
+import ctypes
 import functools
 import io
 import json
@@ -464,6 +465,7 @@ class BridgeApi:
             "state_watch_enabled": cfg.get("state_watch_enabled", False),
             "model_trigger_manage": cfg.get("model_trigger_manage", "off"),
             "sticker_mode": cfg.get("sticker_mode", "off"),
+            "wechat_window_size": cfg.get("wechat_window_size"),
         }
         voice = {
             "voice_mode": cfg.get("voice_mode", "off"),
@@ -1353,6 +1355,64 @@ class BridgeApi:
             "detail": (msgs[-1][:40] + ("…" if len(msgs[-1]) > 40 else ""))
                        if msgs else "消息区暂无文字（当前会话可能为空）"})
         return {"ok": True, "items": items}
+
+    # ---------- 微信窗口尺寸（只固定大小，不移动位置） ----------
+
+    @_safe
+    def wechat_window_info(self) -> dict:
+        """返回已配置的固定尺寸与微信窗口当前可见尺寸（设置页展示/读取用）。"""
+        from wx_backend import visual_backend as vb
+        cfg_size = self.ctx.cfg.get("wechat_window_size")
+        info = {"ok": True, "configured": list(cfg_size) if cfg_size else None,
+                "current": None, "running": bool(getattr(self.ctx.engine, "bot", None))}
+        hwnd = vb.find_wechat_window()
+        if hwnd:
+            size = vb.visible_window_size(hwnd)
+            if size:
+                info["current"] = [int(size[0]), int(size[1])]
+        return info
+
+    @_safe
+    def set_wechat_window_size(self, w, h, apply_now: bool = True) -> dict:
+        """保存固定窗口尺寸并（默认）立即套用——只改大小、不移动位置。
+
+        w/h 为可见内容物理像素；传 0/None = 清除固定尺寸（初始化不再调整）。
+        范围夹取 [200, 屏幕尺寸]，防手滑填出不可用尺寸。"""
+        from wx_backend import visual_backend as vb
+        clear = not w or not h or int(w) <= 0 or int(h) <= 0
+        if clear:
+            self.ctx.cfg["wechat_window_size"] = None
+            config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+            return {"ok": True, "configured": None, "applied": False}
+        try:
+            w, h = int(w), int(h)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "尺寸须为数字"}
+        if w < 200 or h < 200:
+            return {"ok": False, "error": "尺寸过小（至少 200×200）"}
+        screen_w = ctypes.windll.user32.GetSystemMetrics(0) or w
+        screen_h = ctypes.windll.user32.GetSystemMetrics(1) or h
+        w, h = min(w, screen_w), min(h, screen_h)
+        self.ctx.cfg["wechat_window_size"] = [w, h]
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        applied = False
+        err = None
+        if apply_now:
+            hwnd = vb.find_wechat_window()
+            if not hwnd:
+                err = "未检测到微信窗口——尺寸已保存，初始化时会自动套用"
+            else:
+                vb.ensure_window_visible(hwnd)
+                try:
+                    if ctypes.windll.user32.IsZoomed(hwnd):
+                        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                except Exception:
+                    pass
+                applied = bool(vb.resize_window_visible(hwnd, w, h))
+                if not applied:
+                    err = "套用失败（窗口句柄异常？），尺寸已保存"
+        return {"ok": True, "configured": [w, h], "applied": applied,
+                "error": err}
 
     # ---------- 任务桥（任务页） ----------
 

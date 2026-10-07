@@ -1260,3 +1260,13 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
 .calib-item.bad .calib-mark { color: var(--danger); }
 .calib-item b { flex: none; }
 .calib-item .calib-detail { color: var(--muted); overflow-wrap: anywhere; }
+
+/* ---------- 微信窗口大小行 ---------- */
+.wx-size { display: flex; align-items: center; gap: 6px; flex: none; }
+.wx-size input[type="number"] {
+  width: 78px; padding: 6px 8px; font-size: 13px;
+  border-radius: var(--r-input); border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-solid) 80%, transparent);
+  color: var(--text);
+}
+.wx-size .wx-x { color: var(--muted); font-size: 12.5px; }
