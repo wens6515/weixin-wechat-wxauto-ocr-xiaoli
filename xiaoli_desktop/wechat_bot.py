@@ -711,18 +711,33 @@ class WeChatBot(MediaCaptureMixin):
         return catalog_text(lines)
 
     def _exec_search_stickers(self, query):
-        """search_stickers 工具执行：本地关键词搜索（零 API），返回候选行。"""
+        """search_stickers 工具执行：本地关键词搜索（零 API），返回候选行；
+        query 留空 = 返回完整清单（模型自己决定搜还是全览，搜索不中的兜底）。
+        全清单封顶防超大库把 token 撑爆——超限提示改用关键词搜索。"""
         if str(getattr(self, "sticker_mode", "off") or "off") == "off":
             return "表情包功能未开启"
         store = self._sticker_store()
         if store is None:
             return "表情包库不可用"
+        q = str(query or "").strip()
         try:
-            hits = store.search(query, limit=5)
+            if not q:
+                lines = store.catalog_lines()
+                if not lines:
+                    return "表情包库是空的"
+                cap = 60
+                extra = ""
+                if len(lines) > cap:
+                    lines = lines[:cap]
+                    extra = f"\n…（库较大只列前 {cap} 张，建议用关键词搜索）"
+                return ("表情包完整清单（用 send_sticker 发送，file 填文件名）：\n"
+                        + "\n".join(lines) + extra)
+            hits = store.search(q, limit=5)
         except Exception as e:
             return f"表情包搜索失败：{e}"
         if not hits:
-            return "没有匹配的表情包（换个关键词，或不用表情包直接回复）"
+            return ("没有匹配的表情包（可留空 query 拿完整清单，或不用表情包"
+                    "直接回复）")
         return ("找到这些（用 send_sticker 发送，file 填文件名）：\n"
                 + "\n".join(f"{it['file']}｜{it['desc']}"
                             + (f"｜{' '.join(it['tags'])}" if it["tags"] else "")
@@ -1309,8 +1324,8 @@ class WeChatBot(MediaCaptureMixin):
                         "发送一个表情包（微信表情图片）。"
                         + ("可用表情包清单已在系统消息里给出，file 直接从"
                            "清单里选。" if _sticker_mode == "catalog" else
-                           "先用 search_stickers 搜到合适的，再拿文件名"
-                           "发送。")
+                           "先用 search_stickers 找到合适的（可搜关键词或"
+                           "留空拿全清单），再拿文件名发送。")
                         + "可以只发表情包不说话（调用后不再输出文字），"
                           "也可以表情包+文字一起回（表情先发、文字后发）；"
                           "一次一张，别连发"),
@@ -1330,17 +1345,20 @@ class WeChatBot(MediaCaptureMixin):
                     "type": "function",
                     "function": {
                         "name": "search_stickers",
-                        "description": "按情绪/场景关键词搜索可发送的表情包"
-                                       "（如「生气」「开心」「猫猫」），返回"
-                                       "最相关的候选。挑好了用 send_sticker "
-                                       "发送",
+                        "description": "查找可发送的表情包。query 填情绪/场景"
+                                       "关键词（如「生气」「开心」「猫猫」）"
+                                       "返回最相关的候选；**query 留空 = 直接"
+                                       "返回完整表情包清单**——搜索不中、想"
+                                       "全库浏览或拿不准关键词时用它。挑好了"
+                                       "用 send_sticker 发送",
                         "parameters": {
                             "type": "object",
                             "properties": {
                                 "query": {"type": "string",
-                                          "description": "情绪或场景关键词"},
+                                          "description": "情绪或场景关键词；"
+                                                         "留空 = 返回完整清单"},
                             },
-                            "required": ["query"],
+                            "required": [],
                         },
                     },
                 })
