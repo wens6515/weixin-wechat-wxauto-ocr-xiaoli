@@ -1797,6 +1797,9 @@ const CALIB_MIN = 0.015;                 // 框最小边（比例）
 const SPLIT_LO = 0.02, SPLIT_HI = 0.85;  // 与后端 derive_regions 夹取一致
 
 async function openCalib(firstRun = false) {
+  // 打开过标定界面即视为「已提示」——首启第 2 步/设置页入口/升级提示的
+  // 「立即标定」共用这一处，新用户与升级用户都不会被重复打扰
+  API.region_calib_nudge_done();
   calib.firstRun = firstRun;
   calib.ready = false;
   $("#calibSkip").hidden = !firstRun;
@@ -1979,6 +1982,21 @@ $("#btnTianshuGuide").addEventListener("click", () => openTianshuGuide());
 $("#tgLater").addEventListener("click", () => {
   closeModal();
   toast("任务桥保持开启；天枢没配好前，任务会被投递但没人处理——随时可到「设置 → 任务桥 → 天枢配置引导」补配置", "warn");
+});
+
+/* ---------- 升级用户一次性标定提示（新用户走首启第 2 步，不弹） ---------- */
+async function maybeCalibNudge() {
+  const r = await API.region_calib_nudge_info();
+  if (!r || !r.ok || !r.show) return;
+  openModal("modalCalibNudge");
+}
+$("#cnGo").addEventListener("click", () => {
+  closeModal();
+  openCalib(false);
+});
+$("#cnLater").addEventListener("click", () => {
+  closeModal();
+  toast("随时可在「设置 → 画面标定」完成；不标定会用内置默认区域，布局不一致时可能读错消息", "warn");
 });
 $("#tgInstall").addEventListener("click", async () => {
   const r = await API.install_tianshu();
@@ -2165,4 +2183,5 @@ requestAnimationFrame(() =>
   refreshSettings();
   setInterval(refreshTriggerBadge, 8000);
   if (cfg.first_run_needed) showFirstRun();
+  else maybeCalibNudge();
 })();

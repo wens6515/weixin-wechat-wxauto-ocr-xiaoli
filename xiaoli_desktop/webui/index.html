@@ -866,6 +866,17 @@
     </div>
   </div>
 
+  <!-- 升级用户一次性标定提示（新用户走首启第 2 步，不弹这个） -->
+  <div class="modal glass narrow" id="modalCalibNudge" hidden>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>建议完成一次画面标定</b></div>
+    <p class="confirm-text">检测到微信画面还没标定。新版本不再自动挪动你的微信窗口，识别效果取决于「会话列表 + 聊天区」两个框是否和你的窗口布局对齐——花 30 秒框一下，能避免读错消息、认错人、群聊判定出错。</p>
+    <div class="editor-actions">
+      <button class="mini-btn ghost" id="cnLater">稍后再说</button>
+      <span style="flex:1"></span>
+      <button class="mini-btn" id="cnGo"><svg class="ic"><use href="#i-check"/></svg>立即标定（30 秒）</button>
+    </div>
+  </div>
+
   <!-- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） -->
   <div class="modal glass" id="modalTianshuGuide" hidden>
     <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>天枢配置引导</b></div>

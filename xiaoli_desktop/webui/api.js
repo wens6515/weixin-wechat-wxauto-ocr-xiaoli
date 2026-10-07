@@ -167,6 +167,8 @@ const MOCK = (() => {
       current: [1300, 1610], running: false }),
     set_wechat_window_size: (w, h) => ({ ok: true,
       configured: (w && h) ? [w, h] : null, applied: !!(w && h), error: null }),
+    region_calib_nudge_info: () => ({ ok: true, show: false }),
+    region_calib_nudge_done: () => ({ ok: true }),
     tianshu_guide_info: () => ({ ok: true, installed: true,
       detail: "（演示）C:\\npm\\rivet.cmd", window: null, guided: false,
       prompt_text: "（演示）已为您打开天枢 CLI（命令行窗口）。\n\n请在弹出的窗口中完成配置：\n  ① 选择模型\n  ② 输入 API key\n  ③ 按回车确认" }),
