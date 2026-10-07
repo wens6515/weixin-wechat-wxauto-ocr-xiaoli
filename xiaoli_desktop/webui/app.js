@@ -131,6 +131,8 @@ function goPage(key) {
   $("#content").scrollTop = 0;
   $("#content").classList.toggle("home-fit", key === "home");  // 首页一屏不滚动
   curKey = key;
+  const backTop = $("#btnBackTop");
+  if (backTop && key !== "settings") backTop.hidden = true;
   navBtns.forEach((b) => b.classList.toggle("active", b.dataset.page === key));
   moveIndicator(navBtns[to]);
   PAGE_LOADERS[key]?.();
@@ -144,6 +146,19 @@ $("#anchorRow").addEventListener("click", (e) => {
   if (!btn) return;
   [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
   document.getElementById(btn.dataset.anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+/* ---- 设置页回到顶部：导航行滚出视口（看不见）后右下角浮出圆形按钮 ---- */
+$("#content").addEventListener("scroll", () => {
+  const btn = $("#btnBackTop");
+  if (!btn) return;
+  const row = $("#anchorRow");
+  btn.hidden = !(curKey === "settings" && row &&
+    row.getBoundingClientRect().bottom < 0);
+}, { passive: true });
+$("#btnBackTop").addEventListener("click", () => {
+  $("#content").scrollTo({ top: 0, behavior: "smooth" });
+  $$("#anchorRow .anchor").forEach((b, i) =>
+    b.classList.toggle("active", i === 0));
 });
 window.addEventListener("resize", () =>
   moveIndicator(navBtns.find((b) => b.dataset.page === curKey) || navBtns[0]));
@@ -1418,24 +1433,106 @@ $("#stickerSeg").addEventListener("click", async (e) => {
     query: "已开启（按需查询）：AI 想发时先搜索再挑",
   }[btn.dataset.v] || "已保存") : "保存失败", r.ok ? "ok" : "err");
 });
-async function refreshStickerInfo() {
+let stickerItems = [];
+async function refreshStickerInfo(rerenderGrid) {
   const el = $("#stickerCount"), dir = $("#stickerDir");
   if (!el) return;
   const r = await API.sticker_info();
   if (!r.ok) { el.textContent = "表情包库不可用"; dir.textContent = ""; return; }
   el.textContent = `表情包库：${r.count} 张`;
   dir.textContent = r.dir || "";
+  stickerItems = r.items || [];
+  if (rerenderGrid) renderStickerGrid();
 }
+function renderStickerGrid() {
+  const tb = $("#stickerTbody");
+  if (!tb) return;
+  tb.innerHTML = stickerItems.map((it) => `
+    <tr data-file="${esc(it.file)}">
+      <td>${it.thumb ? `<img class="sticker-thumb" src="${it.thumb}" alt="">`
+                      : '<span class="sticker-thumb empty"></span>'}</td>
+      <td class="sticker-file" title="${esc(it.file)}">${esc(it.file)}</td>
+      <td><input class="sticker-desc" value="${esc(it.desc)}"></td>
+      <td><input class="sticker-tags" value="${esc((it.tags || []).join(", "))}"></td>
+      <td><button class="mini-btn sticker-save">保存</button></td>
+    </tr>`).join("");
+}
+$("#btnStickerManage").addEventListener("click", async () => {
+  openModal("modalStickers");
+  await refreshStickerInfo(true);
+});
+$("#stickerTbody").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".sticker-save");
+  if (!btn) return;
+  const tr = btn.closest("tr");
+  const file = tr.dataset.file;
+  const r = await API.sticker_set_desc(
+    file, tr.querySelector(".sticker-desc").value.trim(),
+    tr.querySelector(".sticker-tags").value.trim());
+  toast(r.ok ? `已保存：${file}` : (r.error || "保存失败"), r.ok ? "ok" : "err");
+  if (r.ok) refreshStickerInfo(false);
+});
+$("#btnStickerAddFiles").addEventListener("click", async () => {
+  const r = await API.sticker_add_files();
+  if (!r.ok) { toast(r.error || "无法添加", "err"); return; }
+  toast(r.canceled ? "已取消"
+    : `已添加 ${r.added} 张${r.skipped ? `，跳过同名 ${r.skipped} 张` : ""}`,
+    "ok");
+  refreshStickerInfo(true);
+});
+$("#btnStickerAddFolder").addEventListener("click", async () => {
+  const r = await API.sticker_add_folder();
+  if (!r.ok) { toast(r.error || "无法添加", "err"); return; }
+  toast(r.canceled ? "已取消"
+    : `已添加 ${r.added} 张${r.skipped ? `，跳过同名 ${r.skipped} 张` : ""}`,
+    "ok");
+  refreshStickerInfo(true);
+});
+$("#btnStickerOpenDir").addEventListener("click", () => API.sticker_open_dir());
+$("#btnStickerPreview").addEventListener("click", async () => {
+  const r = await API.sticker_preview();
+  if (!r.ok) { toast(r.error || "预览失败", "err"); return; }
+  if (!r.count) {
+    toast("表情包库为空，清单注入不会带任何内容", "");
+    return;
+  }
+  $("#stickerPreviewMeta").textContent =
+    `共 ${r.count} 张，注入正文约 ${r.tokens} token（清单注入模式下每次对话请求都会带上这份）`;
+  $("#stickerPreviewText").textContent = r.text;
+  openModal("modalStickerPreview");
+});
 $("#btnStickerRetag").addEventListener("click", async () => {
   const r = await API.sticker_retag();
   if (!r.ok) { toast(r.error || "无法开始打标", "err"); return; }
-  toast("AI 正在逐张看图打标，完成后会提示", "");
+  $("#retagProgress").hidden = false;
+  $("#retagHint").hidden = false;
+  $("#retagFill").style.width = "0%";
+  $("#retagHint").textContent = "AI 正在逐张看图…";
+  $("#btnStickerRetag").disabled = true;
+  toast("AI 优化标签已开始", "");
 });
 function onStickerRetag(p) {
-  if (p.done != null && p.total != null && p.done >= p.total) {
-    toast(p.message || (p.ok ? "打标完成" : "打标失败"), p.ok ? "ok" : "err");
-    refreshStickerInfo();
+  const btn = $("#btnStickerRetag"), bar = $("#retagProgress"),
+    hint = $("#retagHint");
+  if (!p.ok) {
+    if (bar) bar.hidden = true;
+    if (hint) { hint.hidden = false; hint.textContent = p.message || "打标失败"; }
+    if (btn) btn.disabled = false;
+    toast(p.message || "打标失败", "err");
+    return;
   }
+  if (p.total && p.done < p.total) {
+    if ($("#retagFill"))
+      $("#retagFill").style.width = Math.round((p.done / p.total) * 100) + "%";
+    if (hint) hint.textContent = `打标中 ${p.done}/${p.total}`;
+    return;
+  }
+  if (bar) bar.hidden = true;
+  if (hint) { hint.hidden = false; hint.textContent = p.message || "打标完成"; }
+  if (btn) btn.disabled = false;
+  toast(p.message || "打标完成", "ok");
+  const modal = $("#modalStickers");
+  refreshStickerInfo(modal && !modal.hidden);
 }
 /* ---- 回复节奏（两互斥开关 + 数字参数，批量保存） ---- */
 $("#cbSegWait").addEventListener("change", (e) => {

@@ -31,6 +31,18 @@ DESCRIBE_PROMPT = (
     '"desc": "一句话描述这张图适合在什么时候发"}'
 )
 
+# catalog 态清单注入的正文（wechat_bot 与设置页「预览注入清单」共用同一
+# 构造——预览看到的必须与请求里逐字一致，否则预览失去校准意义）
+CATALOG_HEADER = ("你可以发送表情包（调 send_sticker，file 填下面清单里的文件"
+                  "名；可以只发表情包不说话，也可以表情包+文字）：")
+
+
+def catalog_text(lines):
+    """清单行 → 注入正文（无行时返回空串，调用方不注入空消息）。"""
+    if not lines:
+        return ""
+    return CATALOG_HEADER + "\n" + "\n".join(lines)
+
 
 def default_stickers_dir():
     """表情包库默认位置：应用基目录（或其上一级）下的「表情包」/「stickers」。
@@ -192,6 +204,26 @@ class StickerStore:
             return None
         path = os.path.join(self.dir, name)
         return path if os.path.isfile(path) else None
+
+    def set_entry(self, fname, desc, tags=None):
+        """手动编辑单条描述与标签（设置页表情包管理用）。文件必须真实存在
+        于库中；tags 接受 list 或逗号/空白分隔的字符串；desc 留空回退文件名
+        播种。返回是否写回。"""
+        name = str(fname or "").strip()
+        if not name or os.path.basename(name) != name \
+                or name not in self.list_files():
+            return False
+        if isinstance(tags, str):
+            tags = re.split(r"[,，、\s]+", tags)
+        clean_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
+        m = self._load()
+        items = [dict(x) for x in (m.get("items") or []) if isinstance(x, dict)]
+        items = [x for x in items if x.get("file") != name]
+        items.append({"file": name,
+                      "desc": str(desc or "").strip() or _stem_desc(name),
+                      "tags": clean_tags})
+        self._save(sorted(items, key=lambda x: str(x.get("file"))))
+        return True
 
     def reindex(self, describe_fn, progress_cb=None):
         """全库视觉打标（设置页「AI 优化标签」按钮）：逐文件调 describe_fn

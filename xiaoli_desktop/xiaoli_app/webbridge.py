@@ -22,6 +22,7 @@ import base64
 import functools
 import io
 import json
+import logging
 import os
 import shutil
 import sys
@@ -42,6 +43,8 @@ from .memory_store import MemoryStore, memory_key, render_export_markdown
 from .reminders_store import RemindersStore
 from .usage_store import UsageStore, hit_ratio
 from .version import APP_VERSION
+
+logger = logging.getLogger("xiaoli")
 
 # wechat_bot 是仓库根的顶层模块（与 xiaoli_app 平级），只在用到处延迟导入，
 # 避免 import 环（wechat_bot 反向引用 xiaoli_app.*）。
@@ -1040,15 +1043,113 @@ class BridgeApi:
 
     # ---------- 表情包库 ----------
 
+    def _sticker_store_bridge(self):
+        from .sticker_store import StickerStore, default_stickers_dir
+        return StickerStore(default_stickers_dir())
+
     @_safe
     def sticker_info(self) -> dict:
-        """表情包库信息（设置页卡片）：目录、文件清单与描述（文件名播种 +
-        manifest 缓存）。目录不存在返回空清单（功能整体不激活）。"""
-        from .sticker_store import StickerStore, default_stickers_dir
-        d = default_stickers_dir()
-        store = StickerStore(d)
-        entries = store.entries()
-        return {"ok": True, "dir": d, "count": len(entries), "items": entries}
+        """表情包库信息（设置页卡片 + 管理弹窗）：目录、文件清单与描述
+        （文件名播种 + manifest 缓存）+ 缩略图 data URI（复用壁纸的
+        _image_uri 缓存）。目录不存在返回空清单（功能整体不激活）。"""
+        store = self._sticker_store_bridge()
+        d = store.dir
+        items = []
+        for e in store.entries():
+            path = os.path.join(d, e["file"])
+            items.append({**e, "thumb": self._image_uri(path, "thumb")})
+        return {"ok": True, "dir": d, "count": len(items), "items": items}
+
+    @_safe
+    def sticker_set_desc(self, fname: str, desc: str, tags=None) -> dict:
+        """手动编辑单张表情包的描述与标签（管理弹窗行内保存）。"""
+        store = self._sticker_store_bridge()
+        if not store.set_entry(str(fname or ""), str(desc or ""), tags):
+            return {"ok": False, "error": "文件不存在于表情包库"}
+        return {"ok": True}
+
+    @_safe
+    def sticker_add_files(self) -> dict:
+        """系统文件对话框多选图片 → 复制进表情包库（重名覆盖跳过）。
+        新文件用文件名播种描述，可点「AI 优化标签」补看图描述。"""
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        import webview
+        res = self._win.create_file_dialog(
+            webview.OPEN_DIALOG, allow_multiple=True,
+            file_types=("图片 (*.jpg;*.jpeg;*.png;*.gif;*.webp)",))
+        paths = [p for p in (res or [])] if isinstance(res, (list, tuple)) \
+            else ([res] if isinstance(res, str) and res else [])
+        return self._sticker_copy_in(paths)
+
+    @_safe
+    def sticker_add_folder(self) -> dict:
+        """选文件夹 → 把其中（顶层）的图片文件复制进表情包库。"""
+        if self._win is None:
+            return {"ok": False, "error": "窗口未就绪"}
+        import webview
+        res = self._win.create_file_dialog(webview.FOLDER_DIALOG)
+        p = res[0] if isinstance(res, (list, tuple)) and res else (
+            res if isinstance(res, str) and res else None)
+        if not p:
+            return {"ok": True, "added": 0, "canceled": True}
+        try:
+            names = sorted(os.listdir(str(p)))
+        except OSError as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        paths = [os.path.join(str(p), n) for n in names
+                 if n.lower().endswith(
+                     (".png", ".jpg", ".jpeg", ".gif", ".webp"))]
+        return self._sticker_copy_in(paths)
+
+    def _sticker_copy_in(self, paths) -> dict:
+        """把选中的图片复制进库（裸文件名落盘；同名文件跳过——覆盖会悄悄
+        改掉用户已有的表情，宁可让用户先删旧的）。"""
+        import shutil
+        from .sticker_store import STICKER_EXTS
+        store = self._sticker_store_bridge()
+        added, skipped = 0, 0
+        for p in paths or []:
+            try:
+                p = os.path.abspath(str(p))
+                name = os.path.basename(p)
+                if not name.lower().endswith(STICKER_EXTS) \
+                        or not os.path.isfile(p):
+                    continue
+                dst = os.path.join(store.dir, name)
+                if os.path.exists(dst):
+                    skipped += 1
+                    continue
+                os.makedirs(store.dir, exist_ok=True)
+                shutil.copyfile(p, dst)
+                added += 1
+            except OSError as e:
+                logger.warning(f"[表情包] 复制失败 {p}: {e}")
+        if added:
+            self.push("sticker_lib_changed", {})
+        return {"ok": True, "added": added, "skipped": skipped}
+
+    @_safe
+    def sticker_open_dir(self) -> dict:
+        """用资源管理器打开表情包库目录。"""
+        store = self._sticker_store_bridge()
+        os.makedirs(store.dir, exist_ok=True)
+        os.startfile(store.dir)  # noqa: S606（Windows 资源管理器，用户主动）
+        return {"ok": True}
+
+    @_safe
+    def sticker_preview(self) -> dict:
+        """清单注入预览：返回与请求 system 消息**逐字一致**的正文 + token
+        估算（estimate_tokens 同口径），供用户判断 catalog 模式的上下文成本。"""
+        from .llm_client import estimate_tokens
+        from .sticker_store import catalog_text
+        store = self._sticker_store_bridge()
+        lines = store.catalog_lines()
+        if not lines:
+            return {"ok": True, "text": "", "count": 0, "tokens": 0}
+        text = catalog_text(lines)
+        return {"ok": True, "text": text, "count": len(lines),
+                "tokens": estimate_tokens(text)}
 
     @_safe
     def sticker_retag(self) -> dict:

@@ -1149,3 +1149,72 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   .content.home-fit .log-body { height: 232px; flex: none; }
   .content.home-fit .mascot-card .mascot-img { width: 200px; max-height: none; }
 }
+
+/* ============ 设置页回到顶部（导航滚出视口后右下角浮出） ============ */
+.backtop {
+  position: fixed;
+  right: 26px;
+  bottom: 26px;
+  z-index: 60;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--p1);
+  background: var(--p1);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+  opacity: .92;
+  transition: transform .15s ease, opacity .15s ease;
+}
+.backtop:hover { opacity: 1; transform: translateY(-2px); }
+.backtop .ic { width: 20px; height: 20px; }
+
+/* ============ 表情包：打标进度 / 管理表格 / 清单预览 ============ */
+.retag-progress {
+  margin-top: 8px;
+  height: 6px;
+  max-width: 420px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .12);
+  overflow: hidden;
+}
+.retag-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--p1);
+  transition: width .3s ease;
+}
+.retag-hint { display: block; margin-top: 6px; opacity: .8; }
+.sticker-scroll { max-height: 52vh; overflow: auto; margin-bottom: 10px; }
+.sticker-table .sticker-thumb {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+}
+.sticker-table .sticker-thumb.empty { background: rgba(255, 255, 255, .08); }
+.sticker-table .sticker-file {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.sticker-table input { width: 100%; min-width: 120px; }
+.preview-pre {
+  max-height: 46vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, .25);
+  margin: 0 0 10px;
+}

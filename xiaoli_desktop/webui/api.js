@@ -136,8 +136,14 @@ const MOCK = (() => {
     voice_ready: () => ({ ok: true, ready: true, missing: [] }),
     voice_selftest: () => ({ ok: true, started: true }),
     sticker_info: () => ({ ok: true, dir: "D:\\演示\\表情包", count: 2,
-      items: [{ file: "生气1.png", desc: "气到冒烟", tags: ["生气"] },
-              { file: "开心.gif", desc: "开心到飞起", tags: ["开心"] }] }),
+      items: [{ file: "生气1.png", desc: "气到冒烟", tags: ["生气"], thumb: "" },
+              { file: "开心.gif", desc: "开心到飞起", tags: ["开心"], thumb: "" }] }),
+    sticker_set_desc: () => ({ ok: true }),
+    sticker_add_files: () => ({ ok: true, added: 0, skipped: 0, canceled: true }),
+    sticker_add_folder: () => ({ ok: true, added: 0, skipped: 0, canceled: true }),
+    sticker_open_dir: () => ({ ok: true }),
+    sticker_preview: () => ({ ok: true, count: 2, tokens: 86,
+      text: "（演示）你可以发送表情包（调 send_sticker……）：\n生气1.png｜气到冒烟｜生气\n开心.gif｜开心到飞起｜开心" }),
     sticker_retag: () => {
       setTimeout(() => window.__push("sticker_retag",
         { ok: true, done: 2, total: 2, indexed: 2, message: "打标完成：2/2" }), 500);
