@@ -242,6 +242,31 @@ def position_window(hwnd, x: int, y: int, w: int, h: int) -> bool:
         return False
 
 
+def resize_window_visible(hwnd, w: int, h: int) -> bool:
+    """只改窗口大小、**保持左上角不动**（可见内容语义：按目标可见尺寸外扩
+    不可见边框外沿）。与 position_window_visible 的唯一区别是 x/y 取窗口
+    当前值——位置由用户自己摆放，程序一概不移动。"""
+    r = window_rect(hwnd)
+    if not r:
+        return False
+    m = visible_frame_margins(hwnd)
+    if m is None:
+        m = (0, 0, 0, 0)
+    ml, mt, mr, mb = m
+    return position_window(hwnd, r[0], r[1],
+                           int(w) + ml + mr, int(h) + mt + mb)
+
+
+def visible_window_size(hwnd) -> tuple[int, int] | None:
+    """窗口可见内容尺寸 (w, h)：窗口矩形扣掉 DWM 不可见外沿。"""
+    r = window_rect(hwnd)
+    if not r:
+        return None
+    m = visible_frame_margins(hwnd) or (0, 0, 0, 0)
+    ml, mt, mr, mb = m
+    return (max(1, r[2] - ml - mr), max(1, r[3] - mt - mb))
+
+
 def capture_window(hwnd) -> Image.Image | None:
     """PrintWindow + PW_RENDERFULLCONTENT 截取窗口内容，返回 RGBA PIL Image。
 

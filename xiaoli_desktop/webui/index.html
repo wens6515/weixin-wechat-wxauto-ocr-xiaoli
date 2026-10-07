@@ -553,6 +553,16 @@
             <div class="feat-text"><b>框选 OCR 区域</b><small>框选会话列表与聊天区（含标题带），程序据此读消息、认人、判群聊。微信窗口布局变化、消息归属错乱时重标。</small></div>
             <button class="mini-btn" id="btnCalib">开始标定…</button>
           </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>固定窗口大小</b><small>初始化时套用这个尺寸（<b>位置不固定</b>，微信窗口摆哪由你决定）；两个框都留空 = 不调整。<span id="wxSizeNow" class="dir-note"></span></small></div>
+            <div class="wx-size">
+              <input id="edWxW" type="number" min="200" placeholder="宽">
+              <span class="wx-x">×</span>
+              <input id="edWxH" type="number" min="200" placeholder="高">
+              <button class="mini-btn ghost" id="btnWxSizeRead">读取当前</button>
+              <button class="mini-btn" id="btnWxSizeSave">保存并应用</button>
+            </div>
+          </div>
         </div>
 
         <!-- 任务桥 -->

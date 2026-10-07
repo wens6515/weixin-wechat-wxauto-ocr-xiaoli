@@ -1278,6 +1278,9 @@ function refreshSettings() {
   $("#cbWebSearch").checked = m.web_search_enabled !== false;
   $("#edWebProxy").value = m.web_proxy || "";
   $("#cbStateWatch").checked = !!m.state_watch_enabled;
+  $("#edWxW").value = m.wechat_window_size ? m.wechat_window_size[0] : "";
+  $("#edWxH").value = m.wechat_window_size ? m.wechat_window_size[1] : "";
+  refreshWxSize();   // 当前窗口实际尺寸要现读（异步，不阻塞其它设置填充）
   $("#followSystem").checked = !!u.follow_system;
   $$("#trigManageSeg button").forEach((b) =>
     b.classList.toggle("active", b.dataset.v === (m.model_trigger_manage || "off")));
@@ -1921,6 +1924,45 @@ $("#calibSvg").addEventListener("pointerdown", onCalibDown);
 $("#calibSvg").addEventListener("pointermove", onCalibMove);
 $("#calibSvg").addEventListener("pointerup", onCalibUp);
 $("#calibSvg").addEventListener("pointercancel", onCalibUp);
+
+/* ---------- 微信窗口固定大小（只改大小，不移动位置） ---------- */
+async function refreshWxSize() {
+  const r = await API.wechat_window_info();
+  if (!r || !r.ok) return;
+  $("#edWxW").value = r.configured ? r.configured[0] : "";
+  $("#edWxH").value = r.configured ? r.configured[1] : "";
+  $("#wxSizeNow").textContent = r.current
+    ? `（当前窗口 ${r.current[0]}×${r.current[1]}）`
+    : "（微信未打开，暂时读不到当前尺寸）";
+}
+$("#btnWxSizeRead").addEventListener("click", async () => {
+  const r = await API.wechat_window_info();
+  if (!r || !r.ok || !r.current) {
+    toast((r && r.error) || "未检测到微信窗口——请先登录微信", "err");
+    return;
+  }
+  $("#edWxW").value = r.current[0];
+  $("#edWxH").value = r.current[1];
+  toast(`已读取当前窗口 ${r.current[0]}×${r.current[1]}，点「保存并应用」生效`, "ok");
+});
+$("#btnWxSizeSave").addEventListener("click", async () => {
+  const w = parseInt($("#edWxW").value, 10) || 0;
+  const h = parseInt($("#edWxH").value, 10) || 0;
+  if (!w && !h) {
+    const r = await API.set_wechat_window_size(0, 0);
+    if (!r || !r.ok) { toast((r && r.error) || "保存失败", "err"); return; }
+    toast("已清除固定窗口大小（初始化不再调整窗口）", "ok");
+    refreshWxSize();
+    return;
+  }
+  const r = await API.set_wechat_window_size(w, h);
+  if (!r || !r.ok) { toast((r && r.error) || "保存失败", "err"); return; }
+  toast(r.applied
+      ? `已保存并套用：${r.configured[0]}×${r.configured[1]}（窗口位置未动）`
+      : (r.error || "已保存，初始化时自动套用"),
+    r.applied ? "ok" : "warn");
+  refreshWxSize();
+});
 $("#calibReshoot").addEventListener("click", () => openCalib(calib.firstRun));
 $("#calibSkip").addEventListener("click", () =>
   finishFirstRun("已跳过标定（使用内置默认区域）；消息读不准时到 设置 → 画面标定 重标"));

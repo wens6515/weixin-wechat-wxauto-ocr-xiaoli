@@ -43,7 +43,8 @@ from .models import MessageType, WeChatMessage
 from .visual_win32 import (
     capture_window, default_right_half_rect, dwm, ensure_window_visible,
     find_wechat_window, find_window_by_title, position_window_visible,
-    u32, visible_frame_margins, window_rect, wt,
+    resize_window_visible, u32, visible_frame_margins, visible_window_size,
+    window_rect, wt,
 )
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
@@ -439,10 +440,9 @@ class VisualBackend:
         if hwnd is None:
             raise BackendUnavailableError("未找到微信主窗口（请确认微信已登录并打开）")
         self._hwnd = hwnd
-        # 窗口定位在 bot 初始化时一次性完成（WeChatBot._init_position_wechat，
-        # 默认右半屏 + 告知用户勿动——用户定案，替代旧的「不移动窗口」约定）。
-        # 后端自身运行期不移动窗口，坐标换算一律读窗口当前实际 rect，
-        # 用户连接后手动调整仍以实时 rect 为准。
+        # 窗口尺寸在 bot 初始化时一次性套用（WeChatBot._init_apply_window_size，
+        # 只改大小不移动位置——用户定案）。后端自身运行期不改窗口，坐标换算
+        # 一律读窗口当前实际 rect，用户随时手动调整位置仍以实时 rect 为准。
         self._ensure_not_iconic()
         shot = capture_window(hwnd)
         if shot is None:
