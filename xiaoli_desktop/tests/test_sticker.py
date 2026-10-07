@@ -310,6 +310,27 @@ class TestToolExecution(_LibBotTest):
         self.assertEqual(result["content"], "我看看哈")
         self.assertFalse(result.get("sticker_sent"))
 
+    def test_search_empty_query_returns_full_catalog(self):
+        """query 留空 = 完整清单（模型自己决定搜还是全览，搜索不中的兜底）。"""
+        bot = self._bot("query")
+        result, receipt = _run_tool(bot, "search_stickers", {},
+                                    final_content="我挑挑")
+        for f in ("生气1.png", "猫猫.png", "开心《哈哈》.gif"):
+            self.assertIn(f, receipt)
+        self.assertIn("完整清单", receipt)
+        self.assertEqual(result["content"], "我挑挑")
+        self.assertFalse(result.get("sticker_sent"))
+
+    def test_search_stickers_schema_query_optional(self):
+        """工具 schema：query 不再必填——留空拿全清单是模型可选项。"""
+        bot = self._bot("query")
+        bot.call_vision_api([{"type": "text", "text": "hi"}], chat_id="林小满")
+        payload = bot._post_chat_completions.call_args.args[2]
+        fn = next(t["function"] for t in payload["tools"]
+                  if t["function"]["name"] == "search_stickers")
+        self.assertNotIn("query", fn["parameters"].get("required", []))
+        self.assertIn("留空", fn["description"])
+
 
 class TestApplyVisionResultSticker(unittest.TestCase):
     """纯表情包回复的上层分流：记记忆 + 占位归零，绝不降级。"""

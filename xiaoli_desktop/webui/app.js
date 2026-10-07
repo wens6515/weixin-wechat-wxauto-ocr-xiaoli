@@ -1430,7 +1430,7 @@ $("#stickerSeg").addEventListener("click", async (e) => {
   toast(r.ok ? ({
     off: "表情包已关闭",
     catalog: "已开启（清单注入）：AI 每次都看得到表情包目录",
-    query: "已开启（按需查询）：AI 想发时先搜索再挑",
+    query: "已开启（按需查询）：AI 想发时自己搜或拿全清单",
   }[btn.dataset.v] || "已保存") : "保存失败", r.ok ? "ok" : "err");
 });
 let stickerItems = [];
