@@ -1976,6 +1976,10 @@ async function openTianshuGuide() {
     : "未检测到天枢 CLI（需要 Node.js）。点「一键安装天枢」自动安装（npm install -g tianshu-tui）。";
 }
 $("#btnTianshuGuide").addEventListener("click", () => openTianshuGuide());
+$("#tgLater").addEventListener("click", () => {
+  closeModal();
+  toast("任务桥保持开启；天枢没配好前，任务会被投递但没人处理——随时可到「设置 → 任务桥 → 天枢配置引导」补配置", "warn");
+});
 $("#tgInstall").addEventListener("click", async () => {
   const r = await API.install_tianshu();
   if (!r || !r.ok) { toast((r && r.error) || "安装启动失败", "err"); return; }
