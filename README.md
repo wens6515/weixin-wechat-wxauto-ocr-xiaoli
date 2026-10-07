@@ -58,7 +58,7 @@
 - **系统要求**：Windows 10+、已登录的**微信 PC 4.x**（4.x 版本均可）；小漓初始化时会自动把微信窗口定位到屏幕右半边（视觉方案依赖窗口位置稳定），之后请勿最小化或调整微信窗口
 - **无需安装 Python / Node.js**：安装包已内置 Python 运行时和全部依赖（含 OCR 引擎）；Node.js（天枢 CLI 依赖）在安装时自动检测，缺失则自动下载安装
 - **安装**：双击安装（免管理员权限），完成后从开始菜单/桌面启动小漓
-- **首次启动**：按引导配置三样东西——任务工作目录、微信文件接收目录、模型 API Key
+- **首次启动**：按引导走两步——① 任务工作目录、微信文件接收目录、模型 API Key；② 微信画面标定（截图上框选会话列表与聊天区，保存前自动试读验证，可跳过后在设置页补标）
 
 > 安装包为桌面完整版；本仓库另提供**后端核心源码**（见下方「源码运行」）。
 
@@ -140,21 +140,16 @@ cd xiaoli_desktop
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 
-# 2. 首次使用：圈选 OCR 区域（列表区/消息区/标题区）
-python tools\pick_ocr_region.py        # 图形框选，结果写入 wx_ocr_region.json
-
-# 3. 微信窗口位置：初始化时自动定位到屏幕右半边（wechat_window_rect=off 可关）
-#    tools\fix_window.py 仅作手动兜底
-python tools\fix_window.py 50 50 900 920
-
-# 4. 启动（CLI 模式，交互式控制台）
+# 2. 启动（CLI 模式，交互式控制台）
 .venv\Scripts\python xiaoli_bot.py --run
 
-# 5. 自检（不连微信，验证环境与核心逻辑）
+# 3. 自检（不连微信，验证环境与核心逻辑）
 .venv\Scripts\python xiaoli_bot.py --test
 ```
 
 > 首次运行生成 `config.json`（含 `ai_api_key`，已被 .gitignore 排除，不会提交）。
+>
+> OCR 区域标定（会话列表 / 聊天区）：桌面端在**首启引导第 2 步**或**设置 → 画面标定**里框选完成（截图底图上拖框 + 标题分隔线，保存前即时试读验证），结果写入 `wx_ocr_region.json`；未标定时按内置默认比例工作。微信窗口位置初始化时自动定位到屏幕右半边（`wechat_window_rect=off` 可关）。
 
 ## 架构
 
@@ -184,21 +179,17 @@ xiaoli_desktop/
 │   ├── version.py           # 内置版本号常量（更新检查比对）
 │   ├── engine.py            # 引擎线程状态机（桌面端宿主用；无 Qt 依赖）
 │   └── setup.py             # 天枢安装/进程检测（GUI 引导部分函数内懒加载 Qt）
-├── tests/                   # unittest 测试套件（后端 30 个测试文件）
-├── wx_ocr_region.json       # OCR 三区域标定（pick_ocr_region 生成）
-├── wx_window.json           # 微信窗口固定配置（fix_window 生成）
+├── tests/                   # unittest 测试套件（后端 30+ 个测试文件）
+├── wx_ocr_region.json       # OCR 区域标定（应用内「画面标定」生成；无此文件用内置默认）
 └── requirements.txt         # Python 3.12 依赖
-tools/                       # 配套标定/调试/出图工具
-├── pick_ocr_region.py       # OCR 区域图形框选（列表→消息→标题）
-├── fix_window.py            # 微信窗口位置固定（手动兜底）
+tools/                       # 配套基准/调试工具
 ├── poll_benchmark.py        # 快档轮询真机基准（截图/红圈检测成本+CPU）
 ├── minimized_probe.py       # 最小化态监听探测（哨兵依据）
-├── calibrate_input_box.py   # 输入框坐标标定
-├── test_read_messages.py    # 消息读取链路调试
-├── cdp_probe.py             # CDP/accessibility 通道验证探针
+├── ocr_upgrade_probe.py     # OCR 引擎选型对比探针
+├── bench_connected_boxes.py # 连通域检测基准
+├── bench_tts_parallel.py    # TTS 并行基准
 ├── webui_dev_server.py      # Web 前端独立热调（静态服务 + no-store，浏览器直开）
-├── smoke_webbridge.py       # 桥接层冒烟（临时目录假配置，验证方法面可用）
-└── make_showcase.py         # 仓库展示图生成（吉祥物抠图 / 截图美化 / 横幅）
+└── smoke_webbridge.py       # 桥接层冒烟（临时目录假配置，验证方法面可用）
 assets/                      # README 展示图（mascot / showcase-voice / social-preview + raw 原图）
 ```
 
@@ -240,7 +231,7 @@ assets/                      # README 展示图（mascot / showcase-voice / soci
 
 - **视觉通道唯一**：微信 4.1.12+ 关闭了 UIA/CDP/窗口消息/本地数据读取等全部高效通道（验证过程见 `docs/微信通道验证结论.md`），PrintWindow 截图 + OCR 是唯一可用通道
 - **OCR 引擎**：RapidOCR（PP-OCRv5 mobile + onnxruntime，限 2 线程防 CPU 打满），识别链路 1x 原生——升级前完整事件路径约 1.5s，现在约 0.9s；模型资产 3 个 onnx（约 21MB）随安装包分发
-- **窗口稳定性**：视觉坐标依赖微信窗口位置/尺寸稳定——初始化自动定位后请勿拖动/缩放窗口（`tools/fix_window.py` 可手动兜底）；微信被最小化时视觉通道是盲的，哨兵会自动恢复窗口并告警
+- **窗口稳定性**：视觉坐标依赖微信窗口位置/尺寸稳定——初始化自动定位后请勿拖动/缩放窗口；微信被最小化时视觉通道是盲的，哨兵会自动恢复窗口并告警
 - **群聊判定**：以标题区 OCR（括号人数）为权威信号，群名不含"群/集团"且无人数时可能漏判
 - **会话判定**：未读条目按红圈几何切换（点击该行 + 选中像素复验；已选中不点击——微信列表是 toggle，点已选中条目会取消选中）；会话身份与群聊判定统一取自读消息那次联合 OCR 的标题带，位置模式拿不到名字就放弃本轮（宁可漏一条，也不把别处的消息当目标处理）；触发式发送（定时提醒/状态监视）发送前先切会话 + 读标题复验，确认不了则一条都不发
 - **联网搜索**：搜狗/必应/百度三源并发 + 按优先级合并去重 + 网页正文抓取，零配置零 key；搜索引擎跳转链接自动跟随解析到真实目标页；抓取式搜索无 SLA（搜索引擎改版会失效，三源互为冗余 + 模型换措辞重搜兜底）；百度自动化访问高频会触发安全验证页（自动降级由其余源补位）；实时数据不在搜索摘要里，由 web_fetch 抓网页正文读取

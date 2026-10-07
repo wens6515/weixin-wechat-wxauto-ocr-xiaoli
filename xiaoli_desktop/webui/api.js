@@ -113,8 +113,6 @@ const MOCK = (() => {
       first_prompt: { ok: true, detail: "（演示）内置模板" },
     },
   };
-  MOCK.usage = state.usage;   // 便于外部填充 day_model
-  state.usage.day_model = {};
 
   const LOG_POOL = [
     "（演示日志）真窗口不会看到这行——看到说明后端桥未接通",
@@ -149,6 +147,21 @@ const MOCK = (() => {
         { ok: true, done: 2, total: 2, indexed: 2, message: "打标完成：2/2" }), 500);
       return { ok: true, started: true };
     },
+    region_calib_start: () => ({ ok: true, width: 1300, height: 1610, calibrated: false,
+      // 演示底图须带真实尺寸——占位图过小会让框选舞台缩成几像素
+      image: "data:image/svg+xml;utf8," + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="1610">' +
+        '<rect width="1300" height="1610" fill="#2b313d"/>' +
+        '<rect width="542" height="1591" fill="#232833"/>' +
+        '<text x="650" y="805" fill="#8a93a6" font-size="52" text-anchor="middle" font-family="sans-serif">演示截图 1300×1610</text></svg>'),
+      prefill: { session_box: [0.09, 0.088, 0.418, 0.99],
+                 chat_box: [0.415, 0.039, 0.991, 0.834], split: 0.055 } }),
+    region_calib_save: () => ({ ok: true, path: "C:\\演示\\wx_ocr_region.json",
+      hot: true, regions: {} }),
+    region_calib_verify: () => ({ ok: true, items: [
+      { key: "title", label: "会话标题", ok: true, detail: "群聊：摸鱼集团（5 人）" },
+      { key: "list", label: "会话列表", ok: true, detail: "林小满、周雨桐、摸鱼集团…" },
+      { key: "msg", label: "最近消息", ok: true, detail: "明天记得带伞～" }] }),
     list_tasks: () => ({ ok: true, rows: [], waiting: 0, done: 0, archived: 0,
                          tasks_dir: "D:\\演示\\wxauto" }),
     delete_task: () => ({ ok: true }),
@@ -239,6 +252,10 @@ const MOCK = (() => {
     win_min: () => ({ ok: true }), win_max_toggle: () => ({ ok: true }),
     win_hide: () => ({ ok: true }), quit_app: () => ({ ok: true }),
   };
+  // 便于外部填充 day_model（原写法在 IIFE 内自引用 MOCK，TDZ 让整个
+  // mock 对象初始化失败——浏览器开发预览全挂，真窗口 IS_REAL 通道不受影响）
+  M.usage = state.usage;
+  state.usage.day_model = {};
   return M;
 })();
 

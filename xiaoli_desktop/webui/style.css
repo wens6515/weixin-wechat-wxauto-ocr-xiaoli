@@ -1218,3 +1218,45 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   background: rgba(0, 0, 0, .25);
   margin: 0 0 10px;
 }
+
+/* ---------- 微信画面标定 ---------- */
+.modal-wide { width: min(980px, 96vw); }
+#modalCalib [hidden] { display: none !important; }
+.calib-loading {
+  padding: 42px 0; text-align: center; color: var(--muted);
+  font-size: 13.5px; letter-spacing: .06em;
+  animation: calibPulse 1.2s ease-in-out infinite;
+}
+@keyframes calibPulse { 50% { opacity: .45 } }
+.calib-stage { position: relative; margin: 10px auto 0; width: fit-content; max-width: 100%; }
+.calib-stage img {
+  display: block; max-width: 100%; max-height: 58vh;
+  border-radius: var(--r-input); border: 1px solid var(--border); user-select: none;
+}
+.calib-stage svg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  touch-action: none; cursor: default;
+}
+.calib-legend {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  margin: 10px 0 2px; font-size: 12px; color: var(--muted);
+}
+.calib-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+.calib-legend .lg::before {
+  content: ""; width: 10px; height: 10px; border-radius: 3px; display: inline-block;
+}
+.lg-session::before { background: color-mix(in srgb, var(--p1) 75%, transparent); }
+.lg-chat::before { background: color-mix(in srgb, var(--success) 75%, transparent); }
+.lg-title::before { background: rgba(96, 165, 250, .35); }
+.calib-verify { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.calib-item {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12.8px;
+  padding: 8px 12px; border-radius: var(--r-input);
+  background: color-mix(in srgb, var(--muted) 8%, transparent);
+  border: 1px solid var(--border);
+}
+.calib-item .calib-mark { font-weight: 800; }
+.calib-item.ok .calib-mark { color: var(--success); }
+.calib-item.bad .calib-mark { color: var(--danger); }
+.calib-item b { flex: none; }
+.calib-item .calib-detail { color: var(--muted); overflow-wrap: anywhere; }

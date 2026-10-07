@@ -1547,15 +1547,14 @@ class TestIterUnreadSessions(unittest.TestCase):
                 side_effect=[False, True])
     @mock.patch("pyautogui.click")
     @mock.patch("time.sleep")
-    def test_iter_unread_records_badge_coords(self, _sleep, _click, _sel, _refresh):
-        """红圈坐标通道：产出条目时把红圈屏幕坐标记入 _badge_coords（此刻已知
-        位置、尚无名字）——供 _switch_chat 直点，不回落到列表区 OCR。
-        """
+    def test_iter_unread_yields_position_entries(self, _sleep, _click, _sel,
+                                                 _refresh):
+        """红圈几何链路产出**位置条目**（此刻已知位置、尚无名字）——会话名
+        由后续联合 OCR 的标题带给出，位置条目同时是主循环的退避键。"""
         b = self._backend()
         entries = list(b.iter_unread_sessions())
         self.assertEqual(entries, [(30, 56)])
         # 红圈整窗中心 (30,56)，窗口偏移 0 → 屏幕坐标 (30,56)
-        self.assertEqual(list(b._badge_coords.values()), [(30, 56)])
 
 
 class TestSelectedRowHighlight(unittest.TestCase):
@@ -1607,21 +1606,24 @@ class TestSelectedRowHighlight(unittest.TestCase):
         self.assertTrue(b._switch_chat("林小满"))
         _click.assert_not_called()
 
+    @mock.patch("wx_backend.visual_backend.VisualBackend.iter_sessions")
+    @mock.patch("wx_backend.visual_backend.VisualBackend.resolve_chat_coord",
+                return_value=(30, 50))
     @mock.patch("pyautogui.click")
     @mock.patch("wx_backend.visual_backend.VisualBackend._refresh",
-                return_value=_solid_with_highlight_rows())
-    @mock.patch("wx_backend.visual_backend.ocr_image", return_value=[])
+                return_value=_solid((200, 200), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.VisualBackend.read_title",
                 return_value="周雨桐")
-    def test_switch_chat_badge_coord_fallback(self, _rt, _ocr, _refresh,
-                                              _click):
-        """OCR 坐标缺失但 _badge_coords 有红圈坐标 → 点红圈右下条目主体
-        （bcx+45, bcy，复用 _anchor_badge 思路），不再因缺坐标放弃切换。"""
+    def test_switch_chat_resolve_coord_fallback(self, _rt, _refresh, _click,
+                                                _resolve, _iter):
+        """缓存无坐标 → 现读列表区 OCR 定位（resolve_chat_coord，触发式发送
+        主路径），不再先跑整窗 iter_sessions 重建（慢路径白花 1.2s）。"""
         b = self._backend()
-        b._session_coords = {}  # 目标会话 OCR 名漏读 → 无坐标
-        b._badge_coords = {"周雨桐": (30, 56)}  # 红圈中心屏幕坐标
+        b._session_coords = {}
         self.assertTrue(b._switch_chat("周雨桐", force=True))
-        _click.assert_called_once_with(75, 56)  # 30+45, 56（条目主体）
+        _resolve.assert_called_once_with("周雨桐")
+        _iter.assert_not_called()
+        _click.assert_called_once_with(30, 50)
         self.assertEqual(b._current_chat, "周雨桐")
 
 

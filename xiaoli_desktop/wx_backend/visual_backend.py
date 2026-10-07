@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from typing import Any, Iterator
 
@@ -65,13 +66,36 @@ from .voice_channel import (
 
 logger = logging.getLogger(__name__)
 
-# 用户圈定配置：xiaoli_desktop\wx_ocr_region.json（tools/pick_ocr_region.py 生成）。
+# 用户圈定配置：wx_ocr_region.json（应用内画面标定生成，见 webbridge 标定方法面）。
 # 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
 # 留在门面：测试对 _REGION_CONFIG_PATH 的 patch 打在门面命名空间。
 _REGION_CONFIG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "xiaoli_desktop", "wx_ocr_region.json",
 )
+
+
+def _region_config_paths() -> list[str]:
+    """标定配置候选路径（优先级序）。打包态（PyInstaller）exe 旁优先：
+    __file__ 三层推导会落到 <安装目录>/xiaoli_desktop/，安装包里不存在该
+    子目录——用户标定从未被打包版读到过（已知缺陷）；exe 旁与 config.json
+    同目录，写权限语义一致。源码态即仓库内 xiaoli_desktop/。"""
+    paths = []
+    if getattr(sys, "frozen", False):
+        paths.append(os.path.join(
+            os.path.dirname(os.path.abspath(sys.executable)),
+            "wx_ocr_region.json"))
+    paths.append(_REGION_CONFIG_PATH)
+    return paths
+
+
+def save_region_config(data: dict) -> str:
+    """保存标定配置（写主路径，覆盖式）。返回实际写入路径；失败抛 OSError
+    由调用方提示（安装目录只读等）。"""
+    path = _region_config_paths()[0]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
 
 
 def _region_dict_to_tuple(region) -> tuple | None:
@@ -84,12 +108,16 @@ def _region_dict_to_tuple(region) -> tuple | None:
         return None
 
 
-def _load_region_config() -> dict | None:
-    """读用户圈定区域配置；无文件/坏值返回 None（调用方回退默认常量）。"""
+def _read_region_config(path: str) -> dict | None:
+    """读单个候选路径的圈定区域配置；无文件/坏值返回 None。
+
+    除运行时三区域（session/message/title，比例元组）外，透传两框标定
+    原始值（session_box/chat_box/split，可选）——标定 UI 预填用，运行时
+    不消费。"""
     try:
-        if not os.path.isfile(_REGION_CONFIG_PATH):
+        if not os.path.isfile(path):
             return None
-        with open(_REGION_CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         if not isinstance(data, dict):
             logger.warning("wx_ocr_region.json 非对象，回退默认区域")
@@ -108,15 +136,29 @@ def _load_region_config() -> dict | None:
             else data.get("title_region"))
         if session is None or message is None:
             logger.warning(
-                "wx_ocr_region.json 区域值非法（须 l<t? 实为 4 值 [0,1] 且 l<r、t<b），回退默认")
+                "wx_ocr_region.json 区域值非法（须 4 值 [0,1] 且 l<r、t<b），回退默认")
             return None
         logger.info(
             f"📐 已加载用户圈定区域：列表{session} 消息{message}"
             + (f" 标题{title}" if title else ""))
-        return {"session": session, "message": message, "title": title}
+        out = {"session": session, "message": message, "title": title}
+        for key in ("session_box", "chat_box", "split"):
+            if data.get(key) is not None:
+                out[key] = data[key]
+        return out
     except Exception as e:
         logger.warning(f"wx_ocr_region.json 读取失败（{e}），回退默认区域")
         return None
+
+
+def _load_region_config() -> dict | None:
+    """按候选优先级读用户圈定区域；全部无文件/坏值返回 None（调用方回退
+    默认常量）。"""
+    for path in _region_config_paths():
+        cfg = _read_region_config(path)
+        if cfg is not None:
+            return cfg
+    return None
 
 # ---------- OCR（RapidOCR：PP-OCRv5 mobile 模型，onnxruntime 后端） ----------
 
@@ -370,12 +412,25 @@ class VisualBackend:
         # 微信切浅色主题时该值会变：点击成功后 _learn_selected_row_color 会
         # 重新采样覆盖；也可直接改这里的默认值。
         self._selected_row_color: tuple[int, int, int] = (13, 168, 105)
-        self._badge_coords: dict[str, tuple[int, int]] = {}  # 会话名 → 红圈中心屏幕坐标（点击直用）
-        # 用户圈定区域（tools/pick_ocr_region.py 配置）；无配置回退模块默认常量
-        cfg = _load_region_config()
+        # 用户圈定区域（应用内画面标定生成）；无配置回退模块默认常量
+        self._apply_regions(_load_region_config())
+
+    def _apply_regions(self, cfg: dict | None) -> None:
+        """把圈定配置落到三个运行时区域属性（__init__ 与热更新共用）。"""
         self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
         self._message_region = cfg["message"] if cfg else _MESSAGE_REGION_RATIO
         self._title_region = (cfg.get("title") if cfg else None) or _TITLE_REGION_RATIO
+
+    def reload_regions(self) -> dict:
+        """重读用户圈定区域并热生效（设置页重标后无需重启引擎）。
+        返回当前生效的三区域。"""
+        self._apply_regions(_load_region_config())
+        logger.info(
+            f"🔄 区域标定热更新：列表{self._session_region} "
+            f"消息{self._message_region} 标题{self._title_region}")
+        return {"session": self._session_region,
+                "message": self._message_region,
+                "title": self._title_region}
 
     # ---- 协议：连接 ----
 
@@ -668,7 +723,6 @@ class VisualBackend:
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         win_l, win_t = rect.left, rect.top
         seen_rows: list[int] = []
-        self._badge_coords.clear()  # 每轮重建（红圈坐标通道：供 _switch_chat 点击直用）
         # 自上而下处理：与列表视觉顺序一致，也让「每轮只处理一个」的推进稳定
         for (bl, bt, br, bb) in sorted(badges, key=lambda b: (b[1], b[0])):
             bcx = win_l + (bl + br) // 2
@@ -679,7 +733,6 @@ class VisualBackend:
             if not self._is_row_selected(bcy):
                 if not self._click_badge_row(bcx, bcy):
                     continue  # 点击后选中未转移 → 放弃该条目
-            self._badge_coords.setdefault(bcy, (bcx, bcy))
             logger.debug(f"[未读] 红圈屏幕 ({bcx},{bcy}) → 条目（名字稍后由标题区给出）")
             yield (bcx, bcy)
 
@@ -801,9 +854,9 @@ class VisualBackend:
            回复完、用户手动切到别的群，林小满再来消息时不切换、读到的是别的
            会话的消息）。
 
-        坐标来源优先级：OCR 会话名坐标 → _badge_coords 红圈坐标直点
-        （OCR 名漏读时点红圈右下条目主体，复用 _anchor_badge 标定）。
-        点击成功后若标题非空（微信确认选中），采样该条目行背景色
+        坐标来源优先级：_session_coords 缓存（整窗 OCR 兼容通道填充，热路径
+        不再主动重建）→ resolve_chat_coord 现读列表区 OCR（触发式发送主
+        路径）。点击成功后若标题非空（微信确认选中），采样该条目行背景色
         自学习缓存选中高亮（_learn_selected_row_color）。
         """
         if not force:
@@ -831,8 +884,6 @@ class VisualBackend:
                     item_y = None
                     if chat in self._session_coords:
                         item_y = self._session_coords[chat][1]
-                    elif chat in self._badge_coords:
-                        item_y = self._badge_coords[chat][1]
                     if item_y is not None and self._is_row_selected(item_y):
                         self._current_chat = chat
                         return True
@@ -840,24 +891,17 @@ class VisualBackend:
                     pass
                 if self._current_chat == chat:
                     return True  # 已选中（标题与像素都读不到时的最后兜底）
-        if chat not in self._session_coords:
-            # 坐标未知：先刷新会话列表
-            list(self.iter_sessions())
         coord = self._session_coords.get(chat)
         if coord is None:
-            # 红圈坐标通道：OCR 名漏读/坐标缺失时，点红圈右下条目主体
-            badge = self._badge_coords.get(chat)
-            if badge is not None:
-                coord = (badge[0] + _BADGE_CLICK_OFFSET_X, badge[1])
-            else:
-                # 缓存两条通道都没有 → 现读列表区 OCR 定位。这条是「触发式
-                # 发送」的主路径：目标会话没有红圈（消息已读），也不一定
-                # 走过整窗 OCR，缓存里就是没它。列表区 crop (~0.46s) 比
-                # 整窗 iter_sessions (~1.2s) 快 2.6 倍。
-                coord = self.resolve_chat_coord(chat)
-            if coord is None:
-                logger.warning(f"[切换] 未找到会话 {chat!r} 的坐标")
-                return False
+            # 现读列表区 OCR 定位（触发式发送主路径）：目标会话没有红圈
+            # （消息早已读过），整窗缓存通常没有它。列表区 crop (~0.46s) 比
+            # 整窗 iter_sessions (~1.2s) 快 2.6 倍，语义也更干净（不含搜索
+            # 框/消息区）——旧实现先跑一次整窗重建再落到这里，慢路径白花
+            # 1.2s，已移除（iter_sessions 保留作后端协议兼容面）。
+            coord = self.resolve_chat_coord(chat)
+        if coord is None:
+            logger.warning(f"[切换] 未找到会话 {chat!r} 的坐标")
+            return False
         try:
             import pyautogui
             self._foreground()  # 点击依赖前台，先置前微信窗口
