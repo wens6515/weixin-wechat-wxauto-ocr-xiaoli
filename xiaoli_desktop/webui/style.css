@@ -1279,3 +1279,11 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   background: color-mix(in srgb, var(--muted) 8%, transparent);
   font-family: inherit;
 }
+
+/* ---------- 标定弹窗：微信未开/未登录的醒目提醒 ---------- */
+.calib-warn {
+  margin: 8px 0 4px; padding: 11px 14px; font-size: 12.8px; line-height: 1.8;
+  color: var(--warning); border-radius: var(--r-input);
+  border: 1px solid color-mix(in srgb, var(--warning) 55%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}

@@ -260,6 +260,28 @@ def _first_run_needed(cfg_path: str, cfg: dict | None) -> bool:
     return False
 
 
+def _wechat_missing_hint() -> str:
+    """微信主窗口缺失时的可操作提示（标定/验证共用）。
+
+    进程在跑但没有主窗口 = 登录界面阶段（新版微信登录完成前不创建主窗口）；
+    进程都没有 = 微信没开。两种给用户的下一步动作不同，必须分开说。
+
+    进程检测按**字节**匹配：tasklist 输出是控制台 OEM 编码（中文系统
+    cp936），按文本解码会在非 UTF-8 环境下抛 UnicodeDecodeError——只找
+    ASCII 的 WeChat.exe，与编码无关。"""
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["tasklist"], capture_output=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if b"WeChat.exe" in (r.stdout or b""):
+            return ("检测到微信进程，但还没有主窗口——请先在微信里完成登录，"
+                    "登录后点「重新截图」")
+    except Exception:
+        pass
+    return "微信没开——请先打开并登录电脑端微信，然后点「重新截图」"
+
+
 def _safe(fn):
     """js_api 方法兜底：异常转 {ok: False, error}，不让桥炸掉调用线程。"""
     @functools.wraps(fn)
@@ -1234,11 +1256,14 @@ class BridgeApi:
 
     def _calib_shot(self):
         """截取当前微信窗口（标定底图）。返回 (PIL Image, window_rect) 或
-        (None, None, 错误文案)。先置前微信——完全遮挡时 PrintWindow 返回黑图。"""
+        (None, None, 错误文案)。先置前微信——完全遮挡时 PrintWindow 返回黑图。
+
+        窗口缺失时区分两种成因（用户可见的下一步动作不同）：进程在跑但没主
+        窗口 = 登录没走完；进程都没有 = 微信没开。"""
         from wx_backend import visual_backend as vb
         hwnd = vb.find_wechat_window()
         if not hwnd:
-            return None, None, "未检测到微信窗口——请先在电脑端登录微信"
+            return None, None, _wechat_missing_hint()
         vb.ensure_window_visible(hwnd)
         shot = vb.capture_window(hwnd)
         if shot is None:

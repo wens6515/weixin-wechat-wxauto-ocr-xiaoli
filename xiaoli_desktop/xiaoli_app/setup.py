@@ -350,9 +350,12 @@ def check_environment(cfg):
         detail = f"窗口检测失败: {e}"
     if not wechat_ok:
         try:
-            r = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=10,
+            # 字节匹配（无 text=True）：tasklist 输出是控制台 OEM 编码（中文
+            # 系统 cp936），按文本解码在非 UTF-8 环境会抛 UnicodeDecodeError
+            # → 误报「进程检测失败」；只找 ASCII 进程名即与编码无关。
+            r = subprocess.run(["tasklist"], capture_output=True, timeout=10,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if "WeChat.exe" in r.stdout:
+            if b"WeChat.exe" in (r.stdout or b""):
                 wechat_ok, detail = True, "检测到微信进程 WeChat.exe（窗口未找到）"
         except Exception as e:
             detail += f"；进程检测失败: {e}"
