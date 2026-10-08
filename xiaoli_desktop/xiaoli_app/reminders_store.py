@@ -64,12 +64,16 @@ class RemindersStore:
             json.dump(items, f, ensure_ascii=False, indent=2)
         os.replace(tmp, self.path)
 
-    def add(self, chat, content, fire_at, repeat="once"):
+    def add(self, chat, content, fire_at, repeat="once", source="ui"):
         item = {
             "id": uuid.uuid4().hex[:12],
             "kind": "time",
             "chat": str(chat),
             "content": str(content),
+            # 创建来源：ui=界面手动创建（内容由用户填写，到点回递必须带上）；
+            # model=模型在对话里创建（内容恒为空，靠创建时的对话历史兜底）。
+            # 旧数据没有这个字段——读取侧按 content 是否为空回退判定。
+            "source": source if source in ("ui", "model") else "ui",
             "fire_at": float(fire_at),
             "repeat": repeat if repeat in ("once", "daily", "weekly") else "once",
             "enabled": True,

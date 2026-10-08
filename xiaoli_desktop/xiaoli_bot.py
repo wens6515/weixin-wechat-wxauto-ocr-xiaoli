@@ -704,13 +704,38 @@ class AgentBot(WeChatBot):
         self._deliver_reply(chat_name, final_reply)
         return True
 
+    @staticmethod
+    def _reminder_trigger_text(chat, item, fire_hm):
+        """定时触发的回递文案（按创建来源分路）。
+
+        界面手动创建的触发器（source=ui）内容由用户填写——模型无从知道用户
+        写了什么，必须把内容一并递过去（线上实测：内容「每天晚上和王姐姐问好
+        并询问是否吃过晚饭」被回成了「到点啦，我来提醒你咯」）；模型在对话里
+        创建的（source=model，内容恒为空）保持「创建时的对话就在历史里」这条
+        既有语义。旧数据没有 source 字段，按 content 是否为空回退判定（模型
+        路径写死空串，不会误判）。
+        """
+        content = str(item.get("content") or "").strip()
+        source = str(item.get("source") or ("ui" if content else "model"))
+        if source == "ui" and content:
+            return ("[定时触发] 时间到了，该去做这件事了。\n"
+                    f"聊天对象：{chat}\n"
+                    f"你之前和用户约好的事：{content}\n"
+                    "请按人设自然地主动把这件事说出来——直接说事，"
+                    "不要提「提醒」「定时」「触发器」这类字眼。")
+        return (f"[定时触发] 与用户约定的指定时间（{fire_hm}）到了。"
+                "这条触发器创建时的对话就在历史里，"
+                "请按人设自然地主动回复。")
+
     def _drain_reminders(self):
         """消费到期定时触发器（kind=time）队列（主循环节点）。
 
         火线统一（用户定案）：到点不再发固定文案【定时提醒】，而是把触发
         事件作为消息回递给 API（call_chat_ai，唯一链路，人设+历史+缓存布局
         全沿用）生成角色内回复后发送。发送失败也确认出队（mark_fired），
-        避免死循环重发刷屏。"""
+        避免死循环重发刷屏。回递文案按创建来源分路（见
+        `_reminder_trigger_text`）：界面创建的带用户填的内容，模型创建的
+        靠历史。"""
         while True:
             try:
                 r = self._reminder_queue.get_nowait()
@@ -727,9 +752,7 @@ class AgentBot(WeChatBot):
                     continue
                 fire_hm = time.strftime("%m-%d %H:%M",
                                         time.localtime(r.get("fire_at") or now))
-                trigger = (f"[定时触发] 与用户约定的指定时间（{fire_hm}）到了。"
-                           f"这条触发器创建时的对话就在历史里，"
-                           f"请按人设自然地主动回复。")
+                trigger = self._reminder_trigger_text(chat, r, fire_hm)
                 reply = self.call_chat_ai(chat, trigger)
                 self._deliver_reply(chat, reply, trigger=True)
                 logger.info(f"[定时] 已触发 -> {chat}: {reply[:40]}")
@@ -949,7 +972,10 @@ class AgentBot(WeChatBot):
         if fire_at <= time.time():
             logger.info(f"[定时] 模型给的触发时间已过: {raw_time}，降级聊天")
             return None
-        self.reminders.add(chat_name, "", fire_at, repeat)
+        # source="model"：模型创建的触发器内容为空、靠创建时的对话历史兜底
+        # （界面「触发器管理」创建的走 webbridge.add_trigger，内容由用户填写，
+        # 到点回递必须把内容递过去）
+        self.reminders.add(chat_name, "", fire_at, repeat, source="model")
         if user_text:
             self._add_history(chat_name, "user", user_text)
         self._add_history(chat_name, "assistant",

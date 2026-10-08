@@ -131,7 +131,8 @@ class TestSchedulerAndDrain(unittest.TestCase):
 
     def test_drain_calls_api_and_sends_reply(self):
         """火线统一：到点回递 API（call_chat_ai）生成角色内回复后直发，
-        不再发固定文案【定时提醒】，也不注入预写提醒事项（content 已废）。"""
+        不再发固定文案【定时提醒】。内容为空（模型创建那一类）时保持既有
+        语义——靠创建时的对话历史，回递只带时间。"""
         bot = make_rem_bot(self.dir)
         fire_at = time.time() - 1
         r = bot.reminders.add("林小满", "", fire_at)
@@ -153,6 +154,46 @@ class TestSchedulerAndDrain(unittest.TestCase):
         bot._reminder_queue.put(dict(r))
         bot._drain_reminders()
         self.assertEqual(bot.wx.sent, [])
+
+    def test_drain_ui_trigger_carries_content(self):
+        """界面「触发器管理」创建的（source=ui，内容由用户填写）：到点回递
+        必须把用户写的内容递过去。线上实测缺陷：回递只带时间，模型只看到
+        「时间到了」——内容「每天晚上和王姐姐问好并询问是否吃过晚饭」被回成
+        「到点啦，我来提醒你咯」。"""
+        bot = make_rem_bot(self.dir)
+        r = bot.reminders.add("林小满", "晚上和她问好，再问问吃过晚饭没有",
+                              time.time() - 1)
+        self.assertEqual(r.get("source"), "ui")   # 界面路径是默认来源
+        bot._reminder_queue.put(dict(r))
+        bot._drain_reminders()
+        chat, trigger = bot._chats[0]
+        self.assertEqual(chat, "林小满")
+        self.assertIn("晚上和她问好，再问问吃过晚饭没有", trigger)
+        self.assertIn("林小满", trigger)             # 带上聊天对象，模型知道跟谁说话
+        self.assertNotIn("这条触发器创建时的对话就在历史里", trigger)
+
+    def test_drain_model_trigger_keeps_history_prompt(self):
+        """模型在对话里创建的（source=model，内容恒为空）：保持既有语义——
+        回递不带内容，靠创建时的对话历史。"""
+        bot = make_rem_bot(self.dir)
+        r = bot.reminders.add("林小满", "", time.time() - 1, source="model")
+        self.assertEqual(r.get("source"), "model")
+        bot._reminder_queue.put(dict(r))
+        bot._drain_reminders()
+        _chat, trigger = bot._chats[0]
+        self.assertIn("指定时间", trigger)
+        self.assertIn("这条触发器创建时的对话就在历史里", trigger)
+
+    def test_drain_legacy_item_without_source_uses_content(self):
+        """旧数据没有 source 字段：按 content 是否为空回退判定——界面创建的
+        历史条目（内容非空）同样要把内容递过去，不需要迁移。"""
+        bot = make_rem_bot(self.dir)
+        r = bot.reminders.add("林小满", "旧条目：问她到家没", time.time() - 1)
+        legacy = {k: v for k, v in dict(r).items() if k != "source"}
+        bot._reminder_queue.put(legacy)
+        bot._drain_reminders()
+        _chat, trigger = bot._chats[0]
+        self.assertIn("旧条目：问她到家没", trigger)
 
 
 class TestSetReminderTool(unittest.TestCase):
