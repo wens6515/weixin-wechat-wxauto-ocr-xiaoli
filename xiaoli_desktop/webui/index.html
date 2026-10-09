@@ -448,7 +448,7 @@
         <h1 class="page-title">设置</h1>
         <div class="anchor-row" id="anchorRow">
           <button class="anchor active" data-anchor="sec-appearance">外观主题</button>
-          <button class="anchor" data-anchor="sec-calib">画面标定</button>
+          <button class="anchor" data-anchor="sec-identity">小漓身份</button>
           <button class="anchor" data-anchor="sec-memory">对话记忆</button>
           <button class="anchor" data-anchor="sec-dirs">文件目录</button>
           <button class="anchor" data-anchor="sec-bridge">任务桥</button>
@@ -546,23 +546,13 @@
             <button class="mini-btn ghost" id="btnPickPrompt">选择文件…</button><button class="mini-btn ghost" id="btnClearPrompt">恢复内置</button></div>
         </div>
 
-        <!-- 微信画面标定 -->
-        <div class="glass sec-card" id="sec-calib">
-          <div class="card-title"><svg class="ic"><use href="#i-wechat"/></svg>画面标定</div>
-          <div class="feat-row slim">
-            <div class="feat-text"><b>框选 OCR 区域</b><small>框选会话列表与聊天区（含标题带），程序据此读消息、认人、判群聊。微信窗口布局变化、消息归属错乱时重标。</small></div>
-            <button class="mini-btn" id="btnCalib">开始标定…</button>
+        <!-- 小漓身份 -->
+        <div class="glass sec-card" id="sec-identity">
+          <div class="card-title"><svg class="ic"><use href="#i-user"/></svg>小漓身份</div>
+          <div class="form-grid">
+            <label class="form-item grow"><span>微信名称（群里 @ 这个称呼认小漓，也是小漓的自称；改完立即生效，不用重启）</span><input id="edNickname" type="text" maxlength="32" placeholder="小漓"></label>
           </div>
-          <div class="feat-row slim">
-            <div class="feat-text"><b>固定窗口大小</b><small>初始化时套用这个尺寸（<b>位置不固定</b>，微信窗口摆哪由你决定）；两个框都留空 = 不调整。<span id="wxSizeNow" class="dir-note"></span></small></div>
-            <div class="wx-size">
-              <input id="edWxW" type="number" min="200" placeholder="宽">
-              <span class="wx-x">×</span>
-              <input id="edWxH" type="number" min="200" placeholder="高">
-              <button class="mini-btn ghost" id="btnWxSizeRead">读取当前</button>
-              <button class="mini-btn" id="btnWxSizeSave">保存并应用</button>
-            </div>
-          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnSaveNickname"><svg class="ic"><use href="#i-check"/></svg>保存名称</button></div>
         </div>
 
         <!-- 任务桥 -->
@@ -831,51 +821,15 @@
     </div>
   </div>
 
-  <!-- 首启引导（第 1 步：工作目录；第 2 步进入画面标定弹窗） -->
+  <!-- 首启引导（工作目录 + 微信名称，一步完成） -->
   <div class="modal glass" id="modalFirstRun" hidden>
-    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>欢迎使用小漓（1/2）</b></div>
-    <p class="confirm-text">首次使用请确认三个工作目录，下一步完成微信画面标定（教小漓认你的微信窗口）。</p>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>欢迎使用小漓</b></div>
+    <p class="confirm-text">首次使用请确认三个工作目录，并填写小漓在微信里的名称（群里 @ 这个称呼认小漓）。</p>
     <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="frTasks"></code><button class="mini-btn ghost" id="frPickTasks">浏览…</button></div>
     <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="frFiles"></code><button class="mini-btn ghost" id="frPickFiles">浏览…</button></div>
     <div class="dir-row"><span class="dir-k">记忆存储位置</span><code id="frMemory"></code></div>
-    <label class="form-item block" style="margin-top:12px"><span>微信昵称（小漓在群里认这个称呼）</span><input id="frNickname" type="text"></label>
-    <div class="editor-actions"><button class="mini-btn" id="frSave"><svg class="ic"><use href="#i-check"/></svg>下一步：画面标定</button></div>
-  </div>
-
-  <!-- 微信画面标定（首启第 2 步与设置页共用） -->
-  <div class="modal glass modal-wide" id="modalCalib" hidden>
-    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>微信画面标定</b></div>
-    <p class="confirm-text" id="calibHint">正在截取微信窗口…</p>
-    <p class="calib-warn" id="calibWarn" hidden></p>
-    <div class="calib-loading" id="calibLoading"><span class="spinner"></span>正在截取微信窗口…</div>
-    <div class="calib-stage" id="calibStage" hidden>
-      <img id="calibImg" alt="微信窗口截图" draggable="false">
-      <svg id="calibSvg" xmlns="http://www.w3.org/2000/svg"></svg>
-    </div>
-    <p class="calib-legend">
-      <span class="lg lg-session">会话列表</span>
-      <span class="lg lg-chat">聊天区</span>
-      <span class="lg lg-title">标题带（分隔线以上）</span>
-      拖框内移动 · 拖四角调大小 · 拖分隔线切标题带
-    </p>
-    <div class="calib-verify" id="calibVerify" hidden></div>
-    <div class="editor-actions">
-      <button class="mini-btn ghost" id="calibReshoot">重新截图</button>
-      <button class="mini-btn ghost" id="calibSkip" hidden>跳过，稍后标定</button>
-      <span style="flex:1"></span>
-      <button class="mini-btn" id="calibSave" disabled><svg class="ic"><use href="#i-check"/></svg>保存并验证</button>
-    </div>
-  </div>
-
-  <!-- 升级用户一次性标定提示（新用户走首启第 2 步，不弹这个） -->
-  <div class="modal glass narrow" id="modalCalibNudge" hidden>
-    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>建议完成一次画面标定</b></div>
-    <p class="confirm-text">检测到微信画面还没标定。新版本不再自动挪动你的微信窗口，识别效果取决于「会话列表 + 聊天区」两个框是否和你的窗口布局对齐——花 30 秒框一下，能避免读错消息、认错人、群聊判定出错。</p>
-    <div class="editor-actions">
-      <button class="mini-btn ghost" id="cnLater">稍后再说</button>
-      <span style="flex:1"></span>
-      <button class="mini-btn" id="cnGo"><svg class="ic"><use href="#i-check"/></svg>立即标定（30 秒）</button>
-    </div>
+    <label class="form-item block" style="margin-top:12px"><span>微信名称（小漓在群里认这个称呼）</span><input id="frNickname" type="text" maxlength="32"></label>
+    <div class="editor-actions"><button class="mini-btn" id="frSave"><svg class="ic"><use href="#i-check"/></svg>完成，开始使用</button></div>
   </div>
 
   <!-- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） -->

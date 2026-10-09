@@ -75,7 +75,7 @@ const MOCK = (() => {
             model_trigger_manage: "off", sticker_mode: "off",
             segment_wait_enabled: true, segment_wait_seconds: 2,
             segment_jitter_enabled: false, segment_jitter_min: 1.5, segment_jitter_max: 3,
-            wechat_window_size: [1300, 1610], tianshu_guided: false },
+            tianshu_guided: false },
     voice: { voice_mode: "off", tts_endpoint: "http://演示:9880/tts",
              tts_timeout_seconds: 120, voice_max_seconds: 55,
              voice_profiles: [{ id: "p-demo", name: "演示音色",
@@ -148,27 +148,8 @@ const MOCK = (() => {
         { ok: true, done: 2, total: 2, indexed: 2, message: "打标完成：2/2" }), 500);
       return { ok: true, started: true };
     },
-    region_calib_start: () => ({ ok: true, width: 1300, height: 1610, calibrated: false,
-      // 演示底图须带真实尺寸——占位图过小会让框选舞台缩成几像素
-      image: "data:image/svg+xml;utf8," + encodeURIComponent(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="1300" height="1610">' +
-        '<rect width="1300" height="1610" fill="#2b313d"/>' +
-        '<rect width="542" height="1591" fill="#232833"/>' +
-        '<text x="650" y="805" fill="#8a93a6" font-size="52" text-anchor="middle" font-family="sans-serif">演示截图 1300×1610</text></svg>'),
-      prefill: { session_box: [0.09, 0.088, 0.418, 0.99],
-                 chat_box: [0.415, 0.039, 0.991, 0.834], split: 0.055 } }),
-    region_calib_save: () => ({ ok: true, path: "C:\\演示\\wx_ocr_region.json",
-      hot: true, regions: {} }),
-    region_calib_verify: () => ({ ok: true, items: [
-      { key: "title", label: "会话标题", ok: true, detail: "群聊：摸鱼集团（5 人）" },
-      { key: "list", label: "会话列表", ok: true, detail: "林小满、周雨桐、摸鱼集团…" },
-      { key: "msg", label: "最近消息", ok: true, detail: "明天记得带伞～" }] }),
-    wechat_window_info: () => ({ ok: true, configured: [1300, 1610],
-      current: [1300, 1610], running: false }),
-    set_wechat_window_size: (w, h) => ({ ok: true,
-      configured: (w && h) ? [w, h] : null, applied: !!(w && h), error: null }),
-    region_calib_nudge_info: () => ({ ok: true, show: false }),
-    region_calib_nudge_done: () => ({ ok: true }),
+    set_nickname: (v) => ({ ok: true, nickname: (v || "小漓").trim(),
+                            card_written: true }),
     tianshu_guide_info: () => ({ ok: true, installed: true,
       detail: "（演示）C:\\npm\\rivet.cmd", window: null, guided: false,
       prompt_text: "（演示）已为您打开天枢 CLI（命令行窗口）。\n\n请在弹出的窗口中完成配置：\n  ① 选择模型\n  ② 输入 API key\n  ③ 按回车确认" }),

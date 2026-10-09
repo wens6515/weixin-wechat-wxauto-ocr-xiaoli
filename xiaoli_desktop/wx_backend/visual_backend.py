@@ -42,9 +42,9 @@ from . import BackendUnavailableError
 from .models import MessageType, WeChatMessage
 from .visual_win32 import (
     capture_window, default_right_half_rect, dwm, ensure_window_visible,
-    find_wechat_window, find_window_by_title, position_window_visible,
-    resize_window_visible, u32, visible_frame_margins, visible_window_size,
-    window_rect, wt,
+    find_wechat_window, find_window_by_title, position_window,
+    position_window_visible, resize_window_visible, u32,
+    visible_frame_margins, visible_window_size, window_rect, wt,
 )
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
@@ -57,8 +57,8 @@ from .visual_badge import (
     _color_close, _detect_red_clusters, _pick_block_near_badge,
 )
 from .visual_regions import (
-    _MESSAGE_REGION_RATIO, _normalize_region, _SESSION_REGION_RATIO,
-    _TITLE_REGION_RATIO, parse_title,
+    _MESSAGE_REGION_RATIO, _SESSION_REGION_RATIO,
+    _TITLE_REGION_RATIO, WINDOW_SIZE, parse_title,
 )
 from .voice_channel import (
     _VoiceChannel, _capsule_green_count, _get_voice_channel,
@@ -74,99 +74,22 @@ _THEME_LABELS = {"light": "浅色", "dark": "深色"}
 # 这里按主题给初值是为了首帧就准，不依赖容差兜）。
 _SELECTED_ROW_COLOR = {"dark": (13, 168, 105), "light": (21, 172, 112)}
 
-# 用户圈定配置：wx_ocr_region.json（应用内画面标定生成，见 webbridge 标定方法面）。
-# 无配置/坏配置 → 回退模块默认常量（fail-closed），bot 不因配置问题中断。
-# 留在门面：测试对 _REGION_CONFIG_PATH 的 patch 打在门面命名空间。
-_REGION_CONFIG_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "xiaoli_desktop", "wx_ocr_region.json",
-)
+# 强制窗口尺寸的三个闸（详见 VisualBackend.enforce_window_size）：
+# 容差管「多大算不一致」，复查间隔管「多久查一次」，静置管「刚调完等多久
+# 再查」——调完立刻复查会读到微信重绘前的过渡尺寸，白调一次。
+_SIZE_TOL = 4              # 像素：渲染取整/贴边吸附不触发调整
+_SIZE_CHECK_INTERVAL = 1.0  # 秒：复查节流（0.5s 轮询下约每秒一次）
+_SIZE_SETTLE = 1.5          # 秒：调整后静置期
+
+# 三区域一律用模块内置常量（visual_regions 的真机标定值）。
+# 用户自定义画面标定（wx_ocr_region.json）已撤回：那套几何判据（头像窄带 =
+# 框宽 2%~14%、期望头像高 = 框高÷18、媒体/气泡闸全是框的比例）只在"框 ==
+# 聊天区"这一前提下成立，而微信布局不是等比的（会话列表固定像素宽、输入框
+# 固定像素高），用户手画的大/小框会让这些常量整体漂移——真机事故：自设区域
+# 后对方头像整列检不出（消息读不到）、自己侧漏检（自家图片被当对方消息）。
+# 撤回后窗口尺寸/布局的适配责任回到程序侧：微信窗口按默认大小使用即可。
 
 
-def _region_config_paths() -> list[str]:
-    """标定配置候选路径（优先级序）。打包态（PyInstaller）exe 旁优先：
-    __file__ 三层推导会落到 <安装目录>/xiaoli_desktop/，安装包里不存在该
-    子目录——用户标定从未被打包版读到过（已知缺陷）；exe 旁与 config.json
-    同目录，写权限语义一致。源码态即仓库内 xiaoli_desktop/。"""
-    paths = []
-    if getattr(sys, "frozen", False):
-        paths.append(os.path.join(
-            os.path.dirname(os.path.abspath(sys.executable)),
-            "wx_ocr_region.json"))
-    paths.append(_REGION_CONFIG_PATH)
-    return paths
-
-
-def save_region_config(data: dict) -> str:
-    """保存标定配置（写主路径，覆盖式）。返回实际写入路径；失败抛 OSError
-    由调用方提示（安装目录只读等）。"""
-    path = _region_config_paths()[0]
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return path
-
-
-def _region_dict_to_tuple(region) -> tuple | None:
-    """配置 dict {l,t,r,b} → 有序元组；非 dict/缺键返回 None。"""
-    if not isinstance(region, dict):
-        return None
-    try:
-        return (region["l"], region["t"], region["r"], region["b"])
-    except KeyError:
-        return None
-
-
-def _read_region_config(path: str) -> dict | None:
-    """读单个候选路径的圈定区域配置；无文件/坏值返回 None。
-
-    除运行时三区域（session/message/title，比例元组）外，透传两框标定
-    原始值（session_box/chat_box/split，可选）——标定 UI 预填用，运行时
-    不消费。"""
-    try:
-        if not os.path.isfile(path):
-            return None
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            logger.warning("wx_ocr_region.json 非对象，回退默认区域")
-            return None
-        session = _normalize_region(
-            _region_dict_to_tuple(data.get("session_region"))
-            if isinstance(data.get("session_region"), dict)
-            else data.get("session_region"))
-        message = _normalize_region(
-            _region_dict_to_tuple(data.get("message_region"))
-            if isinstance(data.get("message_region"), dict)
-            else data.get("message_region"))
-        title = _normalize_region(
-            _region_dict_to_tuple(data.get("title_region"))
-            if isinstance(data.get("title_region"), dict)
-            else data.get("title_region"))
-        if session is None or message is None:
-            logger.warning(
-                "wx_ocr_region.json 区域值非法（须 4 值 [0,1] 且 l<r、t<b），回退默认")
-            return None
-        logger.info(
-            f"📐 已加载用户圈定区域：列表{session} 消息{message}"
-            + (f" 标题{title}" if title else ""))
-        out = {"session": session, "message": message, "title": title}
-        for key in ("session_box", "chat_box", "split"):
-            if data.get(key) is not None:
-                out[key] = data[key]
-        return out
-    except Exception as e:
-        logger.warning(f"wx_ocr_region.json 读取失败（{e}），回退默认区域")
-        return None
-
-
-def _load_region_config() -> dict | None:
-    """按候选优先级读用户圈定区域；全部无文件/坏值返回 None（调用方回退
-    默认常量）。"""
-    for path in _region_config_paths():
-        cfg = _read_region_config(path)
-        if cfg is not None:
-            return cfg
-    return None
 
 # ---------- OCR（RapidOCR：PP-OCRv5 mobile 模型，onnxruntime 后端） ----------
 
@@ -427,25 +350,67 @@ class VisualBackend:
         # 实测色（深色 (13,168,105) / 浅色 (21,172,112)）；点击成功后
         # _learn_selected_row_color 会重采样覆盖，主题切换时回到该主题初值。
         self._selected_row_color: tuple[int, int, int] = _SELECTED_ROW_COLOR["dark"]
-        # 用户圈定区域（应用内画面标定生成）；无配置回退模块默认常量
-        self._apply_regions(_load_region_config())
+        # 强制窗口尺寸的复查节流时间戳（见 enforce_window_size）
+        self._size_check_at: float = 0.0
+        # 三区域恒为模块内置常量（用户自定义标定已撤回，见文件头注释）
+        self._apply_regions()
 
-    def _apply_regions(self, cfg: dict | None) -> None:
-        """把圈定配置落到三个运行时区域属性（__init__ 与热更新共用）。"""
-        self._session_region = cfg["session"] if cfg else _SESSION_REGION_RATIO
-        self._message_region = cfg["message"] if cfg else _MESSAGE_REGION_RATIO
-        self._title_region = (cfg.get("title") if cfg else None) or _TITLE_REGION_RATIO
+    def _apply_regions(self) -> None:
+        """把内置默认区域落到三个运行时区域属性。"""
+        self._session_region = _SESSION_REGION_RATIO
+        self._message_region = _MESSAGE_REGION_RATIO
+        self._title_region = _TITLE_REGION_RATIO
 
-    def reload_regions(self) -> dict:
-        """重读用户圈定区域并热生效（设置页重标后无需重启引擎）。
-        返回当前生效的三区域。"""
-        self._apply_regions(_load_region_config())
-        logger.info(
-            f"🔄 区域标定热更新：列表{self._session_region} "
-            f"消息{self._message_region} 标题{self._title_region}")
-        return {"session": self._session_region,
-                "message": self._message_region,
-                "title": self._title_region}
+    # ---- 强制窗口尺寸（用户自定义尺寸/区域已撤回，改为程序强制）----
+
+    def enforce_window_size(self, force: bool = False, now: float | None = None) -> bool:
+        """把微信窗口强制回标定尺寸 `WINDOW_SIZE`（只改大小，不动位置）。
+
+        为什么强制：三区域比例与全部像素判据（头像窄带 = 区域宽 2%~14%、期望
+        头像高 = 区域高÷18、气泡/媒体闸同样是区域比例）都按那台 1300x1610 的
+        窗口标定——窗口尺寸一变这些常量整体错位（真机事故：窗口拉大后聊天区
+        左边界从 0.415 挪到 0.246，消息区左沿切进聊天区 → 整列头像检不出、
+        消息读不到）。用户侧已无尺寸/区域设置，改为程序侧保证：
+
+        - `connect()` 里 `force=True` 调一次（初始化即对齐）；
+        - 消息监听每轮（`iter_unread_sessions`）与每次截图分析入口
+          （`analyze_window` / `get_messages`）复查一次：发现被改动就调回。
+
+        节流：复查间隔 `_SIZE_CHECK_INTERVAL`，调整后静置 `_SIZE_SETTLE`
+        再复查（等微信重绘，避免和用户拖动打架打成一串调整）。容差
+        `_SIZE_TOL` 像素（渲染取整/贴边吸附不折腾）。最大化窗口先 SW_RESTORE
+        再改大小（SetWindowPos 对最大化窗口行为不可靠）。返回是否发生了调整。
+        """
+        # getattr 兜底：测试常用 VisualBackend.__new__ 直构桩（不走 __init__），
+        # 本方法挂在监听/分析热路径上，不能因为桩缺属性就抛异常
+        if getattr(self, "_hwnd", None) is None or getattr(self, "_closed", False):
+            return False
+        t = time.monotonic() if now is None else now
+        if not force and t < getattr(self, "_size_check_at", 0.0):
+            return False
+        self._size_check_at = t + _SIZE_CHECK_INTERVAL
+        rect = window_rect(self._hwnd)
+        if not rect:
+            return False
+        want_w, want_h = WINDOW_SIZE
+        if abs(rect[2] - want_w) <= _SIZE_TOL and abs(rect[3] - want_h) <= _SIZE_TOL:
+            return False
+        try:
+            if u32.IsZoomed(self._hwnd):
+                u32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
+                time.sleep(0.3)
+        except Exception:
+            pass
+        ok = position_window(self._hwnd, rect[0], rect[1], want_w, want_h)
+        if not ok:
+            logger.warning("[窗口] 强制窗口尺寸失败（句柄异常？），下一轮重试")
+            return False
+        logger.info(f"[窗口] 微信窗口已强制为标定尺寸 {want_w}x{want_h}"
+                    f"（原 {rect[2]}x{rect[3]}，位置未改动）")
+        # 尺寸一变，上一帧截图（及其坐标系）作废：丢弃，免得拿旧尺寸的帧算坐标
+        self._last_shot = None
+        self._size_check_at = t + _SIZE_SETTLE
+        return True
 
     # ---- 界面主题（浅色 / 深色）----
 
@@ -491,10 +456,11 @@ class VisualBackend:
         if hwnd is None:
             raise BackendUnavailableError("未找到微信主窗口（请确认微信已登录并打开）")
         self._hwnd = hwnd
-        # 窗口尺寸在 bot 初始化时一次性套用（WeChatBot._init_apply_window_size，
-        # 只改大小不移动位置——用户定案）。后端自身运行期不改窗口，坐标换算
-        # 一律读窗口当前实际 rect，用户随时手动调整位置仍以实时 rect 为准。
+        # 窗口尺寸：程序既不移动位置，也不再交给用户设置——统一强制为标定
+        # 尺寸（WINDOW_SIZE，三区域与像素判据都按它标定）。这里先对齐一次，
+        # 之后每轮消息监听与每次分析入口复查（enforce_window_size）。
         self._ensure_not_iconic()
+        self.enforce_window_size(force=True)
         shot = capture_window(hwnd)
         if shot is None:
             raise BackendUnavailableError("PrintWindow 截图失败")
@@ -771,6 +737,9 @@ class VisualBackend:
         """
         if self._ensure_not_iconic():
             return  # 最小化态截图是占位垃圾（真机 276x45），恢复后下一轮再扫
+        # 强制窗口尺寸：监听每轮复查一次（用户拖动/最大化/吸附都会在此被拉回，
+        # 因为三区域与像素判据都按 WINDOW_SIZE 标定）
+        self.enforce_window_size()
         shot = self._refresh(force=True, foreground=False)  # 红圈轮询：后台静默截图，不置前打断用户
         if shot is None:
             return
@@ -1058,6 +1027,9 @@ class VisualBackend:
         事件热路径提速的核心）。标题/群聊标记直接用缓存；消息区读空时
         仍会走 force 重切兜底（toggle 取消选中防线保留）。
         """
+        # 强制窗口尺寸：分析前复查（处理事件途中被改尺寸 → 本轮就拉回，
+        # 免得按旧尺寸算出的坐标写进记忆/发送）
+        self.enforce_window_size()
         if assume_switched and (chat is None or self._current_chat == chat):
             # 诊断行降 DEBUG：每个含文件/媒体的事件跑两遍读取管线（10s 防抖），
             # INFO 级会刷爆前端日志（bot_run.log）；排障看 bot.log 全量
@@ -1550,6 +1522,8 @@ class VisualBackend:
             "width": int, "height": int,
         }
         """
+        # 强制窗口尺寸：分析前复查（三区域/头像判据都按 WINDOW_SIZE 标定）
+        self.enforce_window_size()
         if not assume_switched:
             self._switch_chat(chat)
         # 纯像素分析（本函数不读标题）。事件内 OCR 预算：会话身份与群聊标记由

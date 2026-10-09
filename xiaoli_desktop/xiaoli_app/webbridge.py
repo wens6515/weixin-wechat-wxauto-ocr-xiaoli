@@ -260,28 +260,6 @@ def _first_run_needed(cfg_path: str, cfg: dict | None) -> bool:
     return False
 
 
-def _wechat_missing_hint() -> str:
-    """微信主窗口缺失时的可操作提示（标定/验证共用）。
-
-    进程在跑但没有主窗口 = 登录界面阶段（新版微信登录完成前不创建主窗口）；
-    进程都没有 = 微信没开。两种给用户的下一步动作不同，必须分开说。
-
-    进程检测按**字节**匹配：tasklist 输出是控制台 OEM 编码（中文系统
-    cp936），按文本解码会在非 UTF-8 环境下抛 UnicodeDecodeError——只找
-    ASCII 的 WeChat.exe，与编码无关。"""
-    try:
-        import subprocess
-        r = subprocess.run(
-            ["tasklist"], capture_output=True, timeout=10,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if b"WeChat.exe" in (r.stdout or b""):
-            return ("检测到微信进程，但还没有主窗口——请先在微信里完成登录，"
-                    "登录后点「重新截图」")
-    except Exception:
-        pass
-    return "微信没开——请先打开并登录电脑端微信，然后点「重新截图」"
-
-
 def _safe(fn):
     """js_api 方法兜底：异常转 {ok: False, error}，不让桥炸掉调用线程。"""
     @functools.wraps(fn)
@@ -487,7 +465,6 @@ class BridgeApi:
             "state_watch_enabled": cfg.get("state_watch_enabled", False),
             "model_trigger_manage": cfg.get("model_trigger_manage", "off"),
             "sticker_mode": cfg.get("sticker_mode", "off"),
-            "wechat_window_size": cfg.get("wechat_window_size"),
             "tianshu_guided": bool(cfg.get("tianshu_guided")),
         }
         voice = {
@@ -541,6 +518,50 @@ class BridgeApi:
                 bot.chat_feature_overrides = patch["chat_feature_overrides"]
                 hot.append("chat_feature_overrides")
         return {"ok": True, "applied": applied, "bot_hot": hot}
+
+    def _apply_nickname_to_card(self, name: str) -> bool:
+        """把微信名称写进**活跃角色卡**（昵称的事实源）。
+
+        project_config 用卡上的 nickname 投影 cfg.bot_nickname，多卡各有一套
+        人设与昵称——所以"改微信名称"必须落在卡上，只改 cfg 会被下一次投影
+        覆盖掉（历史缺陷：首启向导的"微信昵称"框填的值就是这么失效的）。
+        失败只记日志（卡不存在/写盘失败不阻塞昵称生效），返回是否写入。
+        """
+        cid = str(self.ctx.cfg.get("active_card_id") or "")
+        if not cid:
+            return False
+        try:
+            card = cs_get_card(self.ctx.cards_dir, cid)
+            if not card:
+                return False
+            card["nickname"] = name
+            cs_save_card(self.ctx.cards_dir, card)
+            return True
+        except Exception as e:
+            logger.warning(f"[昵称] 写入角色卡失败（{cid}）: {e}")
+            return False
+
+    @_safe
+    def set_nickname(self, value: str) -> dict:
+        """改「微信名称」：群里 @ 这个称呼认小漓，同时也是模型的自称。
+
+        写三处保持一致：活跃角色卡（事实源）→ cfg.bot_nickname（投影键，
+        供下次启动直接读到）→ 运行中 bot.nickname（@ 判据与提示词身份，
+        改完立即生效，不用重启引擎）。
+        """
+        name = " ".join(str(value or "").split())
+        if not name:
+            return {"ok": False, "error": "微信名称不能为空"}
+        if len(name) > 32:
+            return {"ok": False, "error": "微信名称过长（最多 32 个字）"}
+        cfg = self.ctx.cfg
+        card_written = self._apply_nickname_to_card(name)
+        cfg["bot_nickname"] = name
+        config_store.save_config(cfg, self.ctx.cfg_path)
+        bot = getattr(self.ctx.engine, "bot", None)
+        if bot is not None:
+            bot.nickname = name
+        return {"ok": True, "nickname": name, "card_written": card_written}
 
     @_safe
     def get_providers(self) -> dict:
@@ -1229,247 +1250,6 @@ class BridgeApi:
                          name="xiaoli-sticker-retag").start()
         return {"ok": True, "started": True}
 
-    # ---------- 微信画面标定 ----------
-
-    @_safe
-    def region_calib_nudge_info(self) -> dict:
-        """升级用户的一次性标定提示：无标定文件且从未提示过 → show=True。
-
-        新用户不需要（首启向导第 2 步就是标定，走到那一步即标记提示已消费）；
-        升级用户既不弹首启向导、安装版里也从来没有标定文件，窗口又不再被自动
-        摆放——没有任何提示的话，布局不一致会静默读错消息。"""
-        from wx_backend import visual_backend as vb
-        if self.ctx.cfg.get("region_calib_nudge_done"):
-            return {"ok": True, "show": False}
-        try:
-            calibrated = bool(vb._load_region_config())
-        except Exception:
-            calibrated = False
-        return {"ok": True, "show": not calibrated}
-
-    @_safe
-    def region_calib_nudge_done(self) -> dict:
-        """标记一次性提示已消费（弹过即标记，无需等用户真的标定）。"""
-        self.ctx.cfg["region_calib_nudge_done"] = True
-        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-        return {"ok": True}
-
-    def _calib_shot(self):
-        """截取当前微信窗口（标定底图）。返回 (PIL Image, window_rect) 或
-        (None, None, 错误文案)。先置前微信——完全遮挡时 PrintWindow 返回黑图。
-
-        窗口缺失时区分两种成因（用户可见的下一步动作不同）：进程在跑但没主
-        窗口 = 登录没走完；进程都没有 = 微信没开。"""
-        from wx_backend import visual_backend as vb
-        hwnd = vb.find_wechat_window()
-        if not hwnd:
-            return None, None, _wechat_missing_hint()
-        vb.ensure_window_visible(hwnd)
-        shot = vb.capture_window(hwnd)
-        if shot is None:
-            return None, None, "截图失败（窗口句柄失效？），请重试"
-        return shot, vb.window_rect(hwnd), None
-
-    @_safe
-    def region_calib_start(self) -> dict:
-        """标定第一步：截微信窗口作框选底图 + 返回两框预填。
-
-        底图与运行时截图同走 capture_window（PrintWindow）——框选坐标系与
-        运行时比例换算天然一致，无 DPI 坑。预填优先级：已标定配置的两框
-        原始值 → 现配置三区域反推 → 模块默认三区域反推（未标定用户看到的
-        就是当前生效区域）。"""
-        from wx_backend import visual_backend as vb
-        from wx_backend.visual_regions import boxes_from_regions
-        shot, _wr, err = self._calib_shot()
-        if shot is None:
-            return {"ok": False, "error": err}
-        cfg = vb._load_region_config()
-        prefill = None
-        if cfg and all(k in cfg for k in ("session_box", "chat_box", "split")):
-            prefill = {"session_box": list(cfg["session_box"]),
-                       "chat_box": list(cfg["chat_box"]),
-                       "split": cfg["split"]}
-        else:
-            session = cfg["session"] if cfg else vb._SESSION_REGION_RATIO
-            message = cfg["message"] if cfg else vb._MESSAGE_REGION_RATIO
-            title = (cfg.get("title") if cfg else None) or vb._TITLE_REGION_RATIO
-            prefill = boxes_from_regions(session, message, title)
-        if prefill:
-            prefill = {"session_box": list(prefill["session_box"]),
-                       "chat_box": list(prefill["chat_box"]),
-                       "split": prefill["split"]}
-        buf = io.BytesIO()
-        shot.convert("RGB").save(buf, format="JPEG", quality=85)
-        return {"ok": True,
-                "image": "data:image/jpeg;base64,"
-                         + base64.b64encode(buf.getvalue()).decode(),
-                "width": shot.width, "height": shot.height,
-                "prefill": prefill, "calibrated": bool(cfg)}
-
-    @_safe
-    def region_calib_save(self, session_box, chat_box, split) -> dict:
-        """标定第二步：两框 + 分隔线 → 派生运行时三区域 → 写
-        wx_ocr_region.json（frozen 感知路径）。引擎运行中同步热更新 bot
-        后端区域，无需重启。"""
-        from wx_backend import visual_backend as vb
-        from wx_backend.visual_regions import derive_regions
-        try:
-            s_box = [float(v) for v in (session_box or [])]
-            c_box = [float(v) for v in (chat_box or [])]
-            k = float(split)
-        except (TypeError, ValueError):
-            return {"ok": False, "error": "区域参数须为数字"}
-        regions = derive_regions(s_box, c_box, k)
-        if regions is None:
-            return {"ok": False, "error": "区域值非法（须 [0,1] 且 l<r、t<b）"}
-        data = {"session_region": list(regions["session"]),
-                "message_region": list(regions["message"]),
-                "title_region": list(regions["title"]),
-                "session_box": s_box, "chat_box": c_box, "split": k}
-        _shot, wr, err = self._calib_shot()
-        if wr:
-            data["window_rect"] = {"x": wr[0], "y": wr[1],
-                                   "width": wr[2], "height": wr[3]}
-        elif err:
-            logger.debug(f"[标定] 保存时取窗口 rect 失败（不阻塞保存）: {err}")
-        path = vb.save_region_config(data)
-        hot = False
-        bot = getattr(self.ctx.engine, "bot", None)
-        wx = getattr(bot, "wx", None)
-        if wx is not None and hasattr(wx, "reload_regions"):
-            wx.reload_regions()
-            hot = True
-        return {"ok": True, "path": path, "hot": hot,
-                "regions": {key: list(val) for key, val in regions.items()}}
-
-    @_safe
-    def region_calib_verify(self) -> dict:
-        """标定验证：按当前生效区域现读一帧，返回主题/标题/列表/最近消息四探针。
-
-        独立实现（模块级 capture_window + ocr_image，不经 VisualBackend
-        实例）——首启时引擎未初始化同样可用。主题探针把「当前按浅色还是深色
-        判据工作」摆给用户看（两套像素判据自动切换，见 visual_vision）。"""
-        import re as _re
-        from wx_backend import visual_backend as vb
-        from wx_backend.visual_regions import parse_title
-        shot, _wr, err = self._calib_shot()
-        if shot is None:
-            return {"ok": False, "error": err}
-        cfg = vb._load_region_config()
-        session = cfg["session"] if cfg else vb._SESSION_REGION_RATIO
-        message = cfg["message"] if cfg else vb._MESSAGE_REGION_RATIO
-        title = (cfg.get("title") if cfg else None) or vb._TITLE_REGION_RATIO
-        w, h = shot.size
-
-        def _crop(region, top=None):
-            l, t, r, b = region
-            if top is not None:
-                t = t + (b - t) * top
-            return shot.crop((int(w * l), int(h * t), int(w * r), int(h * b)))
-
-        def _texts(img):
-            out = []
-            for it in sorted(vb.ocr_image(img), key=lambda i: i["y"]):
-                txt = (it.get("text") or "").strip()
-                if len(txt) >= 2 and _re.search(r"[\u4e00-\u9fffA-Za-z0-9]", txt):
-                    out.append(txt)
-            return out
-
-        items = []
-        # 主题探针（第一个）：浅色/深色两套像素判据，用户看得见当前按哪套走
-        theme = vb.estimate_theme(_crop(session))
-        items.append({
-            "key": "theme", "label": "界面主题", "ok": True,
-            "detail": f"{'浅色' if theme == 'light' else '深色'}模式"
-                      f"（气泡/图片判据按该主题工作，微信里切主题后自动跟随）"})
-        t_join = "".join(
-            t["text"] for t in
-            sorted(vb.ocr_image(_crop(title)), key=lambda i: i["x"])
-            if len((t.get("text") or "").strip()) >= 2).strip()
-        name, is_group, count = parse_title(t_join)
-        items.append({
-            "key": "title", "label": "会话标题", "ok": bool(name),
-            "detail": (f"{'群聊' if is_group else '私聊'}：{name}"
-                       + (f"（{count} 人）" if is_group and count else ""))
-                      if name else
-                      "标题区没读到文字——分隔线可能拖太高，试着拖到标题栏下方"})
-
-        seen = []
-        for n in _texts(_crop(session)):
-            if n not in seen:
-                seen.append(n)
-        items.append({
-            "key": "list", "label": "会话列表",
-            "ok": bool(seen),
-            "detail": ("、".join(seen[:3]) + ("…" if len(seen) > 3 else ""))
-                      if seen else "列表区没读到会话——检查左框是否套住会话列表"})
-
-        msgs = _texts(_crop(message, top=0.66))
-        items.append({
-            "key": "msg", "label": "最近消息",
-            "ok": True,
-            "detail": (msgs[-1][:40] + ("…" if len(msgs[-1]) > 40 else ""))
-                       if msgs else "消息区暂无文字（当前会话可能为空）"})
-        return {"ok": True, "items": items}
-
-    # ---------- 微信窗口尺寸（只固定大小，不移动位置） ----------
-
-    @_safe
-    def wechat_window_info(self) -> dict:
-        """返回已配置的固定尺寸与微信窗口当前可见尺寸（设置页展示/读取用）。"""
-        from wx_backend import visual_backend as vb
-        cfg_size = self.ctx.cfg.get("wechat_window_size")
-        info = {"ok": True, "configured": list(cfg_size) if cfg_size else None,
-                "current": None, "running": bool(getattr(self.ctx.engine, "bot", None))}
-        hwnd = vb.find_wechat_window()
-        if hwnd:
-            size = vb.visible_window_size(hwnd)
-            if size:
-                info["current"] = [int(size[0]), int(size[1])]
-        return info
-
-    @_safe
-    def set_wechat_window_size(self, w, h, apply_now: bool = True) -> dict:
-        """保存固定窗口尺寸并（默认）立即套用——只改大小、不移动位置。
-
-        w/h 为可见内容物理像素；传 0/None = 清除固定尺寸（初始化不再调整）。
-        范围夹取 [200, 屏幕尺寸]，防手滑填出不可用尺寸。"""
-        from wx_backend import visual_backend as vb
-        clear = not w or not h or int(w) <= 0 or int(h) <= 0
-        if clear:
-            self.ctx.cfg["wechat_window_size"] = None
-            config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-            return {"ok": True, "configured": None, "applied": False}
-        try:
-            w, h = int(w), int(h)
-        except (TypeError, ValueError):
-            return {"ok": False, "error": "尺寸须为数字"}
-        if w < 200 or h < 200:
-            return {"ok": False, "error": "尺寸过小（至少 200×200）"}
-        screen_w = ctypes.windll.user32.GetSystemMetrics(0) or w
-        screen_h = ctypes.windll.user32.GetSystemMetrics(1) or h
-        w, h = min(w, screen_w), min(h, screen_h)
-        self.ctx.cfg["wechat_window_size"] = [w, h]
-        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
-        applied = False
-        err = None
-        if apply_now:
-            hwnd = vb.find_wechat_window()
-            if not hwnd:
-                err = "未检测到微信窗口——尺寸已保存，初始化时会自动套用"
-            else:
-                vb.ensure_window_visible(hwnd)
-                try:
-                    if ctypes.windll.user32.IsZoomed(hwnd):
-                        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                except Exception:
-                    pass
-                applied = bool(vb.resize_window_visible(hwnd, w, h))
-                if not applied:
-                    err = "套用失败（窗口句柄异常？），尺寸已保存"
-        return {"ok": True, "configured": [w, h], "applied": applied,
-                "error": err}
-
     # ---------- 天枢配置引导（任务桥首次开启时） ----------
 
     @_safe
@@ -1646,7 +1426,11 @@ class BridgeApi:
         cfg["tasks_dir"] = str(tasks_dir or "").strip()
         cfg["file_storage_path"] = str(file_storage_path or "").strip()
         cfg["memory_file"] = str(memory_file or "").strip() or "memory.json"
-        cfg["bot_nickname"] = str(bot_nickname or "").strip() or "小漓"
+        name = str(bot_nickname or "").strip() or "小漓"
+        cfg["bot_nickname"] = name
+        # 昵称落到活跃角色卡（事实源）：只写 cfg 会被 project_config 的卡投影
+        # 覆盖回卡上的旧值——首启向导的"微信昵称"框就是这么失效的（历史缺陷）。
+        self._apply_nickname_to_card(name)
         # 新装默认关任务桥：天枢 CLI 未配置前开着，模型会投递注定失败的任务。
         # 引导路径 = 首次打开任务桥开关时的「天枢配置引导」弹窗；用户显式设过
         # 该键的（老配置）不动。

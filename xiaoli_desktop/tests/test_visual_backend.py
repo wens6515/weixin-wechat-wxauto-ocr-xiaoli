@@ -4,6 +4,7 @@
 不依赖真实微信窗口——mock capture_window / ocr_image / find_wechat_window，
 验证后端自身逻辑（连接、会话解析、消息切分、发送坐标、注册）。
 """
+import json
 import os
 import sys
 import unittest
@@ -1627,121 +1628,41 @@ class TestSelectedRowHighlight(unittest.TestCase):
         self.assertEqual(b._current_chat, "周雨桐")
 
 
-# ---- 用户圈定区域配置加载 ----
+# ---- 区域恒为内置常量（用户自定义标定已撤回） ----
 
 
-def _write_region_config(tmp, data):
-    """把 data 写入临时配置路径并返回该路径（用完由 tmp 清理）。"""
-    import json
-    p = os.path.join(tmp, "wx_ocr_region.json")
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    return p
+class TestRegionDefaults(unittest.TestCase):
+    """三区域恒用模块内置常量，运行期不再读任何用户标定文件。
 
+    撤回理由（真机实证）：头像窄带 = 框宽 2%~14%、期望头像高 = 框高÷18、气泡/
+    媒体闸同样是框的比例——只在「框 == 聊天区」这一前提下成立；用户手画的大框/
+    小框会让这些常量整体漂移（事故：自设区域 + 非默认窗口尺寸 → 对方头像整列
+    检不出、消息读不到，自己侧漏检 → 自家图片被当对方消息）。
+    """
 
-class TestRegionConfig(unittest.TestCase):
-    """_load_region_config：合法生效 / 缺文件回退 / 坏值回退 / 坏结构回退。"""
-
-    def _load(self, config_path):
+    def test_backend_uses_builtin_regions(self):
+        """新建后端实例 → 三区域 = 模块常量。"""
         import wx_backend.visual_backend as vb
-        with mock.patch.object(vb, "_REGION_CONFIG_PATH", config_path):
-            return vb._load_region_config()
+        b = VisualBackend()
+        self.assertEqual(b._session_region, vb._SESSION_REGION_RATIO)
+        self.assertEqual(b._message_region, vb._MESSAGE_REGION_RATIO)
+        self.assertEqual(b._title_region, vb._TITLE_REGION_RATIO)
 
-    def test_valid_config_loaded(self):
+    def test_user_region_file_is_not_consumed(self):
+        """标定文件躺在它原来的位置也不生效（加载/保存/热更新接口全部移除）。"""
         import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_region_config(tmp, {
-                "session_region": {"l": 0.0, "t": 0.1, "r": 0.35, "b": 1.0},
-                "message_region": {"l": 0.35, "t": 0.1, "r": 1.0, "b": 1.0},
-            })
-            cfg = self._load(p)
-            self.assertIsNotNone(cfg)
-            self.assertEqual(cfg["session"], (0.0, 0.1, 0.35, 1.0))
-            self.assertEqual(cfg["message"], (0.35, 0.1, 1.0, 1.0))
-
-    def test_list_format_config_loaded(self):
-        """工具保存的数组格式 [l,t,r,b] 也能加载（兼容 pick_ocr_region 输出）。"""
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_region_config(tmp, {
-                "session_region": [0.0, 0.1, 0.35, 1.0],
-                "message_region": [0.35, 0.1, 1.0, 1.0],
-            })
-            cfg = self._load(p)
-            self.assertIsNotNone(cfg)
-            self.assertEqual(cfg["session"], (0.0, 0.1, 0.35, 1.0))
-            self.assertEqual(cfg["message"], (0.35, 0.1, 1.0, 1.0))
-
-    def test_missing_file_falls_back(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            p = os.path.join(tmp, "nonexistent.json")
-            self.assertIsNone(self._load(p))
-
-    def test_window_rect_key_tolerated(self):
-        """新格式含 window_rect 键（工具圈定窗口位置）→ 多余键忽略，双区域正常读取。"""
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_region_config(tmp, {
-                "window_rect": {"x": 726, "y": 0, "width": 1300, "height": 1610},
-                "session_region": [0.0, 0.1, 0.35, 1.0],
-                "message_region": [0.35, 0.1, 1.0, 1.0],
-            })
-            cfg = self._load(p)
-            self.assertIsNotNone(cfg)
-            self.assertEqual(cfg["session"], (0.0, 0.1, 0.35, 1.0))
-            self.assertEqual(cfg["message"], (0.35, 0.1, 1.0, 1.0))
-
-    def test_invalid_l_ge_r_falls_back(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_region_config(tmp, {
-                "session_region": {"l": 0.5, "t": 0.1, "r": 0.3, "b": 1.0},  # l>=r
-                "message_region": {"l": 0.3, "t": 0.1, "r": 1.0, "b": 1.0},
-            })
-            self.assertIsNone(self._load(p))
-
-    def test_out_of_range_falls_back(self):
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_region_config(tmp, {
-                "session_region": {"l": -0.1, "t": 0.1, "r": 0.3, "b": 1.0},  # 越界
-                "message_region": {"l": 0.3, "t": 0.1, "r": 1.0, "b": 1.0},
-            })
-            self.assertIsNone(self._load(p))
-
-    def test_malformed_json_falls_back(self):
-        import tempfile
+        import wx_backend.visual_backend as vb
         with tempfile.TemporaryDirectory() as tmp:
             p = os.path.join(tmp, "wx_ocr_region.json")
             with open(p, "w", encoding="utf-8") as f:
-                f.write("{ not valid json")
-            self.assertIsNone(self._load(p))
-
-    def test_backend_uses_config_region(self):
-        """VisualBackend 加载配置后，实例区域反映配置（_detect_red_clusters 消费）。"""
-        import tempfile
-        import wx_backend.visual_backend as vb
-        with tempfile.TemporaryDirectory() as tmp:
-            p = _write_region_config(tmp, {
-                "session_region": {"l": 0.0, "t": 0.1, "r": 0.35, "b": 1.0},
-                "message_region": {"l": 0.35, "t": 0.1, "r": 1.0, "b": 1.0},
-            })
-            with mock.patch.object(vb, "_REGION_CONFIG_PATH", p):
-                b = VisualBackend()
-            self.assertEqual(b._session_region, (0.0, 0.1, 0.35, 1.0))
-            self.assertEqual(b._message_region, (0.35, 0.1, 1.0, 1.0))
-
-    def test_backend_defaults_when_no_config(self):
-        """无配置 → 实例区域用模块默认常量（现行为）。"""
-        import tempfile
-        import wx_backend.visual_backend as vb
-        with tempfile.TemporaryDirectory() as tmp:
-            p = os.path.join(tmp, "nonexistent.json")
-            with mock.patch.object(vb, "_REGION_CONFIG_PATH", p):
-                b = VisualBackend()
-            self.assertEqual(b._session_region, vb._SESSION_REGION_RATIO)
+                json.dump({"message_region": [0.35, 0.1, 1.0, 1.0],
+                           "session_region": [0.0, 0.1, 0.35, 1.0]}, f)
+            b = VisualBackend()
             self.assertEqual(b._message_region, vb._MESSAGE_REGION_RATIO)
+        for name in ("_load_region_config", "_read_region_config",
+                     "save_region_config", "_region_config_paths"):
+            self.assertFalse(hasattr(vb, name), f"{name} 应随标定撤回一并移除")
+        self.assertFalse(hasattr(VisualBackend, "reload_regions"))
 
 
 # ---- 窗口查找 / 矩形（Win32 mock） ----
