@@ -17,7 +17,18 @@ logger = logging.getLogger("xiaoli")
 
 DEFAULT_TIANSHU_URL = "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main"
 TIANSHU_EXE = "tianshu-desktop.exe"
-WECHAT_KEYWORDS = ("微信", "WeChat")
+# 微信窗口判据已收归 wx_backend.visual_win32（进程名优先、标题严格相等）——
+# 环境检查与运行期共用同一个 find_wechat_window，避免"卡片说检测到了、
+# 运行期认的是另一个窗口"。这里只留详情文案的截断长度。
+_WECHAT_TITLE_MAX = 24
+
+
+def _short_title(title: str) -> str:
+    """窗口标题截断（卡片详情只放一行——真机事故：浏览器标签标题近百字，
+    整串塞进仪表盘卡片）。"""
+    t = " ".join(str(title or "").split())
+    return t if len(t) <= _WECHAT_TITLE_MAX \
+        else t[: _WECHAT_TITLE_MAX - 1] + "…"
 
 # 内置首轮提示词模板（内化：小白新机器不依赖外部文件）。
 # 占位符：{tasks_dir} 任务桥目录（cfg.tasks_dir）、{trigger} 唤起天枢的指令（cfg.tianshu_trigger_command）。
@@ -339,13 +350,21 @@ def _norm_console_entries(entries):
 def check_environment(cfg):
     """环境检测报告：{wechat, tianshu, first_prompt}，每项 {ok, detail}。"""
     out = {}
-    # ---- 微信：窗口为主，tasklist 进程兜底 ----
+    # ---- 微信：**与运行期同一套判据**（进程名 Weixin.exe/WeChat.exe 优先、
+    # 标题严格等于「微信」兜底）。历史缺陷：这里按「标题含微信」子串扫全部
+    # 窗口 → 浏览器标签（本仓库 GitHub 页面标题里含"微信 PC 4.x"）命中，
+    # 仪表盘把近百字的标签标题当"检测到微信窗口"上屏；而运行期
+    # find_wechat_window 用的是同款宽松判据，还可能照浏览器窗口截图。
+    # 现在两侧共用同一个函数：卡片说什么，运行期就认什么。
     wechat_ok, detail = False, "未检测到微信窗口"
     try:
-        for name in _list_windows():
-            if any(k in name for k in WECHAT_KEYWORDS):
-                wechat_ok, detail = True, f"检测到微信窗口「{name}」"
-                break
+        from wx_backend.visual_win32 import find_wechat_window, window_title
+        hwnd = find_wechat_window()
+        if hwnd:
+            title = window_title(hwnd)
+            wechat_ok = True
+            detail = (f"检测到微信窗口「{_short_title(title)}」" if title
+                      else "检测到微信窗口（标题为空）")
     except Exception as e:
         detail = f"窗口检测失败: {e}"
     if not wechat_ok:
@@ -353,10 +372,16 @@ def check_environment(cfg):
             # 字节匹配（无 text=True）：tasklist 输出是控制台 OEM 编码（中文
             # 系统 cp936），按文本解码在非 UTF-8 环境会抛 UnicodeDecodeError
             # → 误报「进程检测失败」；只找 ASCII 进程名即与编码无关。
+            # 4.x 主进程名 Weixin.exe（3.x 是 WeChat.exe），两个都认；
+            # WeChatAppEx.exe 是小程序宿主，不在这两个词形内。
             r = subprocess.run(["tasklist"], capture_output=True, timeout=10,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if b"WeChat.exe" in (r.stdout or b""):
-                wechat_ok, detail = True, "检测到微信进程 WeChat.exe（窗口未找到）"
+            raw = r.stdout or b""
+            for exe in (b"Weixin.exe", b"WeChat.exe"):
+                if exe in raw:
+                    wechat_ok = True
+                    detail = f"检测到微信进程 {exe.decode()}（窗口未找到）"
+                    break
         except Exception as e:
             detail += f"；进程检测失败: {e}"
     out["wechat"] = {"ok": wechat_ok, "detail": detail}

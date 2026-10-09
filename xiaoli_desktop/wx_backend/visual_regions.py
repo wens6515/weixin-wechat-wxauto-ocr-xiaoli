@@ -1,33 +1,46 @@
 # -*- coding: utf-8 -*-
 """visual_backend 拆分 · OCR 三区域默认标定与会话标题解析。
 
-区域默认值（真机标定常量）+ 区域元组校验 + parse_title（标题 → 会话名/
-群聊标记）。徽章检测依赖 _normalize_region 与 _SESSION_REGION_RATIO，故
-独立成模块避免与门面循环导入。用户圈定配置（wx_ocr_region.json）的路径
-常量与加载函数留在门面——测试对 _REGION_CONFIG_PATH 的 patch 打在门面。
+区域默认值（真机标定常量）+ parse_title（标题 → 会话名/群聊标记）。
+徽章检测依赖 _normalize_region 与 _SESSION_REGION_RATIO，故独立成模块避免与
+门面循环导入。
+
+**用户自定义画面标定已撤回**：三区域恒为本模块的默认常量，运行期不再有
+"用户画框 → 区域"的换算（wx_ocr_region.json 的读写、两框标定派生函数一并
+移除）。理由：那套几何判据（头像窄带 = 框宽的比例、期望头像高 = 框高÷18、
+气泡/媒体闸同样是框的比例）只在"框 == 聊天区"这一前提下成立，而微信布局
+不是等比的（会话列表固定像素宽、输入框固定像素高）——用户手画的大框/小框
+会让这些常量整体漂移，真机事故：自设区域后对方头像整列检不出（消息读不到）、
+自己侧漏检（自家图片被当对方消息）。
 """
 from __future__ import annotations
 
 import re
 
-# 微信窗口布局（4.1.12.51 默认窗口，相对窗口客户区比例）
-# 会话列表：左侧约 42% 宽；消息区：右侧约 58% 宽
-# 注意：窗口位置由用户自己摆放，程序不移动窗口；窗口大小可在设置页固定
-# （初始化套用）。坐标换算一律基于窗口当前实际 rect（见 _window_rect）。
-#
-# 默认值为真机框选标定（微信窗口 1300x1610 实测）：
+# 微信窗口布局（真机标定，微信窗口 1300x1610 实测——即微信默认窗口尺寸下
+# 的布局；程序不移动窗口、也不调整窗口尺寸）。
+# 会话列表：左侧约 42% 宽；消息区：右侧约 58% 宽。
 # 消息区底部 0.8337 = 聊天记录下缘，刻意不含输入框（输入框"发送"按钮在
-# 窗口 ~0.95 处——若默认区域含输入框，OCR 会把按钮文字当消息且判 self）。
-# 无 wx_ocr_region.json（新装/未标定）即用此默认；用户窗口布局不同会导致
-# 错位——分发引导用应用内画面标定（首启引导第 2 步 / 设置页）重标。
+# 窗口 ~0.95 处——若区域含输入框，OCR 会把按钮文字当消息且判 self）。
 _SESSION_REGION_RATIO = (0.09, 0.0878, 0.418, 0.9895)   # (l, t, r, b) 相对窗口
 _MESSAGE_REGION_RATIO = (0.4165, 0.1288, 0.9913, 0.8337)
 # 右侧会话标题区（真机标定）：当前会话名权威来源 + 群聊判定（标题带括号人数）
 _TITLE_REGION_RATIO = (0.4151, 0.0386, 0.8128, 0.082)
 
+# 强制窗口尺寸（**窗口矩形**，物理像素，只改大小不改位置）：上面三组比例与
+# 全部像素判据（头像窄带 2%~14%、期望头像高 = 区域高÷18、气泡/媒体闸）都是
+# 在这台窗口上标定的——窗口尺寸一变，这些常量整体错位（真机事故：把窗口拉大
+# 到 2178 宽后聊天区左边界从 0.415 挪到 0.246，消息区左沿切进聊天区、整列
+# 头像检不出、消息读不到）。用户自定义尺寸/区域两项设置已撤回，改为程序强制：
+# `VisualBackend.enforce_window_size` 在 connect 与每轮消息监听时复查并调回。
+WINDOW_SIZE = (1300, 1610)
+
 
 def _normalize_region(region: tuple) -> tuple | None:
-    """校验并规范化区域元组：4 值都在 [0,1] 且 l<r、t<b，非法返回 None。"""
+    """校验并规范化区域元组：4 值都在 [0,1] 且 l<r、t<b，非法返回 None。
+
+    仍被徽章检测消费（可选传入 region 参数）——非法值回退默认区域。
+    """
     if not isinstance(region, (tuple, list)) or len(region) != 4:
         return None
     try:
@@ -40,48 +53,6 @@ def _normalize_region(region: tuple) -> tuple | None:
     if l >= r or t >= b:
         return None
     return vals
-
-
-# ---------- 两框标定 ↔ 运行时三区域 ----------
-
-def derive_regions(session_box, chat_box, split) -> dict | None:
-    """两框标定结果 → 运行时三区域（比例元组）。
-
-    session_box：会话列表框；chat_box：聊天区框（含标题带，右栏一整块）；
-    split：标题分隔线位置 = 聊天区顶到分隔线的距离占聊天区高度的比例。
-    派生：标题区 = 聊天区顶到分隔线的条带；消息区 = 分隔线以下到聊天区底。
-    运行时读到的仍是三个独立比例区域（联合 OCR 外框 = 标题∪消息 =
-    chat_box），热路径语义与三框时代完全一致。
-
-    split 夹取 [0.02, 0.85]：太靠顶标题区高度趋零（t>=b 校验整份配置被拒
-    回退默认），太靠底消息区只剩窄条。框非法返回 None。
-    """
-    s = _normalize_region(session_box)
-    c = _normalize_region(chat_box)
-    if s is None or c is None:
-        return None
-    try:
-        k = min(0.85, max(0.02, float(split)))
-    except (TypeError, ValueError):
-        return None
-    t_bot = c[1] + k * (c[3] - c[1])
-    return {"session": s,
-            "title": (c[0], c[1], c[2], t_bot),
-            "message": (c[0], t_bot, c[2], c[3])}
-
-
-def boxes_from_regions(session, message, title) -> dict | None:
-    """运行时三区域 → 两框 + 分隔线（标定 UI 预填；默认标定值反推用同一函数）。"""
-    s = _normalize_region(session)
-    m = _normalize_region(message)
-    t = _normalize_region(title)
-    if not (s and m and t):
-        return None
-    chat = (min(t[0], m[0]), min(t[1], m[1]),
-            max(t[2], m[2]), max(t[3], m[3]))
-    ch = chat[3] - chat[1]
-    split = (t[3] - chat[1]) / ch if ch > 1e-6 else 0.05
-    return {"session_box": s, "chat_box": chat, "split": split}
 
 
 _TITLE_GROUP_RE = re.compile(r"^(?P<name>.+?)\((?P<count>\d+)\)\s*$")

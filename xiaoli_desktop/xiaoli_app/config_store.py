@@ -231,10 +231,9 @@ AI_DEFAULTS = {
     "segment_jitter_min": 1.5,
     "segment_jitter_max": 3.0,
     "start_paused": True,
-    # 微信窗口尺寸（可见内容物理像素 [w, h]）：初始化时套用，**不移动位置**
-    # （位置由用户自己摆）。None = 不调整、保持用户当前尺寸。旧键
-    # wechat_window_rect 由 load_config_store 迁移（只取尺寸部分）。
-    "wechat_window_size": None,
+    # 微信窗口尺寸/画面标定两项用户设置已撤回：程序既不移动也不调整微信
+    # 窗口，三区域恒用内置标定常量（见 wx_backend.visual_regions）。旧配置
+    # 里的 wechat_window_size / wechat_window_rect 在加载时静默丢弃。
     "memory_file": "memory.json",
     # 长记忆（v2）：recent 溢出归档进深层记忆（永不删除，recall_memory
     # 工具检索）；压缩线程定期提炼「重要记忆（常驻上下文）+ 关键词索引
@@ -695,19 +694,11 @@ def load_config_store(path="config.json", cards_dir="cards"):
     if "vision_max_tokens" in cfg and "reply_max_tokens" not in cfg:
         cfg["reply_max_tokens"] = cfg.pop("vision_max_tokens")
 
-    # wechat_window_rect → wechat_window_size 一次性迁移（语义变更：旧键含
-    # 位置、空值 = 自动摆到右半屏；新语义只固定大小、位置由用户自己摆）。
-    # [x,y,w,h] 只取 w/h；"off"/空/非法 → 不设固定尺寸（程序一概不移动窗口）。
-    if "wechat_window_rect" in cfg:
-        old = cfg.pop("wechat_window_rect")
-        if "wechat_window_size" not in cfg and isinstance(old, (list, tuple)) \
-                and len(old) == 4:
-            try:
-                w, h = int(old[2]), int(old[3])
-                if w >= 200 and h >= 200:
-                    cfg["wechat_window_size"] = [w, h]
-            except (TypeError, ValueError):
-                pass
+    # 已撤回的两项用户设置：微信窗口尺寸（wechat_window_size / 更早的
+    # wechat_window_rect）静默丢弃——程序既不移动也不调整微信窗口大小，
+    # 旧配置里的值留着只会误导（老版本写的尺寸仍会被新版本忽略）。
+    cfg.pop("wechat_window_rect", None)
+    cfg.pop("wechat_window_size", None)
 
     cfg = migrate_config(cfg, cards_dir)
     # AI 参数默认补全：投影只重建 provider 相关键，cooldown/

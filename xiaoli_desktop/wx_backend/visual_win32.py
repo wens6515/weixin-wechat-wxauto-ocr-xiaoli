@@ -68,6 +68,8 @@ u32.SetForegroundWindow.restype = wt.BOOL
 u32.SetForegroundWindow.argtypes = [wt.HWND]
 u32.IsIconic.restype = wt.BOOL
 u32.IsIconic.argtypes = [wt.HWND]
+u32.IsZoomed.restype = wt.BOOL
+u32.IsZoomed.argtypes = [wt.HWND]
 u32.ShowWindow.restype = wt.BOOL
 u32.ShowWindow.argtypes = [wt.HWND, wt.INT]
 u32.keybd_event.restype = None
@@ -91,21 +93,127 @@ gdi32.GetDIBits.argtypes = [
 ]
 
 
-def find_wechat_window():
-    """返回微信主窗口句柄；未找到返回 None。"""
-    found = []
+# 微信主窗口判据（**进程名优先**，与标题无关）。历史缺陷：按「标题含微信」
+# 子串匹配——用户在浏览器里开着本仓库页面时，浏览器标签标题（仓库描述里含
+# "微信 PC 4.x"）被当成微信窗口：仪表盘上把整条标题当详情显示，运行期还会
+# 照它截图。现行判据两级：
+#   ① 进程名 = Weixin.exe（微信 4.x）/ WeChat.exe（3.x）——精确相等，不用
+#      子串（WeChatAppEx.exe 是小程序宿主，同样有窗口，必须排除在外）；
+#   ② 标题严格等于「微信」/「WeChat」（进程名读不到时的兜底；只做相等，
+#      不做包含——标题里带"微信"二字的浏览器/文档窗口一律不认）。
+_PROCESS_NAMES = ("weixin.exe", "wechat.exe")
+_TITLE_EXACT = ("微信", "wechat")
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+u32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+u32.GetWindowThreadProcessId.restype = wt.DWORD
+# 64 位句柄安全同上：不声明 argtypes 时 HWND 会被截成 32 位
+u32.GetWindowTextW.argtypes = [wt.HWND, ctypes.c_wchar_p, wt.INT]
+_k32 = ctypes.windll.kernel32
+_k32.OpenProcess.restype = _HANDLE
+_k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+_k32.QueryFullProcessImageNameW.argtypes = [
+    _HANDLE, wt.DWORD, ctypes.c_wchar_p, ctypes.POINTER(wt.DWORD)]
+_k32.CloseHandle.argtypes = [_HANDLE]
+
+
+def window_title(hwnd) -> str:
+    """窗口标题（空标题返回空串）。"""
+    if not hwnd:
+        return ""
+    buf = ctypes.create_unicode_buffer(512)
+    u32.GetWindowTextW(hwnd, buf, 512)
+    return buf.value
+
+
+def process_basename(pid: int) -> str:
+    """进程可执行文件名（小写，如 "weixin.exe"）；读不到返回空串。
+
+    微信可能以更高权限运行：QueryFullProcessImageNameW 用
+    PROCESS_QUERY_LIMITED_INFORMATION 打开（Vista+ 对提权进程也放行），
+    失败一律返回空串由标题兜底，不抛异常。
+    """
+    if not pid:
+        return ""
+    handle = _k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = wt.DWORD(len(buf))
+        if _k32.QueryFullProcessImageNameW(handle, 0, buf,
+                                           ctypes.byref(size)):
+            return buf.value.rsplit("\\", 1)[-1].lower()
+        return ""
+    except Exception:
+        return ""
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def window_pid(hwnd) -> int:
+    """窗口所属进程 PID；失败返回 0。"""
+    if not hwnd:
+        return 0
+    pid = wt.DWORD()
+    u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return int(pid.value)
+
+
+def is_wechat_window(hwnd) -> bool:
+    """该窗口是否微信主窗口（进程名判据，标题无关）。"""
+    return process_basename(window_pid(hwnd)) in _PROCESS_NAMES
+
+
+def _window_area(hwnd) -> int:
+    rect = window_rect(hwnd)
+    return rect[2] * rect[3] if rect else 0
+
+
+def pick_wechat_window(candidates) -> int | None:
+    """从候选窗口里挑微信主窗口（纯函数，便于单测）。
+
+    candidates: [(hwnd, title, proc_name, area), ...]（proc_name 小写，
+    读不到时为空串；area 为窗口像素面积）。
+    判据优先级同 find_wechat_window：先只信进程名，进程名一个都没有才退回
+    "标题严格等于微信"。同组内先取标题严格命中的（主窗口），再按面积取最大
+    者——`Weixin.exe` 同时持有主窗口与若干辅助窗，辅助窗更小。
+    """
+    def _exact(c):
+        return c[1].strip().lower() in _TITLE_EXACT
+    for pool in (
+        [c for c in candidates if (c[2] or "") in _PROCESS_NAMES],
+        [c for c in candidates if _exact(c)],
+    ):
+        if not pool:
+            continue
+        exact = [c for c in pool if _exact(c)]
+        return max(exact or pool, key=lambda c: c[3])[0]
+    return None
+
+
+def enumerate_visible_windows() -> list:
+    """可见顶层窗口 → [(hwnd, title, proc_name, area), ...]。"""
+    out: list = []
 
     @_WNDENUMPROC
     def _cb(hwnd, _lparam):
-        title = ctypes.create_unicode_buffer(512)
-        u32.GetWindowTextW(hwnd, title, 512)
-        if "微信" in title.value and u32.IsWindowVisible(hwnd):
-            found.append(hwnd)
-            return False
+        if not u32.IsWindowVisible(hwnd):
+            return True
+        title = window_title(hwnd).strip()
+        if not title:
+            return True
+        out.append((hwnd, title, process_basename(window_pid(hwnd)),
+                    _window_area(hwnd)))
         return True
 
     u32.EnumWindows(_cb, 0)
-    return found[0] if found else None
+    return out
+
+
+def find_wechat_window():
+    """返回微信主窗口句柄；未找到返回 None（判据见 _PROCESS_NAMES 注释）。"""
+    return pick_wechat_window(enumerate_visible_windows())
 
 
 def find_window_by_title(title: str):

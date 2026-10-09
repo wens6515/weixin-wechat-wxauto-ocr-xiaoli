@@ -18,12 +18,6 @@ import pyautogui
 pyautogui.FAILSAFE = False
 import tempfile
 from wx_backend import create_backend
-from wx_backend.visual_backend import (
-    ensure_window_visible,
-    find_window_by_title,
-    resize_window_visible,
-    window_rect,
-)
 from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
 from xiaoli_app.file_text import (_FILE_TOKEN_LOOSE_RE, _FILE_TOKEN_RE,
                                   _extract_file_name_token,
@@ -353,10 +347,9 @@ class WeChatBot(MediaCaptureMixin):
                                AI_DEFAULTS["segment_jitter_max"])))
         # 用量统计：每次 LLM 调用终态追加一行 JSONL（埋点在 _post_chat_completions）
         self.usage_store = UsageStore()
-        # 微信窗口尺寸（可见内容物理像素 [w, h]）：初始化时套用、不移动
-        # 位置；None = 不调整。旧键 wechat_window_rect（含位置）由
-        # config_store 一次性迁移取尺寸部分。
-        self.wechat_window_size = cfg.get("wechat_window_size", None)
+        # 微信窗口：程序既不移动也不调整尺寸（用户自定义尺寸已撤回）——
+        # 三区域是按微信默认窗口布局标定的比例坐标，窗口位置与大小都保持
+        # 用户当前状态，坐标换算一律读实时 rect。
         self.paused = cfg.get("start_paused", True)
         self.memory_file = cfg.get("memory_file", "memory.json")
         # 长记忆（v2）配置：recent 只保留 memory_keep_recent 条，溢出消息
@@ -891,7 +884,7 @@ class WeChatBot(MediaCaptureMixin):
                 raise RuntimeError("微信连接已取消")
             try:
                 self.wx = create_backend("auto")
-                self._init_apply_window_size()
+                logger.info("[窗口] 程序不改动微信窗口（位置与大小保持当前状态）")
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:
@@ -908,47 +901,6 @@ class WeChatBot(MediaCaptureMixin):
                         raise RuntimeError("微信连接已取消")
                     time.sleep(min(0.5, remain))
                     remain -= 0.5
-
-    def _init_apply_window_size(self):
-        """初始化套用用户设定的微信窗口大小（只改大小，不移动位置——用户定案）。
-
-        旧行为是把窗口摆到屏幕右半屏（wechat_window_rect，自动定位 +
-        尺寸一条龙）；现改为：位置由用户自己摆（程序一概不移动），尺寸可
-        由用户在设置页设定并在初始化时套用。区域标定是**比例坐标**，对
-        尺寸变化天然鲁棒，但尺寸漂移会让 OCR 精度与几何阈值退化——固定
-        尺寸保证标定时的阅读条件稳定。
-
-        配置 wechat_window_size：[w, h] 可见内容尺寸（物理像素）；
-        None/非法 = 不调整（保持用户当前尺寸）。
-        """
-        size = getattr(self, "wechat_window_size", None)
-        if not size:
-            logger.info("[窗口] 未设置固定窗口大小，保持当前尺寸（位置由用户自行摆放）")
-            return
-        hwnd = find_window_by_title("微信")
-        if not hwnd:
-            logger.warning("[窗口] 未找到微信窗口，跳过尺寸套用")
-            return
-        ensure_window_visible(hwnd)  # 最小化窗口无法有效改大小，先拉起
-        try:
-            if ctypes.windll.user32.IsZoomed(hwnd):
-                # 最大化先还原再改大小：SetWindowPos 对最大化窗口行为不可靠
-                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                time.sleep(0.3)
-        except Exception:
-            pass
-        try:
-            w, h = int(size[0]), int(size[1])
-        except (TypeError, ValueError, IndexError):
-            logger.warning(f"[窗口] wechat_window_size 非法（{size!r}），跳过套用")
-            return
-        if w < 200 or h < 200:
-            logger.warning(f"[窗口] wechat_window_size 过小（{w}x{h}），跳过套用")
-            return
-        if resize_window_visible(hwnd, w, h):
-            logger.info(f"[窗口] 微信窗口大小已套用：{w}x{h}（位置未改动）")
-        else:
-            logger.warning("[窗口] 微信窗口大小套用失败，保持当前尺寸")
 
     # ---------- 记忆（实现在 xiaoli_app.memory_store.MemoryStore；这里全部
     # 委托，保持既有调用形态——MemoryCompressor / CLI / 记忆管理页 / tests

@@ -1285,9 +1285,7 @@ function refreshSettings() {
   $("#cbWebSearch").checked = m.web_search_enabled !== false;
   $("#edWebProxy").value = m.web_proxy || "";
   $("#cbStateWatch").checked = !!m.state_watch_enabled;
-  $("#edWxW").value = m.wechat_window_size ? m.wechat_window_size[0] : "";
-  $("#edWxH").value = m.wechat_window_size ? m.wechat_window_size[1] : "";
-  refreshWxSize();   // 当前窗口实际尺寸要现读（异步，不阻塞其它设置填充）
+  $("#edNickname").value = m.bot_nickname || "小漓";
   $("#followSystem").checked = !!u.follow_system;
   $$("#trigManageSeg button").forEach((b) =>
     b.classList.toggle("active", b.dataset.v === (m.model_trigger_manage || "off")));
@@ -1424,6 +1422,12 @@ $("#cbWebSearch").addEventListener("change", async (e) => {
 $("#btnSaveProxy").addEventListener("click", async () => {
   const r = await API.save_config({ web_proxy: $("#edWebProxy").value.trim() });
   toast(r.ok ? "代理已保存并即时生效 ✓" : "保存失败", r.ok ? "ok" : "err");
+});
+$("#btnSaveNickname").addEventListener("click", async () => {
+  const r = await API.set_nickname($("#edNickname").value);
+  if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
+  $("#edNickname").value = r.nickname;
+  toast(`微信名称已改为「${r.nickname}」，立即生效 ✓（群里 @ 它就能找到小漓）`, "ok");
 });
 $("#cbStateWatch").addEventListener("change", async (e) => {
   const r = await API.save_config({ state_watch_enabled: e.target.checked });
@@ -1753,7 +1757,7 @@ $("#btnOvrClear").addEventListener("click", async () => {
 });
 
 /* ============================================================
-   首启引导（第 1 步工作目录 → 第 2 步画面标定）
+   首启引导（工作目录 + 微信名称，一步完成）
    ============================================================ */
 async function showFirstRun() {
   const r = await API.first_run_defaults();
@@ -1773,7 +1777,7 @@ $("#frSave").addEventListener("click", async () => {
     $("#frMemory").textContent.trim(),
     $("#frNickname").value.trim());
   if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
-  await openCalib(true);
+  await finishFirstRun("欢迎，配置已就绪 ✓ 到「模型」页填入 API Key 即可开始");
 });
 async function finishFirstRun(msg) {
   closeModal();
@@ -1782,188 +1786,6 @@ async function finishFirstRun(msg) {
   if (cfg.ok) { S.ui = cfg.ui; S.misc = cfg.misc; refreshSettings(); }
 }
 
-/* ============================================================
-   微信画面标定（首启第 2 步 + 设置页「画面标定」共用）
-   两框（会话列表 / 聊天区）+ 分隔线，比例坐标存 calib.*，渲染时按
-   截图自然尺寸铺 SVG viewBox；保存由后端 derive_regions 派生三区域。
-   ============================================================ */
-const calib = {
-  W: 0, H: 0,
-  session: [0.09, 0.088, 0.418, 0.99],   // 比例 [l,t,r,b]
-  chat: [0.415, 0.039, 0.991, 0.834],
-  split: 0.055,                          // 标题分隔线 = 聊天区高度占比
-  drag: null, firstRun: false, ready: false,
-};
-const CALIB_MIN = 0.015;                 // 框最小边（比例）
-const SPLIT_LO = 0.02, SPLIT_HI = 0.85;  // 与后端 derive_regions 夹取一致
-
-async function openCalib(firstRun = false) {
-  // 打开过标定界面即视为「已提示」——首启第 2 步/设置页入口/升级提示的
-  // 「立即标定」共用这一处，新用户与升级用户都不会被重复打扰
-  API.region_calib_nudge_done();
-  calib.firstRun = firstRun;
-  calib.ready = false;
-  $("#calibSkip").hidden = !firstRun;
-  $("#calibVerify").hidden = true;
-  $("#calibVerify").innerHTML = "";
-  $("#calibStage").hidden = true;
-  $("#calibLoading").hidden = false;
-  $("#calibSave").disabled = true;
-  $("#calibWarn").hidden = true;
-  $("#calibHint").textContent = "正在截取微信窗口…（需微信在电脑端登录）";
-  openModal("modalCalib");
-  const r = await API.region_calib_start();
-  $("#calibLoading").hidden = true;
-  if (!r.ok) {
-    // 保险：微信没开/没登录完时给醒目提醒（不是只把文案塞进 hint）
-    $("#calibHint").textContent = "暂时截不到微信画面";
-    $("#calibWarn").textContent = r.error || "无法截取微信窗口";
-    $("#calibWarn").hidden = false;
-    return;
-  }
-  $("#calibWarn").hidden = true;
-  calib.W = r.width; calib.H = r.height;
-  calib.session = r.prefill.session_box.map(Number);
-  calib.chat = r.prefill.chat_box.map(Number);
-  calib.split = Number(r.prefill.split) || 0.055;
-  $("#calibImg").src = r.image;
-  $("#calibHint").textContent = r.calibrated
-    ? "已加载你上次的标定，可微调后重新保存验证。"
-    : "两个框已按内置默认预填——窗口布局标准的话直接「保存并验证」即可；不齐就拖到对准。";
-  $("#calibStage").hidden = false;
-  $("#calibSave").disabled = false;
-  calib.ready = true;
-  requestAnimationFrame(renderCalib);
-}
-
-function renderCalib() {
-  const svg = $("#calibSvg");
-  if (!svg.clientWidth) return;
-  const [sl, st, sr, sb] = calib.session, [cl, ct, cr, cb] = calib.chat;
-  const W = calib.W, H = calib.H;
-  const lineY = ct + calib.split * (cb - ct);
-  const scale = W / svg.clientWidth;      // 自然像素 / 显示像素
-  const hr = Math.max(5, 7 * scale), hs = Math.max(3, 1.6 * scale);
-  const sw = Math.max(1.5, 2 * scale);
-  const box = (b, color, fill) =>
-    `<rect x="${b[0] * W}" y="${b[1] * H}" width="${(b[2] - b[0]) * W}" height="${(b[3] - b[1]) * H}"
-       fill="${fill}" style="stroke:${color}" stroke-width="${sw}" rx="3"/>`;
-  const handles = (b, color) =>
-    [[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]].map(([x, y]) =>
-      `<circle cx="${x * W}" cy="${y * H}" r="${hr}" fill="#fff" style="stroke:${color}" stroke-width="${hs}"/>`).join("");
-  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  svg.innerHTML =
-    `<rect x="${cl * W}" y="${ct * H}" width="${(cr - cl) * W}" height="${(lineY - ct) * H}"
-       fill="rgba(96,165,250,.16)"/>`
-    + box(calib.session, "var(--p1)", "rgba(58,110,255,.08)")
-    + box(calib.chat, "var(--success)", "none")
-    + `<line x1="${cl * W}" y1="${lineY * H}" x2="${cr * W}" y2="${lineY * H}"
-       stroke="#f59e0b" stroke-width="${sw}" stroke-dasharray="${6 * scale},${4 * scale}"/>`
-    + handles(calib.session, "var(--p1)") + handles(calib.chat, "var(--success)");
-}
-
-function calibPos(ev) {
-  const r = $("#calibSvg").getBoundingClientRect();
-  return [(ev.clientX - r.left) / r.width, (ev.clientY - r.top) / r.height];
-}
-
-function calibHit(x, y) {
-  const svg = $("#calibSvg");
-  const hitR = 12 / Math.max(1, svg.clientWidth);  // 手柄命中半径（比例）
-  const [cl, ct, cr, cb] = calib.chat;
-  const lineY = ct + calib.split * (cb - ct);
-  if (x >= cl && x <= cr && Math.abs(y - lineY) < 8 / Math.max(1, svg.clientHeight))
-    return { kind: "line" };
-  for (const name of ["chat", "session"]) {
-    const [l, t, r, b] = calib[name];
-    for (const [cx, cy, pos] of [[l, t, "tl"], [r, t, "tr"], [l, b, "bl"], [r, b, "br"]])
-      if (Math.hypot(x - cx, y - cy) < hitR)
-        return { kind: "resize", target: name, corner: pos };
-  }
-  const [sl, st, sr, sb] = calib.session;
-  if (x > sl && x < sr && y > st && y < sb) return { kind: "move", target: "session" };
-  if (x > cl && x < cr && y > ct && y < cb) return { kind: "move", target: "chat" };
-  return null;
-}
-
-function onCalibDown(ev) {
-  if (!calib.ready || ev.button !== 0) return;
-  const [x, y] = calibPos(ev);
-  const hit = calibHit(x, y);
-  if (!hit) return;
-  ev.preventDefault();
-  calib.drag = {
-    hit, x0: x, y0: y,
-    box0: hit.target ? calib[hit.target].slice() : null,
-    split0: calib.split,
-  };
-  $("#calibSvg").setPointerCapture(ev.pointerId);
-}
-
-function onCalibMove(ev) {
-  if (!calib.ready) return;
-  const svg = $("#calibSvg");
-  const [x, y] = calibPos(ev);
-  if (!calib.drag) {
-    const hit = calibHit(x, y);
-    svg.style.cursor = !hit ? "default"
-      : hit.kind === "line" ? "ns-resize"
-      : hit.kind === "move" ? "move" : "nwse-resize";
-    return;
-  }
-  const { hit, x0, y0, box0, split0 } = calib.drag;
-  const dx = x - x0, dy = y - y0;
-  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
-  if (hit.kind === "line") {
-    const [, ct, , cb] = calib.chat;
-    calib.split = clamp((split0 * (cb - ct) + dy) / (cb - ct), SPLIT_LO, SPLIT_HI);
-  } else if (hit.kind === "move") {
-    const w = box0[2] - box0[0], h = box0[3] - box0[1];
-    const l = clamp(box0[0] + dx, 0, 1 - w), t = clamp(box0[1] + dy, 0, 1 - h);
-    calib[hit.target] = [l, t, l + w, t + h];
-  } else {
-    const b = box0.slice();
-    if (hit.corner.includes("l")) b[0] = clamp(box0[0] + dx, 0, box0[2] - CALIB_MIN);
-    if (hit.corner.includes("r")) b[2] = clamp(box0[2] + dx, box0[0] + CALIB_MIN, 1);
-    if (hit.corner.includes("t")) b[1] = clamp(box0[1] + dy, 0, box0[3] - CALIB_MIN);
-    if (hit.corner.includes("b")) b[3] = clamp(box0[3] + dy, box0[1] + CALIB_MIN, 1);
-    calib[hit.target] = b;
-  }
-  renderCalib();
-}
-
-function onCalibUp(ev) {
-  if (calib.drag) {
-    calib.drag = null;
-    try { $("#calibSvg").releasePointerCapture(ev.pointerId); } catch (_) { /* 已释放 */ }
-  }
-}
-
-$("#calibSvg").addEventListener("pointerdown", onCalibDown);
-$("#calibSvg").addEventListener("pointermove", onCalibMove);
-$("#calibSvg").addEventListener("pointerup", onCalibUp);
-$("#calibSvg").addEventListener("pointercancel", onCalibUp);
-
-/* ---------- 微信窗口固定大小（只改大小，不移动位置） ---------- */
-async function refreshWxSize() {
-  const r = await API.wechat_window_info();
-  if (!r || !r.ok) return;
-  $("#edWxW").value = r.configured ? r.configured[0] : "";
-  $("#edWxH").value = r.configured ? r.configured[1] : "";
-  $("#wxSizeNow").textContent = r.current
-    ? `（当前窗口 ${r.current[0]}×${r.current[1]}）`
-    : "（微信未打开，暂时读不到当前尺寸）";
-}
-$("#btnWxSizeRead").addEventListener("click", async () => {
-  const r = await API.wechat_window_info();
-  if (!r || !r.ok || !r.current) {
-    toast((r && r.error) || "未检测到微信窗口——请先登录微信", "err");
-    return;
-  }
-  $("#edWxW").value = r.current[0];
-  $("#edWxH").value = r.current[1];
-  toast(`已读取当前窗口 ${r.current[0]}×${r.current[1]}，点「保存并应用」生效`, "ok");
-});
 /* ---------- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） ---------- */
 async function openTianshuGuide() {
   openModal("modalTianshuGuide");
@@ -1989,20 +1811,6 @@ $("#tgLater").addEventListener("click", () => {
   toast("任务桥保持开启；天枢没配好前，任务会被投递但没人处理——随时可到「设置 → 任务桥 → 天枢配置引导」补配置", "warn");
 });
 
-/* ---------- 升级用户一次性标定提示（新用户走首启第 2 步，不弹） ---------- */
-async function maybeCalibNudge() {
-  const r = await API.region_calib_nudge_info();
-  if (!r || !r.ok || !r.show) return;
-  openModal("modalCalibNudge");
-}
-$("#cnGo").addEventListener("click", () => {
-  closeModal();
-  openCalib(false);
-});
-$("#cnLater").addEventListener("click", () => {
-  closeModal();
-  toast("随时可在「设置 → 画面标定」完成；不标定会用内置默认区域，布局不一致时可能读错消息", "warn");
-});
 $("#tgInstall").addEventListener("click", async () => {
   const r = await API.install_tianshu();
   if (!r || !r.ok) { toast((r && r.error) || "安装启动失败", "err"); return; }
@@ -2024,53 +1832,6 @@ $("#tgDone").addEventListener("click", async () => {
   toast("天枢已就绪 ✓ 已开启全自动模式，任务桥可以放心使用", "ok");
   const cfg = await API.get_config();
   if (cfg.ok) { S.ui = cfg.ui; S.misc = cfg.misc; refreshSettings(); }
-});
-
-$("#btnWxSizeSave").addEventListener("click", async () => {
-  const w = parseInt($("#edWxW").value, 10) || 0;
-  const h = parseInt($("#edWxH").value, 10) || 0;
-  if (!w && !h) {
-    const r = await API.set_wechat_window_size(0, 0);
-    if (!r || !r.ok) { toast((r && r.error) || "保存失败", "err"); return; }
-    toast("已清除固定窗口大小（初始化不再调整窗口）", "ok");
-    refreshWxSize();
-    return;
-  }
-  const r = await API.set_wechat_window_size(w, h);
-  if (!r || !r.ok) { toast((r && r.error) || "保存失败", "err"); return; }
-  toast(r.applied
-      ? `已保存并套用：${r.configured[0]}×${r.configured[1]}（窗口位置未动）`
-      : (r.error || "已保存，初始化时自动套用"),
-    r.applied ? "ok" : "warn");
-  refreshWxSize();
-});
-$("#calibReshoot").addEventListener("click", () => openCalib(calib.firstRun));
-$("#calibSkip").addEventListener("click", () =>
-  finishFirstRun("已跳过标定（使用内置默认区域）；消息读不准时到 设置 → 画面标定 重标"));
-$("#btnCalib").addEventListener("click", () => openCalib(false));
-$("#calibSave").addEventListener("click", async () => {
-  if (!calib.ready) return;
-  $("#calibSave").disabled = true;
-  try {
-    const r = await API.region_calib_save(calib.session, calib.chat, calib.split);
-    if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
-    const v = await API.region_calib_verify();
-    if (v.ok) {
-      $("#calibVerify").innerHTML = v.items.map((i) =>
-        `<div class="calib-item ${i.ok ? "ok" : "bad"}"><span class="calib-mark">${i.ok ? "✓" : "✗"}</span><b>${esc(i.label)}</b><span class="calib-detail">${esc(i.detail)}</span></div>`).join("");
-      $("#calibVerify").hidden = false;
-    }
-    const okAll = v.ok && v.items.every((i) => i.ok);
-    if (calib.firstRun) {
-      finishFirstRun(okAll ? "标定完成，配置已就绪 ✓ 到「模型」页填入 API Key 即可开始"
-                           : "已保存；有探针未通过可稍后在设置页重标");
-    } else {
-      toast(r.hot ? "已保存并热生效 ✓" : "已保存 ✓（引擎下次初始化时生效）",
-            okAll ? "ok" : "warn");
-    }
-  } finally {
-    $("#calibSave").disabled = !calib.ready;
-  }
 });
 
 /* ============================================================
@@ -2192,5 +1953,4 @@ requestAnimationFrame(() =>
     toast("没检测到微信窗口——请先打开并登录电脑端微信，小漓才能开始工作", "warn");
   }
   if (cfg.first_run_needed) showFirstRun();
-  else maybeCalibNudge();
 })();
