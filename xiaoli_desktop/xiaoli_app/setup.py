@@ -1,22 +1,21 @@
 # -*- coding: utf-8 -*-
-"""环境检测与一键安装：微信/天枢/首轮提示词检测 + 天枢 zip 流式下载安全解压。
+"""环境检测与一键安装：微信/天枢/首轮提示词检测 + 天枢 CLI 一键安装。
 
-面向小白用户：软件内检测依赖 → 缺失时一键下载安装（进度可视化）。
+面向小白用户：软件内检测依赖 → 缺失时一键安装（失败原因原样透出到界面）。
+天枢只认 CLI（`rivet` 命令，npm install -g tianshu-tui）：早期实现下载 GitHub
+源码 zip 解压到用户目录，但源码包没有可执行文件、检测又必然判「未安装」，
+表现为「安装完成但卡片仍显示未安装」——改为 CLI 安装；桌面端（Electron）
+检测随后也整体移除：任务桥全链路（启动 / 定位窗口 / 发提示词与 /yes）都走
+CLI，桌面端装不装与链路无关，卡片显示它只会误导。
 """
-import json
 import logging
 import os
+import shutil
 import subprocess
-import tempfile
 import time
-import zipfile
-
-import requests
 
 logger = logging.getLogger("xiaoli")
 
-DEFAULT_TIANSHU_URL = "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main"
-TIANSHU_EXE = "tianshu-desktop.exe"
 # 微信窗口判据已收归 wx_backend.visual_win32（进程名优先、标题严格相等）——
 # 环境检查与运行期共用同一个 find_wechat_window，避免"卡片说检测到了、
 # 运行期认的是另一个窗口"。这里只留详情文案的截断长度。
@@ -386,30 +385,18 @@ def check_environment(cfg):
             detail += f"；进程检测失败: {e}"
     out["wechat"] = {"ok": wechat_ok, "detail": detail}
 
-    # ---- 天枢：CLI(rivet) 或桌面端任一存在即就绪；配置目录 → 自动探测 → 窗口 ----
+    # ---- 天枢：只认 CLI（rivet 命令，npm 全局安装 tianshu-tui 提供）----
+    # 桌面端检测已移除：小漓整套任务桥都走 CLI（launch_tianshu / resolve_cli_window
+    # / 发提示词与 /yes），桌面端装不装与链路无关；旧实现把「桌面端 exe 存在」也算
+    # 就绪，卡片会把「D:\AI\Tianshu\tianshu-desktop.exe」当状态显示（用户实机反馈），
+    # 反而让人以为任务桥用的是桌面端。
     import shutil
     rivet_ok = bool(shutil.which("rivet") or shutil.which("rivet.cmd"))
-    tianshu_dir = (cfg.get("tianshu_install_dir") or "").strip()
-    if tianshu_dir:
-        # 显式指定安装目录：只认该目录（避免用户已配置却误判自动探测）
-        exe = os.path.join(tianshu_dir, TIANSHU_EXE)
-        desktop_ok = os.path.isfile(exe)
-        detail_desktop = f"桌面端：{exe}" if desktop_ok else f"桌面端未找到：{tianshu_dir}"
-    else:
-        found = detect_tianshu_dir()
-        if found:
-            desktop_ok, detail_desktop = True, f"桌面端：{os.path.join(found, TIANSHU_EXE)}"
-        else:
-            desktop_ok, detail_desktop = False, f"桌面端未找到（{TIANSHU_EXE}）"
-    tianshu_ok = rivet_ok or desktop_ok
-    parts = []
     if rivet_ok:
-        parts.append("CLI(rivet) ✓")
-    if desktop_ok:
-        parts.append(detail_desktop)
-    if not parts:
-        parts.append("未安装（CLI: npm install -g tianshu-tui；或桌面端一键安装）")
-    detail = "；".join(parts)
+        detail = "CLI(rivet) ✓"
+    else:
+        detail = "未安装（点卡片上的「一键安装」自动执行 " \
+                 "npm install -g tianshu-tui；也可手动安装）"
     tianshu_win = ""
     try:
         for name in _list_windows():
@@ -418,7 +405,7 @@ def check_environment(cfg):
                 break
     except Exception:
         pass
-    out["tianshu"] = {"ok": tianshu_ok, "detail": detail, "window": tianshu_win}
+    out["tianshu"] = {"ok": rivet_ok, "detail": detail, "window": tianshu_win}
 
     # ---- 首轮提示词：内置模板兜底，自定义文件优先 ----
     fp = (cfg.get("first_prompt_path") or "").strip()
@@ -467,19 +454,6 @@ def ensure_bridge_readme(tasks_dir):
         return False
 
 
-def detect_tianshu_dir():
-    """自动探测天枢安装目录（常见位置）。"""
-    candidates = [
-        os.path.join(os.path.expanduser("~"), "Tianshu"),
-        r"D:\AI\Tianshu",
-        r"C:\Tianshu",
-    ]
-    for c in candidates:
-        if os.path.isfile(os.path.join(c, TIANSHU_EXE)):
-            return c
-    return None
-
-
 def launch_tianshu(cfg):
     """启动天枢 CLI（rivet）：在用户选的工作间（tasks_dir）下开新 cmd 窗口运行 rivet。
 
@@ -523,56 +497,35 @@ def launch_tianshu(cfg):
         return False, f"启动天枢 CLI 失败：{e}"
 
 
-def find_tianshu_dir(root):
-    """在 root 下递归（深度≤3）找 tianshu-desktop.exe 所在目录。"""
-    for dirpath, dirnames, filenames in os.walk(root):
-        depth = dirpath[len(root):].count(os.sep)
-        if depth > 3:
-            dirnames[:] = []
-            continue
-        if TIANSHU_EXE in filenames:
-            return dirpath
-    return None
+def install_tianshu_cli(timeout=600):
+    """自动安装天枢 CLI：npm install -g tianshu-tui。返回 (ok, detail)。
 
+    旧实现（zip 源码下载）已删除：zip 里没有可执行文件，检测（rivet 命令 /
+    桌面端 exe）必然判未安装，用户看到「安装完成 + 卡片未安装」。CLI 安装
+    的成败判据就是检测用的同一条命令（rivet 由 npm 全局 bin 提供），
+    装完即就绪。
 
-def install_tianshu(dest_dir, progress_cb=None, url=DEFAULT_TIANSHU_URL, timeout=120):
-    """流式下载天枢 zip → 安全解压到 dest_dir。返回含 exe 的目录。
-
-    progress_cb(pct): 下载进度回调 0..100（content-length 缺失时按分块计数）。
-    """
-    resp = requests.get(url, stream=True, timeout=timeout)
-    resp.raise_for_status()
-    total = int(resp.headers.get("content-length") or 0)
-    tmp_zip = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
-    tmp_zip.close()
-    downloaded = 0
+    detail 在失败时透出到界面（前端 toast）：npm 缺失给出安装指引；npm
+    非零退出带 stderr/stdout 尾部若干行（编码按 _decode_process_bytes 兜底，
+    中文 Windows 的 npm 输出是 GBK）；超时给出用时说明。"""
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if not npm:
+        return False, ("未检测到 npm 命令——请先安装 Node.js"
+                       "（https://nodejs.org/ 下载 LTS 版）后重试")
     try:
-        with open(tmp_zip.name, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
-                if progress_cb is not None and total:
-                    progress_cb(min(100, int(downloaded * 100 / total)))
-        # 下载完成（可能无 content-length 或分块误差）→ 强制收尾 100%
-        if progress_cb is not None:
-            progress_cb(100)
-        os.makedirs(dest_dir, exist_ok=True)
-        with zipfile.ZipFile(tmp_zip.name) as zf:
-            for m in zf.infolist():
-                norm = os.path.normpath(m.filename)
-                # 目录穿越 = normpath 后首段为 ".."（..\evil.txt / ../evil.txt / 裸 ..）；
-                # 不能用 startswith("..")——会误拒 ..foo.txt 类合法双点文件名
-                if os.path.isabs(norm) or norm == ".." or norm.startswith(".." + os.sep):
-                    raise ValueError(f"拒绝非法压缩成员: {m.filename}")
-            zf.extractall(dest_dir)
-    finally:
-        try:
-            os.unlink(tmp_zip.name)
-        except OSError:
-            pass
-    return find_tianshu_dir(dest_dir) or dest_dir
+        r = subprocess.run(
+            [npm, "install", "-g", "tianshu-tui"],
+            capture_output=True, timeout=timeout,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return False, f"npm 安装超时（{timeout} 秒）——请检查网络后重试"
+    except OSError as e:
+        return False, f"npm 启动失败：{e}"
+    if r.returncode == 0:
+        return True, "天枢 CLI 安装完成（npm install -g tianshu-tui）"
+    lines = _decode_process_bytes(r.stderr or r.stdout or b"")
+    tail = " / ".join(l.strip() for l in lines if l.strip())[-300:]
+    return False, f"npm 安装失败（退出码 {r.returncode}）" + (f"：{tail}" if tail else "")
 
 
 def _send_trigger_to_window(title, command, hold=0.5, enter_times=1):
@@ -959,11 +912,16 @@ def run_first_run_guide(cfg, parent=None, cfg_path=None,
     # ① CLI 检测/安装
     rivet = detect_fn()
     if not rivet:
-        ok_install = (install_fn() if install_fn is not None else _install_tianshu_cli())
+        if install_fn is not None:
+            ok_install = bool(install_fn())
+            install_detail = ""
+        else:
+            ok_install, install_detail = install_tianshu_cli()
         if not ok_install:
+            why = f"原因：{install_detail}\n\n" if install_detail else ""
             _guide_dialog(
                 parent, dialog_fn, "未找到天枢 CLI",
-                "未检测到 rivet 命令，自动安装失败。\n"
+                f"未检测到 rivet 命令，自动安装失败。\n{why}"
                 "请手动执行：npm install -g tianshu-tui\n"
                 "安装完成后重新打开本程序。")
             return False

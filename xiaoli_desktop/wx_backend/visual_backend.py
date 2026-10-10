@@ -43,8 +43,8 @@ from .models import MessageType, WeChatMessage
 from .visual_win32 import (
     capture_window, default_right_half_rect, dwm, ensure_window_visible,
     find_wechat_window, find_window_by_title, position_window,
-    position_window_visible, resize_window_visible, u32,
-    visible_frame_margins, visible_window_size, window_rect, wt,
+    position_window_visible, pull_window_into_view, resize_window_visible,
+    u32, visible_frame_margins, visible_window_size, window_rect, wt,
 )
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
@@ -74,8 +74,8 @@ _THEME_LABELS = {"light": "浅色", "dark": "深色"}
 # 这里按主题给初值是为了首帧就准，不依赖容差兜）。
 _SELECTED_ROW_COLOR = {"dark": (13, 168, 105), "light": (21, 172, 112)}
 
-# 强制窗口尺寸的三个闸（详见 VisualBackend.enforce_window_size）：
-# 容差管「多大算不一致」，复查间隔管「多久查一次」，静置管「刚调完等多久
+# 强制窗口几何（尺寸+位置）的三个闸（详见 VisualBackend.enforce_window_geometry）：
+# 容差管「多大偏移算不一致」，复查间隔管「多久查一次」，静置管「刚调完等多久
 # 再查」——调完立刻复查会读到微信重绘前的过渡尺寸，白调一次。
 _SIZE_TOL = 4              # 像素：渲染取整/贴边吸附不触发调整
 _SIZE_CHECK_INTERVAL = 1.0  # 秒：复查节流（0.5s 轮询下约每秒一次）
@@ -350,7 +350,7 @@ class VisualBackend:
         # 实测色（深色 (13,168,105) / 浅色 (21,172,112)）；点击成功后
         # _learn_selected_row_color 会重采样覆盖，主题切换时回到该主题初值。
         self._selected_row_color: tuple[int, int, int] = _SELECTED_ROW_COLOR["dark"]
-        # 强制窗口尺寸的复查节流时间戳（见 enforce_window_size）
+        # 强制窗口几何的复查节流时间戳（见 enforce_window_geometry）
         self._size_check_at: float = 0.0
         # 三区域恒为模块内置常量（用户自定义标定已撤回，见文件头注释）
         self._apply_regions()
@@ -361,26 +361,35 @@ class VisualBackend:
         self._message_region = _MESSAGE_REGION_RATIO
         self._title_region = _TITLE_REGION_RATIO
 
-    # ---- 强制窗口尺寸（用户自定义尺寸/区域已撤回，改为程序强制）----
+    # ---- 强制窗口几何（尺寸强制 + 出屏救援；位置不钉死）----
 
-    def enforce_window_size(self, force: bool = False, now: float | None = None) -> bool:
-        """把微信窗口强制回标定尺寸 `WINDOW_SIZE`（只改大小，不动位置）。
+    def enforce_window_geometry(self, force: bool = False,
+                                now: float | None = None) -> bool:
+        """把微信窗口钉回标定尺寸 `WINDOW_SIZE`，并保证它完整可见。
 
-        为什么强制：三区域比例与全部像素判据（头像窄带 = 区域宽 2%~14%、期望
-        头像高 = 区域高÷18、气泡/媒体闸同样是区域比例）都按那台 1300x1610 的
-        窗口标定——窗口尺寸一变这些常量整体错位（真机事故：窗口拉大后聊天区
-        左边界从 0.415 挪到 0.246，消息区左沿切进聊天区 → 整列头像检不出、
-        消息读不到）。用户侧已无尺寸/区域设置，改为程序侧保证：
+        为什么强制尺寸：三区域比例与全部像素判据（头像窄带 = 区域宽 2%~14%、
+        期望头像高 = 区域高÷18、气泡/媒体闸同样是区域比例）都按那台
+        1300x1610 的窗口标定——窗口尺寸一变这些常量整体错位（真机事故：
+        窗口拉大后聊天区左边界从 0.415 挪到 0.246，消息区左沿切进聊天区
+        → 整列头像检不出、消息读不到）。
 
-        - `connect()` 里 `force=True` 调一次（初始化即对齐）；
+        为什么位置只救援不钉死：点击是屏幕绝对坐标，窗口（部分）移出屏幕后
+        pyautogui 点到屏幕外（切会话、点图片、发送全失灵），所以出屏必须拉回
+        （`pull_window_into_view`，按窗口所在显示器工作区、可见内容口径）；
+        但屏幕内的位置由用户说了算——历史缺陷：曾按「启动瞬间锚定 + 之后
+        钉死」实现，启动时窗口恰好被用户挪在旁边（348,0）就把那当成用户的
+        位置，用户想把窗口拖回右半屏被拽回 13 次（真机日志）。现在可见范围
+        内的移动一概不管，只有越出工作区才出手。
+
+        - `connect()` 里 `force=True` 调一次（对齐尺寸 + 出屏救援）；
         - 消息监听每轮（`iter_unread_sessions`）与每次截图分析入口
-          （`analyze_window` / `get_messages`）复查一次：发现被改动就调回。
+          （`analyze_window` / `get_messages`）复查一次。
 
         节流：复查间隔 `_SIZE_CHECK_INTERVAL`，调整后静置 `_SIZE_SETTLE`
         再复查（等微信重绘，避免和用户拖动打架打成一串调整）。容差
-        `_SIZE_TOL` 像素（渲染取整/贴边吸附不折腾）。最大化窗口先 SW_RESTORE
-        再改大小（SetWindowPos 对最大化窗口行为不可靠）。返回是否发生了调整。
-        """
+        `_SIZE_TOL` 像素（渲染取整/贴边吸附不折腾）。最大化窗口先
+        SW_RESTORE 再改（SetWindowPos 对最大化窗口行为不可靠）。
+        返回是否发生了调整。"""
         # getattr 兜底：测试常用 VisualBackend.__new__ 直构桩（不走 __init__），
         # 本方法挂在监听/分析热路径上，不能因为桩缺属性就抛异常
         if getattr(self, "_hwnd", None) is None or getattr(self, "_closed", False):
@@ -393,21 +402,29 @@ class VisualBackend:
         if not rect:
             return False
         want_w, want_h = WINDOW_SIZE
-        if abs(rect[2] - want_w) <= _SIZE_TOL and abs(rect[3] - want_h) <= _SIZE_TOL:
+        touched = []
+        if abs(rect[2] - want_w) > _SIZE_TOL \
+                or abs(rect[3] - want_h) > _SIZE_TOL:
+            try:
+                if u32.IsZoomed(self._hwnd):
+                    u32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
+                    time.sleep(0.3)
+            except Exception:
+                pass
+            # 只改尺寸，位置保持当前左上角（不钉死）
+            if not position_window(self._hwnd, rect[0], rect[1], want_w, want_h):
+                logger.warning("[窗口] 强制窗口尺寸失败（句柄异常？），下一轮重试")
+                return False
+            touched.append(f"尺寸 {want_w}x{want_h}（原 {rect[2]}x{rect[3]}）")
+            rect = window_rect(self._hwnd) or rect
+        # 出屏救援：可见内容越出工作区才拉回（完整可见时不做任何事）
+        final = pull_window_into_view(self._hwnd)
+        if final is not None and final != (rect[0], rect[1]):
+            touched.append(f"位置拉回可见范围 {final}（原 {rect[0]},{rect[1]}）")
+        if not touched:
             return False
-        try:
-            if u32.IsZoomed(self._hwnd):
-                u32.ShowWindow(self._hwnd, 9)  # SW_RESTORE
-                time.sleep(0.3)
-        except Exception:
-            pass
-        ok = position_window(self._hwnd, rect[0], rect[1], want_w, want_h)
-        if not ok:
-            logger.warning("[窗口] 强制窗口尺寸失败（句柄异常？），下一轮重试")
-            return False
-        logger.info(f"[窗口] 微信窗口已强制为标定尺寸 {want_w}x{want_h}"
-                    f"（原 {rect[2]}x{rect[3]}，位置未改动）")
-        # 尺寸一变，上一帧截图（及其坐标系）作废：丢弃，免得拿旧尺寸的帧算坐标
+        logger.info("[窗口] 微信窗口已强制回标定几何：" + "、".join(touched))
+        # 几何一变，上一帧截图（及其坐标系）作废：丢弃，免得拿旧坐标算点位
         self._last_shot = None
         self._size_check_at = t + _SIZE_SETTLE
         return True
@@ -456,11 +473,12 @@ class VisualBackend:
         if hwnd is None:
             raise BackendUnavailableError("未找到微信主窗口（请确认微信已登录并打开）")
         self._hwnd = hwnd
-        # 窗口尺寸：程序既不移动位置，也不再交给用户设置——统一强制为标定
-        # 尺寸（WINDOW_SIZE，三区域与像素判据都按它标定）。这里先对齐一次，
-        # 之后每轮消息监听与每次分析入口复查（enforce_window_size）。
+        # 窗口几何：尺寸不再交给用户设置——统一强制为标定尺寸（WINDOW_SIZE，
+        # 三区域与像素判据都按它标定）；位置由用户自由摆放，只在（部分）移出
+        # 屏幕导致点击失效时拉回可见范围。这里先对齐一次，之后每轮消息监听
+        # 与每次分析入口复查（enforce_window_geometry）。
         self._ensure_not_iconic()
-        self.enforce_window_size(force=True)
+        self.enforce_window_geometry(force=True)
         shot = capture_window(hwnd)
         if shot is None:
             raise BackendUnavailableError("PrintWindow 截图失败")
@@ -739,7 +757,7 @@ class VisualBackend:
             return  # 最小化态截图是占位垃圾（真机 276x45），恢复后下一轮再扫
         # 强制窗口尺寸：监听每轮复查一次（用户拖动/最大化/吸附都会在此被拉回，
         # 因为三区域与像素判据都按 WINDOW_SIZE 标定）
-        self.enforce_window_size()
+        self.enforce_window_geometry()
         shot = self._refresh(force=True, foreground=False)  # 红圈轮询：后台静默截图，不置前打断用户
         if shot is None:
             return
@@ -1029,7 +1047,7 @@ class VisualBackend:
         """
         # 强制窗口尺寸：分析前复查（处理事件途中被改尺寸 → 本轮就拉回，
         # 免得按旧尺寸算出的坐标写进记忆/发送）
-        self.enforce_window_size()
+        self.enforce_window_geometry()
         if assume_switched and (chat is None or self._current_chat == chat):
             # 诊断行降 DEBUG：每个含文件/媒体的事件跑两遍读取管线（10s 防抖），
             # INFO 级会刷爆前端日志（bot_run.log）；排障看 bot.log 全量
@@ -1523,7 +1541,7 @@ class VisualBackend:
         }
         """
         # 强制窗口尺寸：分析前复查（三区域/头像判据都按 WINDOW_SIZE 标定）
-        self.enforce_window_size()
+        self.enforce_window_geometry()
         if not assume_switched:
             self._switch_chat(chat)
         # 纯像素分析（本函数不读标题）。事件内 OCR 预算：会话身份与群聊标记由

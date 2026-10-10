@@ -90,34 +90,26 @@ class TestGuideOpen(_BridgeBase):
 
 
 class TestGuideFinish(_BridgeBase):
-    def test_finish_sends_prompt_then_marks_guided(self):
+    """「我已配置完成」= 只发 /yes + 关窗（与引导文案承诺一致）。
+
+    真机反馈：这里曾先发一遍首轮提示词（832 字任务桥协议），用户看到一大段
+    文本被粘进刚配好的 CLI，以为程序发错了。首轮提示词归属「引擎初始化完成
+    时后台自动发一次」+ 首页「重发一次」；而本流程紧接着关窗（进程树被杀），
+    在这里发等于发进一个马上被销毁的会话。"""
+
+    def test_finish_sends_yes_only_then_marks_guided(self):
         with mock.patch.object(setup, "find_cli_window", return_value="npm prefix"):
-            with mock.patch.object(setup, "build_first_prompt",
-                                   return_value="协议文本") as bf:
-                with mock.patch.object(setup, "send_prompt_to_tianshu",
-                                       return_value=True) as sp:
+            with mock.patch.object(setup, "build_first_prompt") as bf:
+                with mock.patch.object(setup, "send_prompt_to_tianshu") as sp:
                     with mock.patch.object(setup, "send_yes_and_close",
                                            return_value=True) as sy:
                         r = self.bridge.tianshu_guide_finish()
         self.assertTrue(r["ok"])
         self.assertTrue(self.bridge.ctx.cfg["tianshu_guided"])
         self.save.assert_called_once()
-        bf.assert_called_once_with(self.bridge.ctx.cfg)
-        sp.assert_called_once_with("协议文本", "npm prefix")
-        sy.assert_called_once_with("npm prefix")
-
-    def test_prompt_failure_does_not_block_guide(self):
-        """首轮提示词发送失败不阻塞引导（首页「重发一次」可补）。"""
-        with mock.patch.object(setup, "find_cli_window", return_value="npm prefix"):
-            with mock.patch.object(setup, "build_first_prompt",
-                                   return_value="协议文本"):
-                with mock.patch.object(setup, "send_prompt_to_tianshu",
-                                       side_effect=RuntimeError("boom")):
-                    with mock.patch.object(setup, "send_yes_and_close",
-                                           return_value=True):
-                        r = self.bridge.tianshu_guide_finish()
-        self.assertTrue(r["ok"])
-        self.assertTrue(self.bridge.ctx.cfg["tianshu_guided"])
+        sy.assert_called_once_with("npm prefix")     # 只发 /yes + 关窗
+        sp.assert_not_called()                        # 不发首轮提示词
+        bf.assert_not_called()
 
     def test_finish_without_window_errors(self):
         with mock.patch.object(setup, "find_cli_window", return_value=None):
@@ -132,11 +124,9 @@ class TestGuideFinish(_BridgeBase):
 
     def test_finish_send_failure_not_marked(self):
         with mock.patch.object(setup, "find_cli_window", return_value="npm prefix"):
-            with mock.patch.object(setup, "send_prompt_to_tianshu",
-                                   return_value=True):
-                with mock.patch.object(setup, "send_yes_and_close",
-                                       return_value=False):
-                    r = self.bridge.tianshu_guide_finish()
+            with mock.patch.object(setup, "send_yes_and_close",
+                                   return_value=False):
+                r = self.bridge.tianshu_guide_finish()
         self.assertFalse(r["ok"])
         self.assertNotIn("tianshu_guided", self.bridge.ctx.cfg)
         self.save.assert_not_called()
