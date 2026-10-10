@@ -42,9 +42,10 @@ from . import BackendUnavailableError
 from .models import MessageType, WeChatMessage
 from .visual_win32 import (
     capture_window, default_right_half_rect, dwm, ensure_window_visible,
-    find_wechat_window, find_window_by_title, position_window,
-    position_window_visible, pull_window_into_view, resize_window_visible,
-    u32, visible_frame_margins, visible_window_size, window_rect, wt,
+    find_wechat_window, find_window_by_title, monitor_work_area,
+    position_window, position_window_visible, pull_window_into_view,
+    resize_window_visible, u32, visible_frame_margins, visible_window_size,
+    window_rect, wt,
 )
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
@@ -58,7 +59,7 @@ from .visual_badge import (
 )
 from .visual_regions import (
     _MESSAGE_REGION_RATIO, _SESSION_REGION_RATIO,
-    _TITLE_REGION_RATIO, WINDOW_SIZE, parse_title,
+    _TITLE_REGION_RATIO, WINDOW_SIZE, parse_title, regions_for_window,
 )
 from .voice_channel import (
     _VoiceChannel, _capsule_green_count, _get_voice_channel,
@@ -80,6 +81,9 @@ _SELECTED_ROW_COLOR = {"dark": (13, 168, 105), "light": (21, 172, 112)}
 _SIZE_TOL = 4              # 像素：渲染取整/贴边吸附不触发调整
 _SIZE_CHECK_INTERVAL = 1.0  # 秒：复查节流（0.5s 轮询下约每秒一次）
 _SIZE_SETTLE = 1.5          # 秒：调整后静置期
+# 输入面板中心距**窗口底**的固定像素（真机标定，1300x1610：面板占 h-267~h-39，
+# 中心 h-149）。窗口高度受工作区限制而变矮时同样成立——面板贴窗口底。
+_INPUT_BOX_CENTER_FROM_BOTTOM = 149
 
 # 三区域一律用模块内置常量（visual_regions 的真机标定值）。
 # 用户自定义画面标定（wx_ocr_region.json）已撤回：那套几何判据（头像窄带 =
@@ -355,23 +359,34 @@ class VisualBackend:
         # 三区域恒为模块内置常量（用户自定义标定已撤回，见文件头注释）
         self._apply_regions()
 
-    def _apply_regions(self) -> None:
-        """把内置默认区域落到三个运行时区域属性。"""
-        self._session_region = _SESSION_REGION_RATIO
-        self._message_region = _MESSAGE_REGION_RATIO
-        self._title_region = _TITLE_REGION_RATIO
+    def _apply_regions(self, size: tuple[int, int] | None = None) -> None:
+        """按窗口**实际尺寸**算三区域（比例口径不变，下游无需感知）。
+
+        竖向锚点由 `regions_for_window` 分「距顶固定」与「距底固定」两类：
+        窗口高度受工作区限制而变矮时（任务栏可见的机器），消息区底沿跟着
+        输入面板上沿一起上移，不会把输入框算进聊天记录。无尺寸（测试桩 /
+        connect 之前）用标定窗口 WINDOW_SIZE，与改前完全一致。
+        """
+        w, h = size if size else WINDOW_SIZE
+        self._session_region, self._message_region, self._title_region = \
+            regions_for_window(w, h)
 
     # ---- 强制窗口几何（尺寸强制 + 出屏救援；位置不钉死）----
 
     def enforce_window_geometry(self, force: bool = False,
                                 now: float | None = None) -> bool:
-        """把微信窗口钉回标定尺寸 `WINDOW_SIZE`，并保证它完整可见。
+        """把微信窗口钉回标定尺寸 `WINDOW_SIZE`（放不下则按工作区收口）。
 
         为什么强制尺寸：三区域比例与全部像素判据（头像窄带 = 区域宽 2%~14%、
-        期望头像高 = 区域高÷18、气泡/媒体闸同样是区域比例）都按那台
-        1300x1610 的窗口标定——窗口尺寸一变这些常量整体错位（真机事故：
-        窗口拉大后聊天区左边界从 0.415 挪到 0.246，消息区左沿切进聊天区
-        → 整列头像检不出、消息读不到）。
+        气泡/媒体闸、媒体框尺寸闸）都按那台 1300x1610 的窗口标定——窗口尺寸
+        一变这些常量整体错位（真机事故：窗口拉大后聊天区左边界从 0.415 挪到
+        0.246，消息区左沿切进聊天区 → 整列头像检不出、消息读不到）。
+
+        为什么按工作区收口：任务栏**没有隐藏**的机器上工作区只有 ~1516 高，
+        1610 的窗口放不下，系统会把窗口截短——不改目标就会每轮复查都判
+        "尺寸不对"、每秒重设一次并作废截图（真机事故：任务栏一显示，读取
+        全废）。收口后目标 = 工作区高度，窗口矮一截由 `regions_for_window`
+        的顶/底锚点接住（消息区仍是「聊天记录」那一段）。
 
         为什么位置只救援不钉死：点击是屏幕绝对坐标，窗口（部分）移出屏幕后
         pyautogui 点到屏幕外（切会话、点图片、发送全失灵），所以出屏必须拉回
@@ -402,6 +417,13 @@ class VisualBackend:
         if not rect:
             return False
         want_w, want_h = WINDOW_SIZE
+        area = monitor_work_area(self._hwnd)
+        if area:
+            # 工作区（系统已扣任务栏）放不下标定尺寸 → 按工作区收口，别每轮
+            # 请求 1610 让系统截短（截短后每轮复查都判"尺寸不对"，每秒重设
+            # 一次 + 作废截图：任务栏一显示，读取全废）
+            want_w = min(want_w, max(1, area[2] - area[0]))
+            want_h = min(want_h, max(1, area[3] - area[1]))
         touched = []
         if abs(rect[2] - want_w) > _SIZE_TOL \
                 or abs(rect[3] - want_h) > _SIZE_TOL:
@@ -421,6 +443,9 @@ class VisualBackend:
         final = pull_window_into_view(self._hwnd)
         if final is not None and final != (rect[0], rect[1]):
             touched.append(f"位置拉回可见范围 {final}（原 {rect[0]},{rect[1]}）")
+        # 区域随窗口实际尺寸重算（矮窗口下消息区底沿贴住输入面板上沿；
+        # 尺寸没变也重算一次，纯本地换算，代价可忽略）
+        self._apply_regions((rect[2], rect[3]))
         if not touched:
             return False
         logger.info("[窗口] 微信窗口已强制回标定几何：" + "、".join(touched))
@@ -1415,25 +1440,28 @@ class VisualBackend:
     def _input_box_rect(self):
         """定位输入框（打字区域），返回屏幕坐标 (l,t,w,h)，中心点供点击聚焦。
 
-        优先读标定值（tools/calibrate_input_box.py 生成，用户点击确认的
-        输入框中心相对窗口比例）；无标定时回退硬编码比例（消息区底部约 82% 高）。
+        纵向**距窗口底固定**：输入面板上沿 = 窗口底 - 267px、面板高 228（真机
+        标定，1300x1610），聚焦点取面板中心 ≈ 窗口底 - 149px。不能按窗口高
+        比例算——工作区装不下标定尺寸时窗口更矮，比例点会落到聊天记录上
+        （真机事故：任务栏可见后按 0.82h 算出的"输入框"点进了消息区）。
+        横向优先用标定文件 `wx_input_box.json` 的 fx，缺省取消息区中线。
         """
         if self._hwnd is None:
             return None
-        rect = wt.RECT()
-        u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
-        w = rect.right - rect.left
-        h = rect.bottom - rect.top
+        win = window_rect(self._hwnd)
+        if not win:
+            return None
+        rect_l, rect_t, w, h = win
         cal = self._load_input_box_calibration()
         if cal:
-            cx = rect.left + int(w * cal["fx"])
-            cy = rect.top + int(h * cal["fy"])
-            # 以标定点为中心的小矩形（点击聚焦用，宽高只需覆盖输入框即可）
-            return (cx - int(w * 0.15), cy - int(h * 0.03), int(w * 0.30), int(h * 0.06))
-        # 回退：硬编码比例
-        l = rect.left + int(w * self._message_region[0]) + 20
-        t = rect.top + int(h * 0.82)
-        return (l, t, int(w * (self._message_region[2] - self._message_region[0])) - 40, int(h * 0.12))
+            cx = rect_l + int(w * cal["fx"])
+        else:
+            mr = self._message_region
+            cx = rect_l + int(w * (mr[0] + mr[2]) / 2)
+        cy = rect_t + h - _INPUT_BOX_CENTER_FROM_BOTTOM
+        bw = int(max(120, w * (0.30 if cal else 0.45)))
+        bh = 40
+        return (cx - bw // 2, cy - bh // 2, bw, bh)
 
     def _load_input_box_calibration(self):
         """读输入框标定值（相对窗口宽高比例）。无标定文件/非法值返回 None。"""
