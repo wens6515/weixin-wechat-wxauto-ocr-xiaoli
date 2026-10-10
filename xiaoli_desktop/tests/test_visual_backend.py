@@ -1307,13 +1307,25 @@ class TestVisualBackend(unittest.TestCase):
         from PIL import ImageDraw
         img = _solid((747, 1135), (30, 30, 31))
         d = ImageDraw.Draw(img)
-        # 头像高 expected_h = 1135//18 = 63；窄带右侧 [627,732]、左侧 [14,104]
+        # 头像高 = 固定 63px（真机标定）；窄带右侧 [627,732]、左侧 [14,104]
         d.rectangle([630, 50, 730, 112], fill=(200, 100, 100))    # 右侧头像(高63)
         d.rectangle([15, 30, 104, 92], fill=(200, 100, 100))      # 左侧头像(高63)
         d.rectangle([630, 200, 730, 400], fill=(200, 100, 100))   # 右侧超高块(噪声)
         self.assertEqual(detect_avatar_tops(img, (30, 30, 31), "right"), [50])
         self.assertEqual(detect_avatar_tops(img, (30, 30, 31), "left"), [30])
         self.assertEqual(detect_avatar_tops(img, None, "right"), [])
+
+    def test_detect_avatar_tops_short_region(self):
+        """矮消息区（任务栏可见 → 窗口按工作区收口后区域更矮）下头像仍检得出。
+
+        期望头像高是固定 63px（UI 固定元素，与窗口尺寸无关）。旧实现按
+        "区域高÷18"算：区域高 600 时期望 33px → 上限 46px，真实 62px 的头像
+        被整列丢掉（消息读不到）。"""
+        from PIL import ImageDraw
+        img = _solid((747, 600), (30, 30, 31))
+        d = ImageDraw.Draw(img)
+        d.rectangle([630, 50, 730, 112], fill=(200, 100, 100))   # 高 62 的头像
+        self.assertEqual(detect_avatar_tops(img, (30, 30, 31), "right"), [50])
 
 
 # ---- 未读红圈角标检测 ----
@@ -1632,21 +1644,29 @@ class TestSelectedRowHighlight(unittest.TestCase):
 
 
 class TestRegionDefaults(unittest.TestCase):
-    """三区域恒用模块内置常量，运行期不再读任何用户标定文件。
+    """三区域恒用模块内置标定（运行期不再读任何用户标定文件）。
 
-    撤回理由（真机实证）：头像窄带 = 框宽 2%~14%、期望头像高 = 框高÷18、气泡/
-    媒体闸同样是框的比例——只在「框 == 聊天区」这一前提下成立；用户手画的大框/
-    小框会让这些常量整体漂移（事故：自设区域 + 非默认窗口尺寸 → 对方头像整列
-    检不出、消息读不到，自己侧漏检 → 自家图片被当对方消息）。
+    撤回理由（真机实证）：头像窄带 = 框宽 2%~14%、气泡/媒体闸同样是框的比例
+    ——只在「框 == 聊天区」这一前提下成立；用户手画的大框/小框会让这些常量
+    整体漂移（事故：自设区域 + 非默认窗口尺寸 → 对方头像整列检不出、消息读
+    不到，自己侧漏检 → 自家图片被当对方消息）。
+
+    注：区域由 `regions_for_window(标定窗口)` 现算（竖向锚点分顶/底，见
+    visual_regions），与模块常量的书写值（四位小数）差 < 1e-4。
     """
 
+    def _assert_regions_match(self, b, vb):
+        for got, want in ((b._session_region, vb._SESSION_REGION_RATIO),
+                          (b._message_region, vb._MESSAGE_REGION_RATIO),
+                          (b._title_region, vb._TITLE_REGION_RATIO)):
+            for g, w in zip(got, want):
+                self.assertAlmostEqual(g, w, delta=1e-4)
+
     def test_backend_uses_builtin_regions(self):
-        """新建后端实例 → 三区域 = 模块常量。"""
+        """新建后端实例 → 三区域 = 模块标定常量。"""
         import wx_backend.visual_backend as vb
         b = VisualBackend()
-        self.assertEqual(b._session_region, vb._SESSION_REGION_RATIO)
-        self.assertEqual(b._message_region, vb._MESSAGE_REGION_RATIO)
-        self.assertEqual(b._title_region, vb._TITLE_REGION_RATIO)
+        self._assert_regions_match(b, vb)
 
     def test_user_region_file_is_not_consumed(self):
         """标定文件躺在它原来的位置也不生效（加载/保存/热更新接口全部移除）。"""
@@ -1658,7 +1678,8 @@ class TestRegionDefaults(unittest.TestCase):
                 json.dump({"message_region": [0.35, 0.1, 1.0, 1.0],
                            "session_region": [0.0, 0.1, 0.35, 1.0]}, f)
             b = VisualBackend()
-            self.assertEqual(b._message_region, vb._MESSAGE_REGION_RATIO)
+            for g, w in zip(b._message_region, vb._MESSAGE_REGION_RATIO):
+                self.assertAlmostEqual(g, w, delta=1e-4)
         for name in ("_load_region_config", "_read_region_config",
                      "save_region_config", "_region_config_paths"):
             self.assertFalse(hasattr(vb, name), f"{name} 应随标定撤回一并移除")
