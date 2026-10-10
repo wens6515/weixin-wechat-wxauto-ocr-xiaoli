@@ -375,6 +375,121 @@ def visible_window_size(hwnd) -> tuple[int, int] | None:
     return (max(1, r[2] - ml - mr), max(1, r[3] - mt - mb))
 
 
+# ---------- 窗口位置锚定（可见内容拉回显示器工作区） ----------
+
+_MONITORINFO = None
+
+
+def _monitor_info_type():
+    """MONITORINFO 结构体（懒构造，import 期不碰 ctypes 结构定义顺序）。"""
+    global _MONITORINFO
+    if _MONITORINFO is None:
+        class _MI(ctypes.Structure):
+            _fields_ = [("cbSize", wt.DWORD),
+                        ("rcMonitor", wt.RECT),
+                        ("rcWork", wt.RECT),
+                        ("dwFlags", wt.DWORD)]
+        _MONITORINFO = _MI
+    return _MONITORINFO
+
+
+def _work_area_from_handle(hmon) -> tuple[int, int, int, int] | None:
+    """HMONITOR → 工作区 (l, t, r, b)；失败 None。"""
+    if not hmon:
+        return None
+    try:
+        mi = _monitor_info_type()()
+        mi.cbSize = ctypes.sizeof(mi)
+        if not u32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+            return None
+        rc = mi.rcWork
+        return (rc.left, rc.top, rc.right, rc.bottom)
+    except Exception:
+        return None
+
+
+def monitor_work_area(hwnd) -> tuple[int, int, int, int] | None:
+    """窗口所在显示器（MONITOR_DEFAULTTONEAREST）的工作区 (l, t, r, b)。
+
+    工作区 = 扣除任务栏后的可用区域，物理像素（与 window_rect 同一 DPI
+    感知上下文）。失败返回 None。"""
+    if not hwnd:
+        return None
+    try:
+        u32.MonitorFromWindow.restype = _HANDLE
+        u32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+        u32.GetMonitorInfoW.restype = wt.BOOL
+        u32.GetMonitorInfoW.argtypes = [_HANDLE, ctypes.POINTER(_monitor_info_type())]
+        return _work_area_from_handle(u32.MonitorFromWindow(hwnd, 2))
+    except Exception:
+        return None
+
+
+def monitor_work_area_at(x: int, y: int) -> tuple[int, int, int, int] | None:
+    """坐标 (x, y) 所在显示器（最近者）的工作区；失败 None。
+
+    位置强制的运行期复查用它按「家坐标」找显示器：窗口被拖到副屏时
+    仍按家所在屏的工作区判定，而不是跟着窗口跑到副屏去（否则家坐标
+    会被副屏工作区裁剪、窗口被拽到副屏边缘）。屏被拔掉后最近者返回
+    剩余显示器，家坐标自然被拉回可见范围。"""
+    try:
+        u32.MonitorFromPoint.restype = _HANDLE
+        u32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+        u32.GetMonitorInfoW.restype = wt.BOOL
+        u32.GetMonitorInfoW.argtypes = [_HANDLE, ctypes.POINTER(_monitor_info_type())]
+        pt = wt.POINT(int(x), int(y))
+        return _work_area_from_handle(u32.MonitorFromPoint(pt, 2))
+    except Exception:
+        return None
+
+
+def clamp_pos_visible(x: int, y: int, w: int, h: int,
+                      area: tuple[int, int, int, int]) -> tuple[int, int]:
+    """把可见内容矩形 (x, y, w, h) 拉回工作区 area=(l, t, r, b) 内（纯函数）。
+
+    返回拉回后的可见内容左上角。越界任意一边都拉回：可见内容超出工作区
+    的部分点不到（pyautogui 点屏幕外坐标落空），半出屏和全出屏一样坏。
+    窗口可见内容比工作区还大时贴工作区左/上沿（另一侧伸出不可避免，
+    强制尺寸 1300x1610 在小屏上会这样）。"""
+    l, t, r, b = area
+    max_x = max(l, r - w)
+    max_y = max(t, b - h)
+    return (min(max(int(x), l), max_x), min(max(int(y), t), max_y))
+
+
+def pull_window_into_view(hwnd) -> tuple[int, int] | None:
+    """窗口（部分）越出所在显示器工作区时拉回完整可见；已在区内则不动。
+
+    位置强制的**唯一**动作（不做「钉死」）：窗口在屏幕内的位置完全由用户
+    决定，程序只在它出屏时出手——点击是屏幕绝对坐标，窗口（部分）移出屏幕
+    后 pyautogui 点到屏幕外（切会话/点图片/发送全失灵）。返回最终窗口矩形
+    左上角 (x, y)；读取失败返回 None。
+
+    可见内容判定用 DWM 外沿（窗口矩形含 ~10px 不可见边框，直接按窗口矩形
+    判定会把贴边摆放误判成越界——真机：右贴边窗口矩形伸出屏幕约 10px）。
+    窗口比工作区还大时贴工作区左/上沿（另一侧伸出不可避免，强制尺寸
+    1300x1610 在小屏上会这样）。"""
+    rect = window_rect(hwnd)
+    if not rect:
+        return None
+    area = monitor_work_area(hwnd)
+    if not area:
+        return (rect[0], rect[1])
+    m = visible_frame_margins(hwnd)
+    if m is None:
+        m = (0, 0, 0, 0)
+    ml, mt, mr, mb = m
+    vx, vy = rect[0] + ml, rect[1] + mt
+    vw = max(1, rect[2] - ml - mr)
+    vh = max(1, rect[3] - mt - mb)
+    cx, cy = clamp_pos_visible(vx, vy, vw, vh, area)
+    if (cx, cy) == (vx, vy):
+        return (rect[0], rect[1])
+    position_window_visible(hwnd, cx, cy, vw, vh)
+    moved = window_rect(hwnd)
+    return (moved[0], moved[1]) if moved else (rect[0], rect[1])
+
+
 def capture_window(hwnd) -> Image.Image | None:
     """PrintWindow + PW_RENDERFULLCONTENT 截取窗口内容，返回 RGBA PIL Image。
 

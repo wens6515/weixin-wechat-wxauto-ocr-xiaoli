@@ -673,6 +673,66 @@ def _project_chat_bindings(cfg, cards_dir):
     return params
 
 
+def sanitize_chat_bindings(cfg, cards_dir):
+    """剔除卡不存在的绑定条目（脏数据静默清理，返回是否有改动）。
+
+    历史缺陷：记忆页「绑定角色卡」弹窗的确定按钮返回布尔 true（见 webui
+    app.js 的 settleConfirm 注释），后端把 str(True)="True" 当卡 id 存进
+    chat_card_bindings——投影时 _read_card 找不到该卡、静默跳过，表现为
+    「绑定过但从没生效，一直用全局卡」。修复弹窗后这里把存量脏条目清掉
+    （卡被删除的场景一并覆盖），否则设置页会一直显示幽灵绑定。"""
+    binds = cfg.get("chat_card_bindings")
+    if not isinstance(binds, dict) or not binds or not cards_dir:
+        return False
+    cleaned = {str(k): str(v) for k, v in binds.items()
+               if str(k or "").strip() and _read_card(cards_dir, str(v)) is not None}
+    normalized = {str(k): str(v) for k, v in binds.items()}
+    if cleaned == normalized:
+        return False
+    cfg["chat_card_bindings"] = cleaned
+    dropped = len(normalized) - len(cleaned)
+    if dropped:
+        logger.warning(f"[配置] 清理 {dropped} 条无效的角色卡绑定"
+                       f"（卡不存在或格式非法，如 \"True\"）")
+    return True
+
+
+# 外观四键的旧出厂默认 / 新默认（一次性迁移判据，见 _migrate_appearance_defaults）。
+# 旧默认口径：卡片 50%、壁纸 12%（abyss 主题推荐值）、毛玻璃 100%（CSS --blur
+# 22px，滑块初值 100）、面板 50%。新默认 = 真机试用定稿（卡片全透、壁纸 20%、
+# 无毛玻璃、面板无遮罩）。
+_APPEARANCE_OLD = {"card_opacity": 0.5, "wall_opacity": 0.12,
+                   "blur_level": 100, "panel_opacity": 0.5}
+_APPEARANCE_NEW = {"card_opacity": 0.0, "wall_opacity": 0.2,
+                   "blur_level": 0, "panel_opacity": 1.0}
+# 未迁移（用户有自定义）时的补缺口径：旧代码的默认块只写这两键，wall/blur
+# 缺失 = 跟随主题（渲染层内置初值）——照旧补，用户看到的外观一点不变。
+_APPEARANCE_LEGACY_FILL = {"card_opacity": 0.5, "panel_opacity": 0.5}
+
+
+def _migrate_appearance_defaults(cfg):
+    """外观四键一次性迁移（全或无）：四个选项都还是旧默认 → 视为用户从未
+    调过，整体换成新默认；任一被调过（值不等于旧默认）→ 视为用户有自定义，
+    四键一个都不动（保留用户手调的外观，缺失键按 _APPEARANCE_LEGACY_FILL
+    补旧默认）。返回是否发生了迁移。
+
+    必须在默认块补键**之前**调用——补键会把缺失的键写成默认值，之后就
+    分不清「从未调过」与「用户恰好调成默认值」。键缺失同样算「从未调过」
+    （wall_opacity/blur_level 旧版本没有默认写入，缺失 = 跟随内置初值；
+    非数值脏数据算有自定义，不动）。"""
+    for k, old in _APPEARANCE_OLD.items():
+        v = cfg.get(k)
+        if v is None:
+            continue
+        try:
+            if abs(float(v) - float(old)) > 1e-9:
+                return False
+        except (TypeError, ValueError):
+            return False
+    cfg.update(_APPEARANCE_NEW)
+    return True
+
+
 def load_config_store(path="config.json", cards_dir="cards"):
     """加载 config.json → 迁移 → 读活跃卡 → 投影重建 → 写回。返回引擎可用的完整 cfg。
 
@@ -695,10 +755,18 @@ def load_config_store(path="config.json", cards_dir="cards"):
         cfg["reply_max_tokens"] = cfg.pop("vision_max_tokens")
 
     # 已撤回的两项用户设置：微信窗口尺寸（wechat_window_size / 更早的
-    # wechat_window_rect）静默丢弃——程序既不移动也不调整微信窗口大小，
-    # 旧配置里的值留着只会误导（老版本写的尺寸仍会被新版本忽略）。
+    # wechat_window_rect）静默丢弃——程序只锚定位置、强制尺寸，旧配置里的
+    # 值留着只会误导（老版本写的尺寸仍会被新版本忽略）。
     cfg.pop("wechat_window_rect", None)
     cfg.pop("wechat_window_size", None)
+    # 天枢一键安装改走 CLI（npm install -g tianshu-tui）后，旧的 zip 下载
+    # 地址配置失效——静默丢弃（小白配置里没见过它，纯粹是历史默认残留）。
+    cfg.pop("tianshu_download_url", None)
+    # 桌面端（Electron）检测已移除（任务桥全链路走 CLI）：安装目录配置随之
+    # 失效——静默丢弃，免得旧配置里留一个程序再也不看的路径。
+    cfg.pop("tianshu_install_dir", None)
+    # 外观默认值一次性迁移（必须在默认块补键之前判定，见函数注释）
+    appearance_migrated = _migrate_appearance_defaults(cfg)
 
     cfg = migrate_config(cfg, cards_dir)
     # AI 参数默认补全：投影只重建 provider 相关键，cooldown/
@@ -707,23 +775,25 @@ def load_config_store(path="config.json", cards_dir="cards"):
     for k, v in AI_DEFAULTS.items():
         if k not in cfg:
             cfg[k] = v
-    # 二期新增默认：天枢安装/下载/首轮提示词（小白引导用）
+    # 二期新增默认：天枢安装/首轮提示词（小白引导用）
     for k, v in {
-        "tianshu_install_dir": "",
-        "tianshu_download_url": "https://codeload.github.com/huiliyi37/Tianshu-Tui/zip/refs/heads/main",
         "first_prompt_path": "",  # 空 = 用内置模板（build_first_prompt）；非空且文件存在时优先读文件
         "image_click_offset": [-200, -130],  # 图片点击偏移（用户实测校准 2026-08-04：真人点击测 [-199,-131] 取整；位置偏了再到设置页调）
         "tianshu_workdir": r"D:\工作间",  # 天枢 CLI（rivet）的工作目录
         "tianshu_guided": False,  # 首启 /yes 一次性引导是否已完成（True 后初始化不再切 YOLO）
         "theme": "abyss",  # 界面主题（默认「深海小漓」套，壁纸配套见 wallpaper_path）
         "chat_card_bindings": {},  # per-chat 角色卡绑定 {聊天名: 卡id}；空 = 全部跟随全局活跃卡
-        "card_opacity": 0.5,  # 卡片不透明度 0~1.0（设置页滑块调节毛玻璃强度，默认 50%）
-        "panel_opacity": 0.5,  # 面板/输入区不透明度（日志区/表格/输入框等大白块，默认 50%）
         "font_scale": "medium",  # 全局字号档位：small/medium/large（启动默认标准档）
         "wallpaper_path": "小漓主题.jpg",  # 背景壁纸（裸文件名 → 启动时按壁纸库解析绝对路径；配套 abyss 主题）
         "web_proxy": "",  # 联网搜索/网页抓取代理（http/https/socks5；空 = 直连；不影响模型 API）
         "chat_feature_overrides": {},  # per-chat 功能覆盖三态例外 {memory_key(聊天): {voice/web_search/task/state_watch: bool}}；空 = 全部跟随全局
     }.items():
+        if k not in cfg:
+            cfg[k] = v
+    # 外观四键：迁移已判定（新装/从未调过 → 新默认；有自定义 → 照旧补
+    # 旧默认，wall/blur 保持缺省跟随主题，用户看到的外观一点不变）
+    for k, v in (_APPEARANCE_NEW if appearance_migrated
+                 else _APPEARANCE_LEGACY_FILL).items():
         if k not in cfg:
             cfg[k] = v
     # UI 新默认迁移：主题不在保留名单（ui.THEMES 的 7 套）→ abyss、壁纸空
@@ -770,7 +840,8 @@ def load_config_store(path="config.json", cards_dir="cards"):
         except Exception as e:
             logger.error(f"[配置] 默认卡补建失败（回退模板投影）: {e}")
     cfg = project_config(cfg, card)
-    # per-chat 绑定参数投影（派生数据：内存可用、save_config 落盘时剥离）
+    # per-chat 绑定清洗 + 参数投影（派生数据：内存可用、save_config 落盘时剥离）
+    sanitize_chat_bindings(cfg, cards_dir)
     cfg["chat_card_params"] = _project_chat_bindings(cfg, cards_dir)
 
     try:

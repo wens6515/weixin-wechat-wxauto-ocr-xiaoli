@@ -170,7 +170,7 @@ _ALLOWED_KEYS = {
     "voice_mode", "tts_endpoint", "tts_timeout_seconds", "voice_max_seconds",
     "voice_profiles", "active_voice_profile_id",
     "chat_feature_overrides", "first_prompt_path", "bot_nickname",
-    "start_paused", "tianshu_install_dir",
+    "start_paused",
 }
 
 # 写 cfg 后需要同步热写到 bot 属性的键（旧 UI 设置页语义：先落盘再热写）。
@@ -1277,22 +1277,20 @@ class BridgeApi:
 
     @_safe
     def tianshu_guide_finish(self) -> dict:
-        """用户确认已在 CLI 完成配置：发首轮提示词（任务协议，best-effort）→
-        发 /yes（全自动，持久化）→ 关闭 CLI 窗口 → 标记 tianshu_guided=True
-        （此后初始化不再引导）。"""
+        """用户确认已在 CLI 完成配置：发 /yes（全自动，持久化）→ 关闭 CLI 窗口
+        → 标记 tianshu_guided=True（此后初始化不再引导）。
+
+        这里**只发 /yes 并关窗**（与引导文案承诺一致）。首轮提示词不在这里发：
+        它是任务桥协议说明，归属「引擎初始化完成时后台自动发一次」+ 首页
+        「重发一次」，且本流程紧接着会关窗（进程树被杀），在这里发等于发进一个
+        马上被销毁的会话——真机反馈：用户点「我已配置完成」后看到一大段协议文本
+        被粘贴进刚配好的 CLI，以为程序发错了东西。"""
         from . import setup
         title = setup.find_cli_window()
         if not title:
             return {"ok": False,
                     "error": "未检测到天枢 CLI 窗口——请确认 CLI 窗口还开着"
                              "（已关掉的话点「打开天枢 CLI」重开并完成配置）"}
-        # 首轮提示词 = 任务桥协议说明（老 Qt 版在 CLI 窗口存在时自动发）。
-        # 窗口正开着才发得出去，故放在这里；失败不阻塞引导（首页「重发一次」可补）。
-        try:
-            setup.send_prompt_to_tianshu(
-                setup.build_first_prompt(self.ctx.cfg), title)
-        except Exception as e:
-            logger.debug(f"[引导] 首轮提示词发送失败（不阻塞）: {e}")
         if not setup.send_yes_and_close(title):
             return {"ok": False, "error": "未能向天枢 CLI 发送 /yes，请重试"}
         self.ctx.cfg["tianshu_guided"] = True
@@ -1338,20 +1336,30 @@ class BridgeApi:
 
     @_safe
     def install_tianshu(self) -> dict:
+        """一键安装天枢 CLI（npm install -g tianshu-tui），后台线程 + 进度推送。
+
+        历史缺陷：这里下载 GitHub 源码 zip 解压到 ~/Tianshu——包里没有
+        可执行文件，check_environment 按 rivet 命令 / tianshu-desktop.exe
+        检测必然判「未安装」，且失败原因被丢弃，界面只见「安装完成」+
+        卡片「未安装」。现改走 CLI 安装（与检测同一判据，装完即就绪），
+        失败原因经 install 事件的 error 字段透出（前端 toast 显示）。"""
         if self._installing:
             return {"ok": False, "error": "已有安装任务进行中"}
         self._installing = True
 
         def worker():
-            def progress(pct):
-                self.push("install", {"pct": int(pct), "done": False})
             try:
-                dest = os.path.join(os.path.expanduser("~"), "Tianshu")
-                found = setup.install_tianshu(dest, progress_cb=progress)
-                cfg = self.ctx.cfg
-                cfg["tianshu_install_dir"] = found
-                config_store.save_config(cfg, self.ctx.cfg_path)
-                self.push("install", {"done": True, "ok": True, "dir": found})
+                self.push("install", {
+                    "pct": 8, "done": False,
+                    "text": "正在通过 npm 安装天枢 CLI（首次约 1-3 分钟）…"})
+                ok, detail = setup.install_tianshu_cli()
+                if not ok:
+                    self.push("install", {"done": True, "ok": False,
+                                          "error": detail})
+                    return
+                self.push("install", {"pct": 100, "done": False})
+                self.push("install", {"done": True, "ok": True,
+                                      "detail": detail})
             except Exception as e:
                 self.push("install", {"done": True, "ok": False,
                                       "error": f"{type(e).__name__}: {e}"})

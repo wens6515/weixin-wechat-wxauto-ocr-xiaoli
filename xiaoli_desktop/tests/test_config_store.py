@@ -865,5 +865,122 @@ class TestChatCardBindings(unittest.TestCase):
         self.assertNotIn("chat_card_params", disk)
 
 
+class TestSanitizeChatBindings(unittest.TestCase):
+    """脏绑定清理：卡不存在的条目（历史缺陷存下的 "True"/"False"）剔除。"""
+
+    def _write_card(self, cards_dir, card_id):
+        os.makedirs(cards_dir, exist_ok=True)
+        with open(os.path.join(cards_dir, card_id + ".json"), "w",
+                  encoding="utf-8") as f:
+            json.dump({"id": card_id, "name": card_id}, f, ensure_ascii=False)
+
+    def test_drops_bogus_true_value(self):
+        """弹窗 bug 存下的 str(True) 被清掉（投影找不到 cards/True.json）。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self._write_card(tmp, "xiaoli")
+        cfg = {"chat_card_bindings": {"王文生": "True", "林小满": "xiaoli"}}
+        self.assertTrue(config_store.sanitize_chat_bindings(cfg, tmp))
+        self.assertEqual(cfg["chat_card_bindings"], {"林小满": "xiaoli"})
+
+    def test_valid_bindings_untouched(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self._write_card(tmp, "xiaoli")
+        cfg = {"chat_card_bindings": {"林小满": "xiaoli"}}
+        self.assertFalse(config_store.sanitize_chat_bindings(cfg, tmp))
+        self.assertEqual(cfg["chat_card_bindings"], {"林小满": "xiaoli"})
+
+    def test_deleted_card_binding_cleaned(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        cfg = {"chat_card_bindings": {"旧会话": "已删除的卡"}}
+        self.assertTrue(config_store.sanitize_chat_bindings(cfg, tmp))
+        self.assertEqual(cfg["chat_card_bindings"], {})
+
+    def test_missing_cards_dir_is_noop(self):
+        """cards_dir 缺失（未配置）：不清（宁可保留也不误删有效绑定）。"""
+        cfg = {"chat_card_bindings": {"林小满": "xiaoli"}}
+        self.assertFalse(config_store.sanitize_chat_bindings(cfg, ""))
+        self.assertEqual(cfg["chat_card_bindings"], {"林小满": "xiaoli"})
+
+    def test_empty_bindings_noop(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.assertFalse(config_store.sanitize_chat_bindings(
+            {"chat_card_bindings": {}}, tmp))
+
+
+class TestAppearanceDefaultsMigration(unittest.TestCase):
+    """外观四键一次性迁移：全默认 → 换新默认；任一被调过 → 一个都不动。"""
+
+    def _cfg(self, **kw):
+        return dict(kw)
+
+    def test_all_absent_migrated(self):
+        """新装（四键从未写入）→ 整体换成新默认。"""
+        cfg = self._cfg()
+        self.assertTrue(config_store._migrate_appearance_defaults(cfg))
+        self.assertEqual(cfg, {"card_opacity": 0.0, "wall_opacity": 0.2,
+                               "blur_level": 0, "panel_opacity": 1.0})
+
+    def test_all_old_defaults_migrated(self):
+        """旧出厂默认（卡片 50%/壁纸 12%/毛玻璃 100%/面板 50%）→ 迁移。"""
+        cfg = self._cfg(card_opacity=0.5, wall_opacity=0.12,
+                        blur_level=100, panel_opacity=0.5)
+        self.assertTrue(config_store._migrate_appearance_defaults(cfg))
+        self.assertEqual(cfg["card_opacity"], 0.0)
+        self.assertEqual(cfg["wall_opacity"], 0.2)
+        self.assertEqual(cfg["blur_level"], 0)
+        self.assertEqual(cfg["panel_opacity"], 1.0)
+
+    def test_missing_pair_with_old_defaults_migrated(self):
+        """wall/blur 旧版本不写默认（缺失=跟随初值），缺失也算未调过。"""
+        cfg = self._cfg(card_opacity=0.5, panel_opacity=0.5)
+        self.assertTrue(config_store._migrate_appearance_defaults(cfg))
+        self.assertEqual(cfg["wall_opacity"], 0.2)
+
+    def test_any_custom_leaves_all_untouched(self):
+        """任一项被调过 → 四键一个都不动（用户手调的外观原样保留）。"""
+        cfg = self._cfg(card_opacity=0.3, wall_opacity=0.12,
+                        blur_level=100, panel_opacity=0.5)
+        self.assertFalse(config_store._migrate_appearance_defaults(cfg))
+        self.assertEqual(cfg["card_opacity"], 0.3)
+
+    def test_custom_wall_counts_as_adjusted(self):
+        cfg = self._cfg(card_opacity=0.5, wall_opacity=0.05,
+                        blur_level=100, panel_opacity=0.5)
+        self.assertFalse(config_store._migrate_appearance_defaults(cfg))
+        self.assertEqual(cfg["wall_opacity"], 0.05)
+
+    def test_non_numeric_treated_as_adjusted(self):
+        cfg = self._cfg(card_opacity="怪值")
+        self.assertFalse(config_store._migrate_appearance_defaults(cfg))
+
+    def test_load_config_applies_new_defaults_for_fresh(self):
+        """整链验证：空配置走一次 load → 落盘/内存都是新默认。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "config.json")
+        cards = os.path.join(tmp, "cards")
+        cfg = config_store.load_config_store(path, cards)
+        for k, v in config_store._APPEARANCE_NEW.items():
+            self.assertEqual(cfg[k], v, k)
+
+    def test_load_config_keeps_custom_and_fills_legacy(self):
+        """整链验证：用户调过卡片 → 卡片保持；缺失键补旧默认（wall 仍缺省）。"""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "config.json")
+        cards = os.path.join(tmp, "cards")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"card_opacity": 0.3, "panel_opacity": 0.5}, f)
+        cfg = config_store.load_config_store(path, cards)
+        self.assertEqual(cfg["card_opacity"], 0.3)      # 用户值保留
+        self.assertEqual(cfg["panel_opacity"], 0.5)
+        self.assertNotIn("wall_opacity", cfg)           # 保持缺省=跟随主题
+        self.assertNotIn("blur_level", cfg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

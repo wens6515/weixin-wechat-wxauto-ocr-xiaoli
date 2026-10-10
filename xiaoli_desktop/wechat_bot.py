@@ -884,7 +884,8 @@ class WeChatBot(MediaCaptureMixin):
                 raise RuntimeError("微信连接已取消")
             try:
                 self.wx = create_backend("auto")
-                logger.info("[窗口] 程序不改动微信窗口（位置与大小保持当前状态）")
+                logger.info("[窗口] 尺寸钉在标定值；位置由你摆放，"
+                            "只在窗口移出屏幕时拉回可见范围")
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
             except Exception as e:

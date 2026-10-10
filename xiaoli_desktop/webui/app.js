@@ -43,7 +43,13 @@ function openModal(id) {
 function closeModal() {
   $("#modalMask").hidden = true;
   $$(".modal").forEach((m) => (m.hidden = true));
-  if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+  if (confirmResolve) {
+    /* 兜底关窗：带下拉的弹窗取消语义是 null（调用方以 === null 判取消），
+       普通确认弹窗维持 false。历史缺陷：一律 false → selectModal 的
+       「取消」被调用方当成有效选项继续执行 */
+    confirmResolve($("#confirmSelect") ? null : false);
+    confirmResolve = null;
+  }
 }
 
 let confirmResolve = null;
@@ -77,15 +83,21 @@ function confirmSelectValue() {
   return sel ? sel.value : null;
 }
 /* 确认弹窗按钮：先取出 resolver 再关窗（closeModal 对未决 confirm
-   兜底 resolve(false)，顺序反了会把「确定」吞成「取消」——历史缺陷） */
+   兜底 resolve，顺序反了会把「确定」吞成「取消」——历史缺陷）。
+   返回值：带下拉（selectModal）时确定 = 选中项 value、取消 = null；
+   无下拉时维持 true / false。历史缺陷：确定写死 true → 绑定角色卡存下
+   字符串 "True"（投影找不到该卡、绑定永不生效）、导出格式/目录处理选项
+   全部失效、取消还会继续执行。 */
 function settleConfirm(value) {
   const r = confirmResolve;
   confirmResolve = null;
   closeModal();
   r?.(value);
 }
-$("#confirmYes").addEventListener("click", () => settleConfirm(true));
-$("#confirmNo").addEventListener("click", () => settleConfirm(false));
+$("#confirmYes").addEventListener("click",
+  () => settleConfirm(confirmSelectValue() ?? true));
+$("#confirmNo").addEventListener("click",
+  () => settleConfirm($("#confirmSelect") ? null : false));
 
 /* ============================================================
    导航（方向感知动画 + 页面惰性加载）
@@ -492,8 +504,9 @@ async function withBusy(btn, fn) {
 $$("button[data-env]").forEach((b) =>
   b.addEventListener("click", () => withBusy(b, checkEnv)));
 $("#btnInstallTianshu").addEventListener("click", async () => {
-  const ok = await confirmModal("安装天枢桌面端",
-    "将从 GitHub 下载天枢并解压到用户目录 Tianshu 文件夹，下载进度显示在卡片上。继续？");
+  const ok = await confirmModal("安装天枢 CLI",
+    "将运行 npm install -g tianshu-tui 安装天枢 CLI（需已安装 Node.js），"
+    + "首次约 1-3 分钟，进度显示在卡片上。继续？");
   if (!ok) return;
   const r = await API.install_tianshu();
   if (!r.ok) toast(r.error || "安装任务启动失败", "err");
@@ -502,7 +515,7 @@ function onInstallProgress(p) {
   const bars = [$("#installBar"), $("#tgInstallBar")].filter(Boolean);
   if (p.done) {
     bars.forEach((b) => (b.hidden = true));
-    toast(p.ok ? "天枢安装完成 ✓" : "安装失败：" + (p.error || "未知错误"),
+    toast(p.ok ? "天枢 CLI 安装完成 ✓" : "安装失败：" + (p.error || "未知错误"),
       p.ok ? "ok" : "err");
     if (p.ok) {
       checkEnv();
@@ -510,6 +523,7 @@ function onInstallProgress(p) {
       if (!$("#modalTianshuGuide").hidden) openTianshuGuide();
     }
   } else {
+    if (p.text) toast(p.text, "ok");   // CLI 安装无百分比：阶段文案告知别干等
     bars.forEach((b) => {
       b.hidden = false;
       b.querySelector("span").style.width = (p.pct || 0) + "%";
