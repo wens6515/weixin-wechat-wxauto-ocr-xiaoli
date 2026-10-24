@@ -425,6 +425,82 @@ def monitor_work_area(hwnd) -> tuple[int, int, int, int] | None:
         return None
 
 
+# ---------- 显示缩放检测（视觉判据按 175% 标定的硬前置） ----------
+
+def _dpi_to_scale_pct(dpi: int) -> int:
+    """DPI → 缩放百分比（96 = 100%）。纯函数，单测直测。
+
+    Windows 标准档位：100%→96 / 125%→120 / 150%→144 / 175%→168 /
+    200%→192，换算后恰为整百分比。空值/零返回 0（= 未知，调用方 fail-open）。"""
+    if not dpi:
+        return 0
+    return round(int(dpi) * 100 / 96)
+
+
+# 线程级 per-monitor v2 DPI 上下文（伪句柄魔数 -4）。进程级
+# SetProcessDpiAwareness 在 GUI 进程里常因窗口已创建而失败（本模块导入时
+# WebView2 壳早已建窗），进程停留在 system/unaware → 系统对它做 DPI
+# 虚拟化：GetDpiForMonitor 只回**进程启动那一刻**的值，用户改完缩放
+# 不重启就永远读到旧值（真机实测：125% 启动→改 175%→重检/初始化仍判
+# 125%）。DPI API 的取值按**调用线程**的 awareness 作答——查询期间把线程
+# 切到 per-monitor v2 即拿到显示器当前真实值，查完恢复原上下文。
+# Win10 1703+；API 不在时按原进程上下文查（退化为旧值行为，重启兜底）。
+_PMV2_CONTEXT = ctypes.c_void_p(-4)
+
+
+def _with_per_monitor_dpi(fn):
+    """在 per-monitor v2 线程上下文里执行 fn()，结束恢复原上下文。"""
+    try:
+        u32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        old = u32.SetThreadDpiAwarenessContext(_PMV2_CONTEXT)
+        if not old:
+            return fn()
+        try:
+            return fn()
+        finally:
+            u32.SetThreadDpiAwarenessContext(old)
+    except Exception:
+        return fn()
+
+
+def monitor_dpi_scale(hwnd=None) -> int:
+    """显示器缩放百分比：hwnd 所在显示器（多屏只看微信实际所在那块），
+    缺省主屏。**检测失败返回 0（未知）**——调用方对 0 按 fail-open 处理
+    （检测手段失效不该把人挡在门外），只有明确读到非 175 才拦。
+
+    GetDpiForMonitor（shcore，Win8.1+）取 effective DPI——必须在
+    per-monitor v2 **线程**上下文里调用（见 _with_per_monitor_dpi：进程级
+    awareness 设置失败时系统做 DPI 虚拟化，不切线程上下文会读到进程启动
+    时的旧缩放）；失败退 GetDpiForWindow（按窗口句柄，窗口晚于缩放变化
+    创建时才准，仅兜底）。"""
+    def _query_monitor():
+        u32.MonitorFromWindow.restype = _HANDLE
+        u32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
+        hmon = u32.MonitorFromWindow(hwnd if hwnd else 0,
+                                     2 if hwnd else 1)  # NEAREST / PRIMARY
+        if hmon:
+            dx = wt.UINT()
+            dy = wt.UINT()
+            hr = ctypes.windll.shcore.GetDpiForMonitor(
+                ctypes.c_void_p(hmon), 0, ctypes.byref(dx), ctypes.byref(dy))
+            if hr == 0 and dx.value:
+                return _dpi_to_scale_pct(dx.value)
+        return None
+
+    val = _with_per_monitor_dpi(_query_monitor)
+    if val:
+        return val
+    try:
+        if hwnd:
+            dpi = u32.GetDpiForWindow(hwnd)
+            if dpi:
+                return _dpi_to_scale_pct(dpi)
+    except Exception:
+        pass
+    return 0
+
+
 def monitor_work_area_at(x: int, y: int) -> tuple[int, int, int, int] | None:
     """坐标 (x, y) 所在显示器（最近者）的工作区；失败 None。
 

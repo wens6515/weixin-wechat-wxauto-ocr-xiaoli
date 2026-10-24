@@ -494,6 +494,30 @@ $("#powerBtn").addEventListener("click", async () => {
   if (r.ok) applyEngineState(r.state, r.paused, r.error);
 });
 
+/* ---- 初始化失败弹窗：原因 + 现场检测 + 修复指引 ---- */
+async function showEngineError() {
+  const r = await API.engine_error_detail();
+  $("#engineErrReason").textContent =
+    (r.ok && r.error) ? r.error : "未知原因（详见日志页）";
+  const live = [];
+  if (r.scale) live.push(`显示缩放 ${r.scale}%（要求 175%）`);
+  if (r.wechat_found != null)
+    live.push(r.wechat_found ? "微信窗口已检测到" : "微信窗口未找到");
+  $("#engineErrLive").textContent = live.length ? "当前检测：" + live.join(" · ") : "";
+  const ul = $("#engineErrHints");
+  ul.innerHTML = "";
+  (r.hints || ["确认微信已打开并登录后点「重试初始化」"]).forEach((h) => {
+    const li = document.createElement("li");
+    li.textContent = h;
+    ul.appendChild(li);
+  });
+  openModal("modalEngineError");
+}
+$("#btnEngErrRetry").addEventListener("click", async () => {
+  closeModal();
+  await API.engine_action("initialize");
+});
+
 /* ============================================================
    环境检查 / 天枢安装 / 首轮提示词 / 更新
    ============================================================ */
@@ -508,10 +532,23 @@ async function checkEnv() {
   if (!r.ok) return;
   const rp = r.report;
   envCard("#envWechat", "#envWechatDetail", rp.wechat);
-  envCard("#envTianshu", "#envTianshuDetail", rp.tianshu);
-  $("#btnInstallTianshu").hidden = rp.tianshu.ok !== false;
-  envCard("#envPrompt", "#envPromptDetail", rp.first_prompt);
+  envCard("#envScale", "#envScaleDetail", rp.scale);
+  /* 天枢 CLI / 首轮提示词只在任务桥开启时才有意义——没开就不占位，
+     首页恒定横排（2 张或 4 张，等分占满同一行） */
+  const taskOn = (S.misc || {}).task_enabled !== false;
+  $("#envTianshu").hidden = !taskOn;
+  $("#envPrompt").hidden = !taskOn;
+  if (taskOn) {
+    $("#btnInstallTianshu").hidden = rp.tianshu.ok !== false;
+    envCard("#envTianshu", "#envTianshuDetail", rp.tianshu);
+    envCard("#envPrompt", "#envPromptDetail", rp.first_prompt);
+  }
   S.envWechat = rp.wechat;
+  if (rp.scale && rp.scale.ok === false) {
+    /* 缩放不符是「读不到消息」的硬前置：卡片红点太静默，启动就明说 */
+    toast("显示缩放不是 175%——小漓的视觉判据按 175% 标定，请到 设置 → 系统 → " +
+      "屏幕 → 缩放与布局 改为 175% 后重启小漓", "warn");
+  }
 }
 /* 慢操作按钮的 busy 态：转圈 + 禁点，让「点了有没有反应」看得见 */
 async function withBusy(btn, fn) {
@@ -1560,6 +1597,10 @@ $("#btnOpenTasks").addEventListener("click", () => {
 $("#cbTaskBridge").addEventListener("change", async (e) => {
   const r = await API.save_config({ task_enabled: e.target.checked });
   if (!r.ok) { toast("保存失败", "err"); return; }
+  /* 环境卡跟着开关显隐（天枢 CLI / 首轮提示词只服务任务桥） */
+  if (S.misc) S.misc.task_enabled = e.target.checked;
+  $("#envTianshu").hidden = !e.target.checked;
+  $("#envPrompt").hidden = !e.target.checked;
   if (!e.target.checked) { toast("任务桥已关闭（模型看不到任务工具）", "ok"); return; }
   // 首次开启（天枢还没配置过）→ 走一次性配置引导：CLI 安装/打开 + API key 配置
   const info = await API.tianshu_guide_info();
@@ -2008,7 +2049,12 @@ $("#tgDone").addEventListener("click", async () => {
 onPush((evt, p) => {
   if (evt === "tick") {
     if (p.state) applyEngineState(p.state, p.paused, p.error);
-    if (p.bus_error) toast("引擎错误：" + String(p.bus_error).slice(0, 90), "err");
+    if (p.bus_error) {
+      toast("引擎错误：" + String(p.bus_error).slice(0, 90), "err");
+      /* 初始化失败（engine error 态）弹诊断弹窗；运行中的主循环异常只 toast
+         （bus 事件一次性，弹窗只在 init 失败那一次出现，不会每秒重复） */
+      if (S.engineState === "error") showEngineError();
+    }
     if (p.log?.length) appendLogLines(p.log);
   } else if (evt === "balances") {
     renderBalances(p.rows);

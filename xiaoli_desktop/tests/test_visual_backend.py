@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PIL import Image
 
 from wx_backend import (
+    BackendConfigError,
     BackendUnavailableError,
     WeChatBackend,
     WeChatMessage,
@@ -281,6 +282,12 @@ class TestVisualBackend(unittest.TestCase):
         # 清空注册表
         for n in list(available_backends()):
             unregister_backend(n)
+        # 缩放预检统一打桩 175%：connect() 不依赖跑测试这台机器的真实 DPI
+        # （既有用例只关心连接/读取逻辑；缩放分支由下方专项用例覆盖）
+        p = mock.patch("wx_backend.visual_backend.monitor_dpi_scale",
+                       return_value=175)
+        p.start()
+        self.addCleanup(p.stop)
 
     def tearDown(self):
         for n in list(available_backends()):
@@ -294,6 +301,32 @@ class TestVisualBackend(unittest.TestCase):
         b = VisualBackend()
         with self.assertRaises(BackendUnavailableError):
             b.connect()
+
+    @mock.patch("wx_backend.visual_backend.find_wechat_window",
+                return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.monitor_dpi_scale",
+                return_value=150)
+    def test_connect_wrong_scale_fails_fast(self, _scale, _find):
+        """缩放非 175%：fail-fast 抛 BackendConfigError（重试无意义），
+        消息带实际缩放值与修复路径——这是把「读不到消息」的隐性故障
+        变成显式可操作错误的闸门。"""
+        b = VisualBackend()
+        with self.assertRaises(BackendConfigError) as cm:
+            b.connect()
+        self.assertIn("150%", str(cm.exception))
+        self.assertIn("175%", str(cm.exception))
+        self.assertIn("缩放与布局", str(cm.exception))
+
+    @mock.patch("wx_backend.visual_backend.find_wechat_window",
+                return_value=0x1234)
+    @mock.patch("wx_backend.visual_backend.monitor_dpi_scale", return_value=0)
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((100, 100), (255, 255, 255)))
+    def test_connect_unknown_scale_fails_open(self, _cap, _scale, _find):
+        """缩放检测不出（0）不拦截：检测手段失效不该把人挡在门外。"""
+        b = VisualBackend()
+        self.assertTrue(b.connect())
+        b.close()
 
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",

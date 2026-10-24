@@ -57,6 +57,28 @@ class TestConnectWx(unittest.TestCase):
         finally:
             wb.create_backend = orig
 
+    def test_config_error_fails_fast_without_retry(self):
+        """环境配置不满足（BackendConfigError，如显示缩放非 175%）→
+        立即抛出不重试——重试没有意义（用户得先去改系统设置），且即便
+        CLI 的无限重试模式也一样立即失败。"""
+        from wx_backend import BackendConfigError
+        import wechat_bot as wb
+        orig = wb.create_backend
+        calls = {"n": 0}
+
+        def fake_connect(*a, **k):
+            calls["n"] += 1
+            raise BackendConfigError("微信所在显示器的显示缩放为 150%…")
+
+        wb.create_backend = fake_connect
+        try:
+            bot = self._make(max_retries=None, interval=0)
+            with self.assertRaises(BackendConfigError):
+                bot._connect_wx()
+            self.assertEqual(calls["n"], 1, "配置错误不应进入重试循环")
+        finally:
+            wb.create_backend = orig
+
     def test_no_limit_keeps_retrying(self):
         """CLI 模式（不传上限）连接失败后继续重试——观察若干次调用确认不退出。"""
         import time

@@ -32,6 +32,7 @@
     <symbol id="i-square" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
     <symbol id="i-wechat" viewBox="0 0 24 24"><path d="M9.5 4C5.9 4 3 6.4 3 9.4c0 1.7 1 3.2 2.4 4.2L4.8 16l2.6-1.3c.7.2 1.4.3 2.1.3"/><path d="M9.5 4c3.6 0 6.5 2.4 6.5 5.4M21 14.6c0-2.5-2.4-4.6-5.3-4.6s-5.3 2.1-5.3 4.6 2.4 4.6 5.3 4.6c.6 0 1.2-.1 1.8-.3L19.8 20l-.5-1.9c1-.8 1.7-2.1 1.7-3.5Z"/></symbol>
     <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M12.5 15H17"/></symbol>
+    <symbol id="i-display" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M9 21h6M12 17v4"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3 10.5 13.5"/><path d="M21 3 14 21l-3.5-7.5L3 10Z"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></symbol>
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18M12 3a14.5 14.5 0 0 0 0 18"/></symbol>
@@ -198,6 +199,11 @@
                 <div class="env-head"><svg class="ic"><use href="#i-wechat"/></svg><span>微信 PC 版</span><span class="env-dot"></span></div>
                 <p class="env-detail" id="envWechatDetail">正在检测…</p>
                 <button class="mini-btn ghost" data-env="wechat">重新检查</button>
+              </div>
+              <div class="glass env-card" id="envScale">
+                <div class="env-head"><svg class="ic"><use href="#i-display"/></svg><span>显示缩放</span><span class="env-dot"></span></div>
+                <p class="env-detail" id="envScaleDetail">正在检测…</p>
+                <button class="mini-btn ghost" data-env="scale">重新检查</button>
               </div>
               <div class="glass env-card" id="envTianshu">
                 <div class="env-head"><svg class="ic"><use href="#i-terminal"/></svg><span>天枢 CLI</span><span class="env-dot"></span></div>
@@ -816,6 +822,18 @@
       <label class="form-item"><span>截止时间（可选）</span><input id="condExpire" type="datetime-local"></label>
     </div>
     <div class="editor-actions"><button class="mini-btn" id="btnTrigCondSave">创建</button></div>
+  </div>
+
+  <!-- 初始化失败（原因 + 现场检测 + 修复指引） -->
+  <div class="modal glass narrow" id="modalEngineError" hidden>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>初始化失败</b></div>
+    <p class="confirm-text err-reason" id="engineErrReason"></p>
+    <p class="trig-detail" id="engineErrLive"></p>
+    <ul class="err-hints" id="engineErrHints"></ul>
+    <div class="editor-actions">
+      <button class="mini-btn ghost" data-close>关闭</button>
+      <button class="mini-btn" id="btnEngErrRetry"><svg class="ic"><use href="#i-refresh"/></svg>重试初始化</button>
+    </div>
   </div>
 
   <!-- 通用确认 -->
