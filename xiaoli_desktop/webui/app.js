@@ -535,7 +535,7 @@ async function checkEnv() {
   envCard("#envScale", "#envScaleDetail", rp.scale);
   /* 天枢 CLI / 首轮提示词只在任务桥开启时才有意义——没开就不占位，
      首页恒定横排（2 张或 4 张，等分占满同一行） */
-  const taskOn = (S.misc || {}).task_enabled !== false;
+  const taskOn = !!(S.misc || {}).task_enabled;
   $("#envTianshu").hidden = !taskOn;
   $("#envPrompt").hidden = !taskOn;
   if (taskOn) {
@@ -1468,7 +1468,7 @@ function refreshSettings() {
   $("#edFiles").textContent = m.file_storage_path || "（未配置）";
   $("#edTianshuWorkdir").textContent = m.tianshu_workdir || "（未配置）";
   $("#edFirstPrompt").textContent = m.first_prompt_path || "内置模板";
-  $("#cbTaskBridge").checked = m.task_enabled !== false;
+  $("#cbTaskBridge").checked = !!m.task_enabled;
   $("#cbWebSearch").checked = m.web_search_enabled !== false;
   $("#cbNoReply").checked = !!m.no_reply_enabled;
   $("#cbGlobalMem").checked = !!m.global_memory_enabled;

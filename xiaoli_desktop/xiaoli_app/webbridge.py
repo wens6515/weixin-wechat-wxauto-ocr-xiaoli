@@ -506,7 +506,7 @@ class BridgeApi:
             "bot_nickname": cfg.get("bot_nickname", "小漓"),
             "start_paused": cfg.get("start_paused", True),
             "web_search_enabled": cfg.get("web_search_enabled", True),
-            "task_enabled": cfg.get("task_enabled", True),
+            "task_enabled": cfg.get("task_enabled", False),
             "state_watch_enabled": cfg.get("state_watch_enabled", False),
             "model_trigger_manage": cfg.get("model_trigger_manage", "off"),
             "sticker_mode": cfg.get("sticker_mode", "off"),
@@ -1513,7 +1513,7 @@ class BridgeApi:
         任务桥关闭时跳过——不唤起天枢也不发（天枢只服务于任务桥）。"""
         if getattr(self, "_prompt_running", False):
             return {"ok": False, "error": "发送已在进行中"}
-        if not self.ctx.cfg.get("task_enabled", True):
+        if not self.ctx.cfg.get("task_enabled", False):
             self.push("prompt", {"ok": False,
                                  "message": "任务桥未开启（设置页可开启），已跳过天枢唤起与首轮提示词"})
             return {"ok": True, "skipped": True}
