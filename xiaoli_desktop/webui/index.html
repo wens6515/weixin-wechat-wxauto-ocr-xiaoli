@@ -401,6 +401,7 @@
               <span class="mem-chat-name" id="memChatName">选择左侧会话</span>
               <span class="mem-card-tag" id="memCardTag" hidden></span>
               <div class="mem-head-actions">
+                <button class="mini-btn ghost" id="btnMemInject" hidden><svg class="ic"><use href="#i-plus"/></svg>注入记忆</button>
                 <button class="mini-btn ghost" id="btnMemBind" hidden><svg class="ic"><use href="#i-user"/></svg>绑定角色卡</button>
                 <button class="mini-btn ghost" id="btnMemExport" hidden><svg class="ic"><use href="#i-download"/></svg>导出</button>
                 <button class="mini-btn ghost danger" id="btnMemClearChat" hidden><svg class="ic"><use href="#i-trash"/></svg>清空此会话</button>
@@ -664,6 +665,23 @@
             </div>
           </div>
           <div class="editor-actions"><button class="mini-btn" id="btnManageTriggers"><svg class="ic"><use href="#i-bell"/></svg>管理触发器…</button></div>
+        </div>
+
+        <!-- 对话行为与跨聊天记忆 -->
+        <div class="glass sec-card" id="sec-behavior">
+          <div class="card-title"><svg class="ic"><use href="#i-brain"/></svg>对话行为与跨聊天记忆</div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>智能静默</b><small>让 AI 自己决定要不要回某条消息——对方自言自语、无需接话时保持沉默（静默也会标记已读、不漏处理）；拿不准时它仍会回复</small></div>
+            <label class="switch"><input type="checkbox" id="cbNoReply"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>全局记忆</b><small>跨聊天常驻：AI 可把「对所有人都成立的事」存进全局记忆（记忆页可注入 / 编辑 / 删除），之后所有对话都会带上</small></div>
+            <label class="switch"><input type="checkbox" id="cbGlobalMem"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>共享记忆池</b><small>开启后 AI 检索记忆时可跨聊天拉取其他会话的记忆（含深层存档，结果带来源聊天名）。各聊天的内容会互相可见——开启即接受这个边界</small></div>
+            <label class="switch"><input type="checkbox" id="cbSharedPool"><span class="track"></span></label>
+          </div>
         </div>
 
         <!-- 回复节奏 -->

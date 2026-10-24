@@ -25,6 +25,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import threading
@@ -171,9 +172,12 @@ _ALLOWED_KEYS = {
     "voice_profiles", "active_voice_profile_id",
     "chat_feature_overrides", "first_prompt_path", "bot_nickname",
     "start_paused",
+    "no_reply_enabled", "global_memory_enabled", "shared_pool_enabled",
 }
 
 # 写 cfg 后需要同步热写到 bot 属性的键（旧 UI 设置页语义：先落盘再热写）。
+# 注意 no_reply/global_memory/shared_pool 是工具声明开关——热写后下一轮
+# 请求的 tools 数组即变（前缀缓存整条作废一次，属设置变更的正常代价）。
 _BOT_HOT_KEYS = {
     "web_search_enabled", "task_enabled", "state_watch_enabled",
     "model_trigger_manage", "sticker_mode",
@@ -185,6 +189,7 @@ _BOT_HOT_KEYS = {
     "file_storage_path",
     "voice_mode", "tts_endpoint", "voice_max_seconds", "voice_profiles",
     "active_voice_profile_id",
+    "no_reply_enabled", "global_memory_enabled", "shared_pool_enabled",
 }
 
 _TERMINAL_STATES = ("已触发", "已错过", "已达成", "已到期", "已失效")
@@ -465,6 +470,12 @@ class BridgeApi:
             "state_watch_enabled": cfg.get("state_watch_enabled", False),
             "model_trigger_manage": cfg.get("model_trigger_manage", "off"),
             "sticker_mode": cfg.get("sticker_mode", "off"),
+            # 三个新开关必须出现在回显里（真机事故：保存/hot 写都生效，但
+            # get_config 的手写键表没带它们 → 设置页永远显示"关"，用户以为
+            # 开关坏了）
+            "no_reply_enabled": bool(cfg.get("no_reply_enabled", False)),
+            "global_memory_enabled": bool(cfg.get("global_memory_enabled", False)),
+            "shared_pool_enabled": bool(cfg.get("shared_pool_enabled", False)),
             "tianshu_guided": bool(cfg.get("tianshu_guided")),
         }
         voice = {
@@ -943,6 +954,87 @@ class BridgeApi:
         config_store.save_config(cfg, self.ctx.cfg_path)
         self.ctx.reproject_and_push()
         return {"ok": True}
+
+    def _mem_store(self):
+        """MemoryStore 实例：运行中走 bot 的同一 store（节流写盘一致），
+        未运行走文件级实例。注入/编辑必须与 bot 共用实例——绕开 bot 直接
+        写文件会被 bot 的节流写盘覆盖回来（clear_memory 同一教训）。"""
+        ch, _ = self._mem_channel()
+        return getattr(ch, "_mem", ch)
+
+    @_safe
+    def memory_add(self, chat: str, kind: str, content: str) -> dict:
+        """记忆注入：kind=important（重要记忆，常驻上下文，pinned 不被压缩
+        截尾）/ deep（深层存档，仅 recall 检索库）。"""
+        store = self._mem_store()
+        chat = str(chat)
+        if kind == "important":
+            ok = store.add_important(chat, str(content or ""))
+        elif kind == "deep":
+            ok = store.append_deep_manual(chat, str(content or ""))
+        else:
+            return {"ok": False, "error": f"未知类别: {kind}"}
+        return {"ok": bool(ok)}
+
+    @_safe
+    def memory_edit(self, chat: str, kind: str, idx: int, content: str = "",
+                    role: str = "", kw: str = "", mem: str = "") -> dict:
+        """记忆编辑：kind=important|recent|index|deep，idx 1 基。
+        index 的 kw 为逗号/顿号分隔字符串；recent 的 content/role 均可空
+        （空 = 不改该项）。"""
+        store = self._mem_store()
+        chat, idx = str(chat), int(idx)
+        if kind == "important":
+            ok = store.edit_important(chat, idx, content)
+        elif kind == "recent":
+            ok = store.edit_recent(chat, idx, content=content or None,
+                                   role=role or None)
+        elif kind == "index":
+            kws = [k.strip() for k in re.split(r"[,，、]", kw or "")
+                   if k.strip()]
+            ok = store.edit_index(chat, idx, kw=kws or None, mem=mem or None)
+        elif kind == "deep":
+            ok = store.edit_deep_message(chat, idx, content)
+        else:
+            return {"ok": False, "error": f"未知类别: {kind}"}
+        return {"ok": bool(ok)}
+
+    # ---- 全局记忆（跨聊天常驻注入；与聊天记忆同一套注入/编辑/删除） ----
+
+    @_safe
+    def memory_global_detail(self) -> dict:
+        store = self._mem_store()
+        return {"ok": True, **store.global_detail()}
+
+    @_safe
+    def memory_global_add(self, kind: str, content: str = "",
+                          kw: str = "", mem: str = "") -> dict:
+        """全局记忆注入：kind=important（常驻所有聊天的全局块）/
+        index（全局关键词索引，命中注入）。"""
+        store = self._mem_store()
+        if kind == "index":
+            kws = [k.strip() for k in re.split(r"[,，、]", kw or "")
+                   if k.strip()]
+            ok = store.global_add_index(kws, mem)
+        else:
+            ok = store.global_add(content)
+        return {"ok": bool(ok)}
+
+    @_safe
+    def memory_global_edit(self, kind: str, idx: int, content: str = "",
+                           kw: str = "", mem: str = "") -> dict:
+        store = self._mem_store()
+        idx = int(idx)
+        kws = [k.strip() for k in re.split(r"[,，、]", kw or "")
+               if k.strip()]
+        ok = store.global_edit(kind, idx, content=content or None,
+                               kw=kws or None, mem=mem or None)
+        return {"ok": bool(ok)}
+
+    @_safe
+    def memory_global_delete(self, kind: str, idx: int) -> dict:
+        store = self._mem_store()
+        return {"ok": bool(store.global_delete(str(kind), int(idx)))}
 
     # ---------- 用量 ----------
 

@@ -469,5 +469,33 @@ class TestInputBoxRect(unittest.TestCase):
         self.assertIsNone(VisualBackend()._input_box_rect())
 
 
+class TestBlockScreenRect(unittest.TestCase):
+    """空 emoji 块裁剪的坐标换算：消息区 1x 竖向区间 → 对方侧屏幕矩形。"""
+
+    def test_region_y_to_screen_rect(self):
+        b = _backend()
+        with mock.patch.object(vb, "window_rect",
+                               return_value=(100, 200, 1300, 1610)):
+            r = b.block_screen_rect(100, 200)
+        mr = b._message_region
+        reg_l = 100 + int(1300 * mr[0])
+        reg_w = int(1300 * (mr[2] - mr[0]))
+        reg_t = 200 + int(1610 * mr[1])
+        self.assertEqual(r[0], reg_l + int(reg_w * 0.02))
+        self.assertEqual(r[2], reg_l + int(reg_w * 0.60))
+        self.assertEqual(r[1], reg_t + 100)
+        self.assertEqual(r[3], reg_t + 200)
+
+    def test_no_window_or_too_small_returns_none(self):
+        b = _backend()
+        with mock.patch.object(vb, "window_rect", return_value=None):
+            self.assertIsNone(b.block_screen_rect(0, 100))
+        b_none = _backend(hwnd=None)
+        self.assertIsNone(b_none.block_screen_rect(0, 100))
+        with mock.patch.object(vb, "window_rect",
+                               return_value=(0, 0, 1300, 1610)):
+            self.assertIsNone(b.block_screen_rect(5, 8))  # 区间过小
+
+
 if __name__ == "__main__":
     unittest.main()

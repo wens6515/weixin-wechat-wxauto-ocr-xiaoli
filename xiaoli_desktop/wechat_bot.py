@@ -401,6 +401,17 @@ class WeChatBot(MediaCaptureMixin):
         self.active_voice_profile_id = str(
             cfg.get("active_voice_profile_id", "") or "")
         self.web_search_enabled = bool(cfg.get("web_search_enabled", True))
+        # 智能静默（no_reply 工具）：模型可自主决定对某条消息不回复。工具仅
+        # 在开启时声明（关闭 = 模型看不到该能力，提示词也不提——防幻觉调用
+        # 纪律）。静默分支的清红圈/记忆标注/占位归零在 AgentBot._handle_no_reply。
+        self.no_reply_enabled = bool(cfg.get("no_reply_enabled", False))
+        # 全局记忆（默认关）：save_global_memory 工具写入 + 全局块尾区注入
+        # 所有聊天。全局内容定义：关于小漓自己/主人/世界的跨聊天稳定事实。
+        self.global_memory_enabled = bool(cfg.get("global_memory_enabled", False))
+        # 共享记忆池（默认关）：recall_memory 升级为可跨聊天检索其他会话的
+        # 记忆（近期+重要+深层），命中带来源聊天名。开与不开是用户的决定，
+        # 不做内容过滤/来源隐藏之类的软性限制（用户定案）。
+        self.shared_pool_enabled = bool(cfg.get("shared_pool_enabled", False))
         # per-chat 角色卡绑定：绑定表（聊天名 -> 卡 id）+ 解析后的运行时参数表
         # （config_store 加载/重投影时从 cards/ 生成）。设置页/记忆页改动经
         # AppContext.reproject_and_push 热推送，无需重启。
@@ -607,9 +618,16 @@ class WeChatBot(MediaCaptureMixin):
         return f"未知 action: {action!r}（可用 list/cancel/modify）"
 
     def _modify_trigger(self, store, target, args, rid):
-        """modify 分支：按 kind 校验字段白名单（time 改 time/repeat；condition
-        改关键词/间隔/截止/切片——URL 与判定方式不可改），通过后写回。"""
+        """modify 分支：按 kind 校验字段白名单（time 改 time/repeat/content；
+        condition 改内容/关键词/间隔/截止/切片——URL 与判定方式不可改），
+        通过后写回。content 两种 kind 都可改：ui 创建的定时触发器内容由用户
+        填写、到点回递会带上；模型发现「约定的事该变了」（如把问晚饭改成
+        下班问候）时就靠它（用户定案）。"""
         fields = {}
+        if "content" in args:
+            c = str(args.get("content") or "").strip()
+            if c:
+                fields["content"] = c
         if target.get("kind") == "condition":
             if "met_keywords" in args:
                 kws = args.get("met_keywords")
@@ -1011,10 +1029,41 @@ class WeChatBot(MediaCaptureMixin):
     def _read_deep_range(self, chat_id, start, count):
         return self._mem.read_deep_range(chat_id, start, count)
 
-    def _recall_memory(self, chat_id, query):
+    def _recall_memory(self, chat_id, query, scope="本聊天"):
+        """recall_memory 工具执行：scope=本聊天（缺省）只查该聊天；
+        scope=全部 且共享记忆池开启时跨聊天检索其他会话的全部记忆
+        （近期+重要+深层，命中带来源聊天名）。池未开启时 scope=全部
+        按本聊天处理（工具声明里本就没有该参数，模型幻觉传参不放大能力）。"""
         if not getattr(self, "memory_deep_enabled", False):
             return "深层记忆未启用，无法检索历史"
+        if scope == "全部" and getattr(self, "shared_pool_enabled", False):
+            return self._mem.recall_all(query, exclude_chat=chat_id)
         return self._mem.recall(chat_id, query)
+
+    def _global_memory_block(self):
+        """全局重要记忆注入块（开关关/无内容返回 None）。"""
+        if not getattr(self, "global_memory_enabled", False):
+            return None
+        return self._mem.global_block()
+
+    def _match_global_memory(self, user_text):
+        """全局关键词索引命中注入块（开关关/无命中返回 None）。"""
+        if not getattr(self, "global_memory_enabled", False):
+            return None
+        return self._mem.global_match(user_text)
+
+    def _exec_save_global_memory(self, content):
+        """save_global_memory 工具执行（工具循环内）：写入全局重要记忆，
+        返回回执文本——模型拿回执后自然续写，不产生固定确认文案。"""
+        c = str(content or "").strip()
+        if not c:
+            return "内容为空，没有保存"
+        try:
+            if self._mem.global_add(c):
+                return f"已存入全局记忆（之后与任何人对话都会记得）：{c[:120]}"
+            return "保存失败（内容为空）"
+        except Exception as e:
+            return f"保存失败：{e}"
 
     def _important_block(self, chat_id):
         if not getattr(self, "memory_compress_enabled", False):
@@ -1100,6 +1149,34 @@ class WeChatBot(MediaCaptureMixin):
                         },
                         "required": ["task"],
                     },
+                },
+            })
+        # 智能静默工具（开关开启时注入）：模型对明显不需要接话的消息选择
+        # 不回复。执行分支在 AgentBot._handle_no_reply（清红圈/记忆/占位）。
+        # 描述刻意收窄适用面并要求「犹豫时宁可回复」——该工具滥用表现为
+        # 漏回消息，比偶尔复读严重。
+        if getattr(self, "no_reply_enabled", False):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "no_reply",
+                    # 真机事故：对方连发「感觉」「emmm」「呃呃」这类**没说完的
+                    # 半句话**，模型明明判断出「话说到一半」却仍然接话——描述
+                    # 里「拿不准宁可回复」压过了沉默场景。把「单词/半句话 =
+                    # 正在输入，等下一条」列为第一场景，并把「倾向回复」的
+                    # 适用面收窄到**完整**消息。
+                    "description": "决定对这条消息保持沉默（不发送任何回复）。"
+                                   "调用场景：① 对方消息明显没说完——只是一个"
+                                   "词或半句话（如「感觉」「然后」「就是」「emmm」"
+                                   "这类起头词，没有完整意思也没有收尾），大概率"
+                                   "正在继续输入——保持沉默，等对方把话说完，"
+                                   "下一条你会看到完整内容再回；② 对方在自言自语"
+                                   "或纯感叹，不需要你接话；③ 消息明显不是说给你"
+                                   "听的。沉默不失礼，比打断对方更好。已经完整、"
+                                   "明确对你说的消息不要沉默；只有对**完整**消息"
+                                   "确实拿不准该不该回时，才倾向简短回应。",
+                    "parameters": {"type": "object", "properties": {},
+                                   "required": []},
                 },
             })
         # 语音发送工具（voice_mode=auto/always 且配置齐全时注入；模式取
@@ -1210,6 +1287,10 @@ class WeChatBot(MediaCaptureMixin):
                             "管理你之前为当前聊天创建的触发器（定时/状态监视）："
                             "查询、取消、修改。只能操作本聊天的触发器，动不了"
                             "别的聊天的；已结束（触发/过期/失效）的不能操作。"
+                            "当你在对话中发现用户的作息或需求与某个触发器的安排"
+                            "不再匹配（提醒时间总在不合适的时刻、内容过时、该停了），"
+                            "应该主动用本工具调整（改时间/改内容/取消），"
+                            "改完自然地跟用户提一句。"
                             + ("当前活跃触发器清单已在系统消息里给出，直接用"
                                "上面的 id 操作，不确定就先 list 核对。"
                                if manage_eager else
@@ -1235,6 +1316,11 @@ class WeChatBot(MediaCaptureMixin):
                                            "enum": ["once", "daily", "weekly"],
                                            "description": "modify 定时触发器："
                                                           "重复规则"},
+                                "content": {"type": "string",
+                                            "description": "modify：新的触发器内容"
+                                                           "说明（这条约定该做的事，"
+                                                           "如把「问晚饭」改成"
+                                                           "「下班问候」）"},
                                 "met_keywords": {"type": "array",
                                                  "items": {"type": "string"},
                                                  "description": "modify 状态监视："
@@ -1359,24 +1445,70 @@ class WeChatBot(MediaCaptureMixin):
                 },
             })
         # 深层记忆检索工具：仅启用深层记忆且有聊天上下文时声明——模型在
-        # 「用户提到过去的事但自己记不清」时主动调用，避免凭空编造
+        # 「用户提到过去的事但自己记不清」时主动调用，避免凭空编造。
+        # 共享记忆池开启时升级为跨聊天检索（scope 参数 + 描述说明），关闭时
+        # 与旧形态完全一致（参数不声明——模型看不到就不会传）。
         if chat_id and getattr(self, "memory_deep_enabled", False):
+            pool_on = getattr(self, "shared_pool_enabled", False)
+            rec_props = {
+                "query": {"type": "string",
+                          "description": "检索关键词，如人名/事件/物品名"
+                                         "（可给多个，空格分开）"},
+            }
+            rec_desc = ("在本聊天的全部历史记忆中检索（包括很久以前的对话存档）。"
+                        "当用户提到过去聊过的事、之前的约定或承诺、或问你记不记得"
+                        "某件事而你一时想不起来时调用，不要凭空编造")
+            if pool_on:
+                rec_props["scope"] = {
+                    "type": "string", "enum": ["本聊天", "全部"],
+                    "description": "检索范围，默认本聊天。选「全部」会跨所有聊天"
+                                   "检索（包括深层存档，结果带来源聊天名）",
+                }
+                # 真机事故：用户连问「你和我姐聊啥了」「她有没有夸过我」，模型
+                # 从不调本工具，自作主张拿「保密/嘴严」当人设推脱——模型对齐
+                # 里"不透露第三方对话"的默认观念压过了工具能力。这里由工具
+                # 描述显式 carry 主人授权（共享池开着 = 用户已同意跨聊天可见），
+                # 并点名典型触发句式，把"检索后再答"变成第一反应。
+                rec_desc += (
+                    "；也可以指定 scope=全部 跨聊天检索你与其他人的对话记忆。"
+                    "注意：你的主人已明确开启共享记忆池、授权你跨聊天检索并谈论"
+                    "这些内容——当用户问起你和其他人聊过什么、提到某个第三方"
+                    "（如「她有没有夸过我」「你们聊啥了」「你记得他吗」）、或"
+                    "本聊天里检索不到的往事时，先调 scope=全部 检索，拿到什么就"
+                    "按人设自然地引用（可以带上来源），不要以「保密」「不方便说」"
+                    "推脱——那是在拒绝主人给你的能力")
             tools.append({
                 "type": "function",
                 "function": {
                     "name": "recall_memory",
-                    "description": "在本聊天的全部历史记忆中检索（包括很久以前的"
-                                   "对话存档）。当用户提到过去聊过的事、之前的约定"
-                                   "或承诺、或问你记不记得某件事而你一时想不起来时"
-                                   "调用，不要凭空编造",
+                    "description": rec_desc,
+                    "parameters": {
+                        "type": "object",
+                        "properties": rec_props,
+                        "required": ["query"],
+                    },
+                },
+            })
+        # 全局记忆写入工具（开关开启时注入）：把跨聊天稳定事实存进全局记忆
+        # （所有对话常驻带上）。执行在工具循环内（_exec_save_global_memory
+        # 回执），模型拿回执后自然续写确认。
+        if getattr(self, "global_memory_enabled", False):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "save_global_memory",
+                    "description": "把一条对**所有聊天**都适用的长期事实存入全局"
+                                   "记忆（之后无论在和谁对话都会记得）。只存跨聊天"
+                                   "稳定成立的事：你自己的设定与经历、主人告诉你的"
+                                   "普遍偏好或事实、长期有效的约定。某个联系人自己"
+                                   "的私事不存这里（那属于你们那个聊天的记忆）",
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "query": {"type": "string",
-                                      "description": "检索关键词，如人名/事件/物品名"
-                                                     "（可给多个，空格分开）"},
+                            "content": {"type": "string",
+                                        "description": "要记住的内容（一句话）"},
                         },
-                        "required": ["query"],
+                        "required": ["content"],
                     },
                 },
             })
@@ -1406,14 +1538,17 @@ class WeChatBot(MediaCaptureMixin):
         受益；persona 为空时本条保证 messages 至少一条 system）。
 
         payload 的工具集由 _vision_tools 按开关逐项声明（dispatch_task /
-        send_voice / set_reminder / web_search / web_fetch / recall_memory；
-        tool_choice=auto；集合为空时 payload 不带 tools/tool_choice 键）。
-        web_search/web_fetch/recall_memory 是查询型工具循环：模型调用后本
-        方法执行（搜索/抓正文/记忆检索），把结果作为 tool 消息回填、继续
-        补全，直到给出最终答复。整个调用最多 VISION_TOOL_ROUNDS 次补全，
-        循环耗尽仍未收敛返回 None（调用方降级）。dispatch_task/set_reminder
-        调用优先原样返回（既有单次语义不变，查询往返不延迟任务投递）。工具
-        往返只存在于本次调用的 messages，不写入对话历史。
+        send_voice / set_reminder / web_search / web_fetch / recall_memory /
+        no_reply / save_global_memory 等；tool_choice=auto；集合为空时
+        payload 不带 tools/tool_choice 键）。
+        查询/执行型工具（web_search/web_fetch/recall_memory/manage_reminder/
+        set_reminder/send_sticker/save_global_memory）在本方法内执行并把结果
+        作为 tool 消息回填、继续补全，直到给出最终答复——set_reminder 创建
+        成功/失败的回执由模型看到后自然确认（用户定案：固定确认文案已废）。
+        整个调用最多 VISION_TOOL_ROUNDS 次补全，循环耗尽仍未收敛返回 None
+        （调用方降级）。dispatch_task/send_voice/no_reply 调用优先原样返回
+        （单次语义，发送/投递/静默处理由上层分支完成）。工具往返只存在于
+        本次调用的 messages，不写入对话历史。
 
         返回结构化结果（供上层按 dict 处理）：
         - message.tool_calls 含 dispatch_task/set_reminder →
@@ -1452,6 +1587,16 @@ class WeChatBot(MediaCaptureMixin):
             messages.append({"role": "system", "content": important})
         if related_memory:
             messages.append({"role": "system", "content": related_memory})
+        # 全局记忆（开关开启时）：重要记忆块 + 关键词索引命中块，都在
+        # per-chat 注入之后的尾区——全局内容变化只作废后缀，不打碎前缀缓存
+        global_block = self._global_memory_block()
+        if global_block:
+            messages.append({"role": "system", "content": global_block})
+        _g_related = self._match_global_memory(
+            next((b.get("text") for b in content
+                  if isinstance(b, dict) and b.get("type") == "text"), ""))
+        if _g_related:
+            messages.append({"role": "system", "content": _g_related})
         # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
         # 插在历史前会打断缓存前缀）；persona 为空时本条保证 messages 至少
         # 一条 system，消除空 messages 隐患。
@@ -1517,8 +1662,11 @@ class WeChatBot(MediaCaptureMixin):
             payload["tool_choice"] = "auto"
         try:
             # sticker_sent：本次调用里已成功发出过表情包——随后模型不再输出
-            # 文字 = 纯表情包回复（不降级），输出了文字 = 表情包+文字
+            # 文字 = 纯表情包回复（不降级），输出了文字 = 表情包+文字。
+            # stickers_sent 收集文件名：上层把「发过哪些表情包」写进对话
+            # 历史（真机事故：模型连发两次同一张图——它不知道自己发过）。
             sticker_sent = False
+            stickers_sent: list[str] = []
             for _round in range(VISION_TOOL_ROUNDS):
                 data = self._post_chat_completions(
                     ov.get("ai_api_url") or self.vision_api_url, headers,
@@ -1538,22 +1686,27 @@ class WeChatBot(MediaCaptureMixin):
                             # 纯表情包回复：图已发出（工具循环内），空文本
                             # 是预期终态，绝不降级闲聊
                             return {"kind": "text", "content": "",
-                                    "sticker_sent": True}
+                                    "sticker_sent": True,
+                                    "stickers": stickers_sent}
                         logger.warning("视觉模型返回空 content")
                         return None
                     if sticker_sent:
                         return {"kind": "text", "content": content,
-                                "sticker_sent": True}
+                                "sticker_sent": True,
+                                "stickers": stickers_sent}
                     return {"kind": "text", "content": content}
-                # 任务/提醒工具调用优先原样返回（既有单次语义不变，不让查询
-                # 工具往返延迟任务投递）；查询型工具（搜索/抓取/记忆检索/
-                # 触发器管理/表情包）回填结果继续循环——manage_reminder 常要
-                # list→cancel/modify 连环操作，必须在循环内回执
+                # 任务/语音/静默工具调用优先原样返回（单次语义；发送/投递由
+                # 上层分支处理）；查询型与执行型工具（搜索/抓取/记忆检索/
+                # 触发器管理与创建/表情包/全局记忆写入）回填结果继续循环——
+                # manage_reminder 常要 list→cancel/modify 连环操作、set_reminder
+                # 创建后模型还要拿回执自然确认（用户定案：不再固定文案），都
+                # 必须在循环内拿到回执
                 other = [tc for tc in tool_calls
                          if _tool_call_name(tc) not in
                          ("web_search", "web_fetch", "recall_memory",
                           "manage_reminder", "send_sticker",
-                          "search_stickers")]
+                          "search_stickers", "set_reminder",
+                          "save_global_memory")]
                 if other:
                     fn = other[0].get("function", {}) or {}
                     return {"kind": "tool_call",
@@ -1586,7 +1739,9 @@ class WeChatBot(MediaCaptureMixin):
                             tool_text = "recall_memory 参数缺少 query"
                         else:
                             try:
-                                tool_text = self._recall_memory(chat_id, query)
+                                tool_text = self._recall_memory(
+                                    chat_id, query,
+                                    _tool_arg(tc, "scope") or "本聊天")
                             except Exception as e:
                                 tool_text = f"记忆检索失败：{e}"
                         logger.info(f"[记忆检索] {query!r} -> {tool_text[:60]}")
@@ -1597,10 +1752,25 @@ class WeChatBot(MediaCaptureMixin):
                         logger.info(
                             f"[触发器管理] {chat_id!r} -> {tool_text[:80]}")
                     elif name == "send_sticker":
-                        ok, tool_text = self._exec_send_sticker(
-                            chat_id, _tool_arg(tc, "file"))
+                        fname = _tool_arg(tc, "file")
+                        ok, tool_text = self._exec_send_sticker(chat_id, fname)
                         if ok:
                             sticker_sent = True
+                            stickers_sent.append(str(fname or ""))
+                    elif name == "set_reminder":
+                        # 创建触发器（执行型）：回执交模型自然确认，固定文案
+                        # 已废（用户定案）。实现在 AgentBot._exec_set_reminder。
+                        raw_args = ((tc or {}).get("function") or {})\
+                            .get("arguments") or "{}"
+                        exec_fn = getattr(self, "_exec_set_reminder", None)
+                        tool_text = (exec_fn(chat_id, raw_args)
+                                     if exec_fn is not None
+                                     else "定时工具在当前模式不可用")
+                        logger.info(f"[定时创建] {chat_id!r} -> {tool_text[:80]}")
+                    elif name == "save_global_memory":
+                        tool_text = self._exec_save_global_memory(
+                            _tool_arg(tc, "content"))
+                        logger.info(f"[全局记忆] {tool_text[:80]}")
                     elif name == "search_stickers":
                         tool_text = self._exec_search_stickers(
                             _tool_arg(tc, "query"))
@@ -1711,6 +1881,14 @@ class WeChatBot(MediaCaptureMixin):
         related = self._match_related_memory(chat_id, user_msg)
         if related:
             messages.append({"role": "system", "content": related})
+        # 全局记忆注入（开关开启时）：与 call_vision_api 同一尾区位置，
+        # 降级/触发器回递链路的全局上下文不断档
+        global_block = self._global_memory_block()
+        if global_block:
+            messages.append({"role": "system", "content": global_block})
+        g_related = self._match_global_memory(user_msg)
+        if g_related:
+            messages.append({"role": "system", "content": g_related})
         messages.append({"role": "system", "content": f"当前时间：{current_time}"})
         messages.append({"role": "user", "content": decorated})
 

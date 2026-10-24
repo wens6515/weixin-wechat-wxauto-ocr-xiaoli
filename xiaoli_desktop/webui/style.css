@@ -1240,3 +1240,21 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   font-family: inherit;
 }
 
+
+/* ---- 记忆条目：编辑 + 删除操作组（注入/编辑功能） ---- */
+.mem-item .mi-actions { display: flex; gap: 4px; flex: none; }
+.mem-item .mem-edit,
+.mem-item .mem-del {
+  flex: none; font-size: 11px; color: var(--muted);
+  padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border);
+  transition: all .15s;
+}
+.mem-item .mem-edit:hover { color: var(--accent, #4FB3FF); border-color: var(--accent, #4FB3FF); }
+.mem-item .mem-del:hover { color: var(--danger); border-color: var(--danger); }
+.mem-chat-item.global b { display: inline-flex; align-items: center; gap: 4px; }
+#confirmInput {
+  width: 100%; min-height: 64px; resize: vertical;
+  background: var(--bg-inset, transparent); color: inherit;
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font: inherit; font-size: 13px; line-height: 1.5;
+}

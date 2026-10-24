@@ -253,9 +253,12 @@ AI_DEFAULTS = {
     # 设置页决定（默认关）。定时提醒（kind=time）不受此开关影响。
     "state_watch_enabled": False,
     # 模型侧触发器管理（manage_reminder 工具）三态：off=模型只能创建触发器
-    # （现状）/ lazy=仅注入工具（被问才 list 拿 id）/ eager=工具+活跃触发器
-    # 清单注入尾区（模型直接拿 id，还能主动说出已有约定）。默认 off。
-    "model_trigger_manage": "off",
+    # / lazy=仅注入工具（被问才 list 拿 id）/ eager=工具+活跃触发器清单注入
+    # 尾区（模型直接拿 id 一步操作，还能主动说出已有约定、在作息与安排
+    # 错配时主动调整——真机事故：用户天天 19:00 在通勤路上，19:00 的问饭
+    # 闹钟模型从没想过改，lazy 档下它根本看不到清单）。默认 eager；旧配置
+    # 已存别的档位的不会被此默认值覆盖（加载只补缺失键）。
+    "model_trigger_manage": "eager",
     # 表情包发送（send_sticker 工具）三态：off=关闭（不声明工具）/
     # catalog=表情包清单每轮注入尾区（模型零额外往返直接挑，库大时每请求
     # token 略涨）/ query=按需查询（模型先 search_stickers 拿候选再挑，多
@@ -277,6 +280,19 @@ AI_DEFAULTS = {
     # 联网搜索工具开关：关闭后 call_vision_api 不再声明 web_search/web_fetch
     # （模型看不到就不会调用）；已开启时的搜索行为不受影响。
     "web_search_enabled": True,
+    # 智能静默（no_reply 工具）：开启后模型可对明显不需要接话的消息选择
+    # 不回复（工具随开关声明/隐藏）。静默路径会点输入框清红圈 + 记
+    # [已读未回复]，不会漏处理。默认关。
+    "no_reply_enabled": False,
+    # 全局记忆（save_global_memory 工具 + 全局块尾区注入所有聊天）：
+    # 存跨聊天稳定事实（小漓自己/主人/世界），记忆页「全局记忆」区块
+    # 可注入/编辑/删除（审计）。默认关。
+    "global_memory_enabled": False,
+    # 共享记忆池：recall_memory 升级为可跨聊天检索其他会话的记忆
+    # （近期+重要+深层，命中带来源聊天名），模型认为需要时主动拉取。
+    # 隐私边界由用户开这个开关时自担（用户定案：不做来源隐藏/内容过滤）。
+    # 默认关。
+    "shared_pool_enabled": False,
 }
 
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。

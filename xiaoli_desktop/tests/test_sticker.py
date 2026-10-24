@@ -369,6 +369,19 @@ class TestApplyVisionResultSticker(unittest.TestCase):
         ])
         self.assertEqual(ag._pending_placeholders, {})
 
+    def test_pure_sticker_records_filenames(self):
+        """纯表情包带文件名清单 → 历史记文件名（模型看得到自己发过哪张，
+        防连发同一张——真机事故回溯）。"""
+        ag = self._mini_agent()
+        r = ag._apply_vision_result(
+            "联系人丁", "联系人丁",
+            {"kind": "text", "content": "", "sticker_sent": True,
+             "stickers": ["猫猫.png"]},
+            user_text="气死我了")
+        self.assertTrue(r)
+        self.assertEqual(ag.history[-1],
+                         ("联系人丁", "assistant", "[发送了表情包: 猫猫.png]"))
+
     def test_sticker_plus_text_delivers_text(self):
         ag = self._mini_agent()
         ag._pending_placeholders["联系人丁"] = 1

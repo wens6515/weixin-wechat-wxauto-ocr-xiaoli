@@ -1376,12 +1376,12 @@ class TestDetectRedClusters(unittest.TestCase):
         self.assertEqual(_detect_red_clusters(img), [])
 
     def test_non_brand_red_filtered(self):
-        """列表区普通深红文字（如 r=180 < 200）不误报为角标。"""
+        """列表区普通深红文字（如 (180,40,40)，距品牌红 R 差 70）不误报为角标。"""
         from wx_backend.visual_backend import _detect_red_clusters
         from PIL import ImageDraw
         img = _solid((200, 200), (255, 255, 255))
         d = ImageDraw.Draw(img)
-        d.rectangle([20, 46, 40, 66], fill=(180, 40, 40))  # 深红不达 r>=200
+        d.rectangle([20, 46, 40, 66], fill=(180, 40, 40))  # 深红距品牌红甚远
         self.assertEqual(_detect_red_clusters(img), [])
 
     def test_orange_noise_filtered(self):
@@ -1398,6 +1398,30 @@ class TestDetectRedClusters(unittest.TestCase):
         d = ImageDraw.Draw(img)
         d.rectangle([20, 46, 40, 66], fill=(237, 112, 37))  # 橙红：b 远低于 g
         self.assertEqual(_detect_red_clusters(img), [])
+
+    def test_pink_heart_filtered(self):
+        """预览行红心 emoji（偏粉，B 通道显著高于品牌红且 G≠B）不得判为角标。
+
+        真机截图逐像素实测：红心簇 299px、中位 (244,83,104)——旧范围判据
+        （R≥200、G/B∈[60,130]）对它整体放行，被当未读红圈反复处理；
+        固定品牌红 (250,81,81)±5 下 0 像素命中，彻底排除。
+        """
+        from wx_backend.visual_backend import _detect_red_clusters
+        from PIL import ImageDraw
+        img = _solid((200, 200), (255, 255, 255))
+        d = ImageDraw.Draw(img)
+        d.rectangle([20, 46, 40, 66], fill=(244, 83, 104))  # 红心：B 比 G 高 21
+        self.assertEqual(_detect_red_clusters(img), [])
+
+    def test_near_brand_red_within_tolerance(self):
+        """品牌红 ±5 内的渲染抖动（如 (246,85,78)）仍要检出——固定色判据
+        只排除色差明显的红系内容，不排斥正常渲染噪声。"""
+        from wx_backend.visual_backend import _detect_red_clusters
+        img = _solid_with_badge()
+        from PIL import ImageDraw
+        d = ImageDraw.Draw(img)
+        d.rectangle([20, 46, 40, 66], fill=(246, 85, 78))  # 逐通道偏差 ≤5
+        self.assertEqual(len(_detect_red_clusters(img)), 1)
 
     def test_oversized_red_filtered(self):
         """整块大红（远超角标尺寸，如红色头像）不得判为角标——需面积上限。

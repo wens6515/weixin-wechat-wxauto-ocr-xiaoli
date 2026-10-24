@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""visual_backend 拆分 · 未读红圈角标检测（品牌红颜色区间 + 连通域面积，纯像素）。
+"""visual_backend 拆分 · 未读红圈角标检测（固定品牌红 + 连通域面积，纯像素）。
 
 被门面 re-export；region 归一化与列表区默认值取自 visual_regions
 （独立成模块避免与门面循环导入）。
@@ -16,20 +16,20 @@ logger = logging.getLogger(__name__)
 
 # ---------- 未读红圈角标检测 ----------
 
-# 微信未读角标品牌红 ≈ #FA5151 (250,81,81)。容差放宽到 r>=200, g<=130, b<=130：
-# 实测列表区红簇 avg_rgb=(248,80,80)/(249,81,81)，文字/头像红不满足 g/b 上限。
-# 微信未读角标品牌红 #FA5151 ≈ (250,81,81)，特征是 G≈B。
-# 真机实测（.rivet/scratch/red_probe*.py，窗口 1300x1610）：
-#   真角标 518px / 26x27，基色像素 G/B 分布 73~122（median 81）
-#   误报源是消息预览 emoji 边缘的 9 个橙红像素 (237,112,37)——G≫B
-# 旧阈值只卡上限（r>=200, g<=130, b<=130），橙色（b=37）蒙混过关
-# → bot 对同一会话无限循环「发现新消息」。据此补 G/B 双下限。
-_BADGE_R_MIN = 200
-_BADGE_R_MAX = 255
-_BADGE_G_MIN = 60
-_BADGE_G_MAX = 130
-_BADGE_B_MIN = 60
-_BADGE_B_MAX = 130
+# 未读角标判据（用户定案）：**固定品牌红**，不再用红色系范围。
+# 微信未读角标品牌红 #FA5151 = (250,81,81)，特征 G≈B。真机实测
+# （.rivet/scratch/red_probe*.py，窗口 1300x1610）：真角标 518px / 26x27，
+# 簇均值 (248,80,80)/(249,81,81)，主体像素逐通道紧贴该值（像素 G/B 分布
+# 73~122 的长尾是数字描边/抗锯齿像素）。
+# 逐像素 ±5 容差而非零容差：零容差只保得住核心像素，换台机器 GPU 取整/
+# 渲染路径差 1 就可能整簇掉出面积闸——失败模式是静默收不到所有消息，
+# 比误报严重得多；±5 是「固定色」与「鲁棒」的平衡点。
+# 范围判据的排除实例（真机截图逐像素实测）：预览行红心 emoji 簇 299px、
+# 中位 (244,83,104)——B 通道比品牌红高 23、G≠B（偏粉），±5 内 0 像素
+# 命中；旧范围判据（R≥200、G/B∈[60,130]）对它整体放行（真机误报：
+# 红心被当未读红圈反复处理）。橙红 emoji（237,112,37，G≫B）同样出局。
+_BADGE_RED = (250, 81, 81)
+_BADGE_TOL = 5
 # 面积上下限（8 邻接连通域像素数）：微信 PC 角标尺寸固定（约 26x27 ≈ 518px，
 # 不随未读条数变宽）。下限排除零星噪声像素，上限排除红色头像/大块红色图形。
 _BADGE_AREA_MIN = 60
@@ -42,7 +42,7 @@ def _detect_red_clusters(shot: Image.Image, grid: int = 20,
                          ) -> list[tuple[int, int, int, int]]:
     """检测会话列表区的未读红圈角标，返回整窗图像坐标 [(l, t, r, b), ...]。
 
-    判定 = 颜色区间（品牌红 G≈B 特征，上下限都卡）+ 连通域面积区间。
+    判定 = 固定品牌红 (250,81,81) 每通道 ±5 + 连通域面积区间。
     实现：crop 列表区 → numpy 三通道掩码 → np.where 取命中点 → 只在命中点
     上跑 8 邻接连通域（真机实测整轮 ~2ms，旧实现的逐像素 Python 扫描整幅
     图要 ~28ms）。
@@ -71,9 +71,9 @@ def _detect_red_clusters(shot: Image.Image, grid: int = 20,
         r = arr[:, :, 0].astype(np.int16)
         g = arr[:, :, 1].astype(np.int16)
         b = arr[:, :, 2].astype(np.int16)
-        mask = ((r >= _BADGE_R_MIN) & (r <= _BADGE_R_MAX)
-                & (g >= _BADGE_G_MIN) & (g <= _BADGE_G_MAX)
-                & (b >= _BADGE_B_MIN) & (b <= _BADGE_B_MAX))
+        mask = ((np.abs(r - _BADGE_RED[0]) <= _BADGE_TOL)
+                & (np.abs(g - _BADGE_RED[1]) <= _BADGE_TOL)
+                & (np.abs(b - _BADGE_RED[2]) <= _BADGE_TOL))
         ys, xs = np.where(mask)
     except Exception:
         return []
