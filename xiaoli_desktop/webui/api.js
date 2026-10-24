@@ -131,6 +131,9 @@ const MOCK = (() => {
       else if (a === "resume") { state.engine = "running"; state.paused = false; }
       return { ok: true, state: state.engine };
     },
+    engine_error_detail: () => ({ ok: true, error: "（演示）未找到微信主窗口（请确认微信已登录并打开）",
+      scale: 175, wechat_found: false,
+      hints: ["（演示）打开电脑版微信并完成登录，然后点「重试初始化」"] }),
     tail_log: () => ({ ok: true, lines: LOG_POOL }),
     voice_ready: () => ({ ok: true, ready: true, missing: [] }),
     voice_selftest: () => ({ ok: true, started: true }),

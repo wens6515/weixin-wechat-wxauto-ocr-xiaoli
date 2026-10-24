@@ -173,6 +173,8 @@ class TestThemeEstimate(unittest.TestCase):
         b = VisualBackend()
         with mock.patch("wx_backend.visual_backend.find_wechat_window",
                         return_value=0x1234), \
+             mock.patch("wx_backend.visual_backend.monitor_dpi_scale",
+                        return_value=175), \
              mock.patch("wx_backend.visual_backend.capture_window",
                         return_value=_light_text_frame()):
             b.connect()
@@ -383,6 +385,8 @@ class TestLightGroupSenderSplit(unittest.TestCase):
         ]
         with mock.patch("wx_backend.visual_backend.find_wechat_window",
                         return_value=0x1234), \
+             mock.patch("wx_backend.visual_backend.monitor_dpi_scale",
+                        return_value=175), \
              mock.patch("wx_backend.visual_backend.capture_window",
                         return_value=frame), \
              mock.patch("wx_backend.visual_backend.ocr_image",

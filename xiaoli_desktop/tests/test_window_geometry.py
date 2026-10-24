@@ -353,6 +353,7 @@ class TestEnforceHooks(unittest.TestCase):
         with mock.patch.object(vb, "find_wechat_window", return_value=0x9), \
                 mock.patch.object(b, "enforce_window_geometry") as enf, \
                 mock.patch.object(b, "_ensure_not_iconic"), \
+                mock.patch.object(vb, "monitor_dpi_scale", return_value=175), \
                 mock.patch.object(vb, "capture_window",
                                   return_value=__import__("PIL.Image",
                                                           fromlist=["Image"]).

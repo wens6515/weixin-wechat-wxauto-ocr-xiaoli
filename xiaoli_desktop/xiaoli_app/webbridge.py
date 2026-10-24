@@ -425,6 +425,46 @@ class BridgeApi:
             return {"ok": False, "error": f"未知操作: {action}"}
         return {"ok": bool(ok), "state": eng.state}
 
+    @_safe
+    def engine_error_detail(self) -> dict:
+        """初始化失败诊断：原始错误 + 现场检测（显示缩放 / 微信窗口）+
+        按错误类型生成的修复指引，供前端失败弹窗展示。
+
+        缩放不符时**恒定**附加缩放指引（不限错误里提到缩放）——它同时是
+        「窗口连上了但读不到消息」这类隐性故障的根因，任何失败都值得核对
+        一次；现场检测是即时值（用户改完设置不必重启就能在弹窗里看到 175%）。"""
+        eng = self.ctx.engine
+        err = str(getattr(eng, "error", "") or "")
+        scale, wechat_found = 0, None
+        try:
+            from wx_backend.visual_win32 import find_wechat_window, monitor_dpi_scale
+            hwnd = find_wechat_window()
+            wechat_found = hwnd is not None
+            scale = monitor_dpi_scale(hwnd if hwnd else None)
+        except Exception:
+            pass
+        hints = []
+        scale_bad = bool(scale) and scale != 175
+        if scale_bad:
+            hints.append("把 Windows 显示缩放改为 175%：设置 → 系统 → 屏幕 → "
+                         "缩放与布局 → 缩放选 175%，改完重启小漓"
+                         "（微信窗口会被自动调回标定尺寸）")
+        elif "缩放" in err and scale:
+            # 错误本身是缩放问题、现场已读到 175%：用户改好了还没重试，
+            # 别再教他改一遍——直接引导重试
+            hints.append("显示缩放当前已符合要求——直接点「重试初始化」继续")
+        if "未找到微信主窗口" in err or "微信连接失败" in err:
+            hints.append("打开电脑版微信（PC 4.x）并完成登录，保持窗口打开"
+                         "（不要最小化），然后点「重试初始化」")
+        if "PrintWindow" in err or "截图" in err:
+            hints.append("微信窗口可能被最小化或渲染异常：把它恢复显示后重试；"
+                         "仍失败就依次重启微信和小漓")
+        if not hints:
+            hints.append("确认微信已打开并登录、显示缩放为 175%，然后点"
+                         "「重试初始化」；持续失败请重启小漓")
+        return {"ok": True, "error": err, "scale": scale,
+                "wechat_found": wechat_found, "hints": hints}
+
     # ---------- 配置 ----------
 
     @_safe

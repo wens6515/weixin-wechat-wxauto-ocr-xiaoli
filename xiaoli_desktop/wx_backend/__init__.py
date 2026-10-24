@@ -23,6 +23,7 @@ from .models import MessageType, WeChatMessage
 
 __all__ = [
     "BackendError",
+    "BackendConfigError",
     "BackendUnavailableError",
     "MessageType",
     "WeChatBackend",
@@ -40,6 +41,13 @@ class BackendError(RuntimeError):
 
 class BackendUnavailableError(BackendError):
     """后端不可用（环境不支持/连接失败），可触发 auto 模式降级。"""
+
+
+class BackendConfigError(BackendError):
+    """后端运行环境不满足前置条件（如显示缩放不符标定）——重试无意义，
+    调用方应立即失败并向用户给出修复指引。与 BackendUnavailableError 的
+    「暂时不可用、可重试」语义相对：这一类是「环境配置错了，先改设置」。
+    auto 模式不把它当降级信号，原样向上传播。"""
 
 
 @runtime_checkable

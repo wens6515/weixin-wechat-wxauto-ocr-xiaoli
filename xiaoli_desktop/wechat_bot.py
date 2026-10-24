@@ -17,7 +17,7 @@ import pyautogui
 # CLI）承担，不依赖此保护，故关闭。
 pyautogui.FAILSAFE = False
 import tempfile
-from wx_backend import create_backend
+from wx_backend import BackendConfigError, create_backend
 from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
 from xiaoli_app.file_text import (_FILE_TOKEN_LOOSE_RE, _FILE_TOKEN_RE,
                                   _extract_file_name_token,
@@ -906,6 +906,11 @@ class WeChatBot(MediaCaptureMixin):
                             "只在窗口移出屏幕时拉回可见范围")
                 logger.info(f"✅ 微信连接成功（后端: {self.wx.name}）")
                 return
+            except BackendConfigError as e:
+                # 环境前置不满足（如显示缩放非 175%）：重试无意义，立即失败
+                # 给上层（引擎 error 态 → 界面弹窗给出修复指引），不进重试循环
+                logger.error(f"微信连接环境不满足：{e}")
+                raise
             except Exception as e:
                 attempts += 1
                 if self._max_connect_retries is not None \

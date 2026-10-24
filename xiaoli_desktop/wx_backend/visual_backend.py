@@ -38,11 +38,12 @@ from typing import Any, Iterator
 
 from PIL import Image
 
-from . import BackendUnavailableError
+from . import BackendConfigError, BackendUnavailableError
 from .models import MessageType, WeChatMessage
 from .visual_win32 import (
     capture_window, default_right_half_rect, dwm, ensure_window_visible,
-    find_wechat_window, find_window_by_title, monitor_work_area,
+    find_wechat_window, find_window_by_title, monitor_dpi_scale,
+    monitor_work_area,
     position_window, position_window_visible, pull_window_into_view,
     resize_window_visible, u32, visible_frame_margins, visible_window_size,
     window_rect, wt,
@@ -497,6 +498,18 @@ class VisualBackend:
         hwnd = find_wechat_window()
         if hwnd is None:
             raise BackendUnavailableError("未找到微信主窗口（请确认微信已登录并打开）")
+        # 显示缩放预检（fail-fast）：全部像素判据（头像窄带/头像高 63px/
+        # 气泡与媒体闸/文件卡片图标）按 175% 缩放下的 1300×1610 窗口标定，
+        # 缩放不符时连上了也是「读错消息/一条都读不到」的隐性故障——这里
+        # 直接拦下，把「静默瞎跑」变成一条带修复路径的显式错误。检测不出
+        # 缩放（0）不拦：检测手段失效不该把人挡在门外。
+        scale = monitor_dpi_scale(hwnd)
+        if scale and scale != 175:
+            raise BackendConfigError(
+                f"微信所在显示器的显示缩放为 {scale}%，小漓的视觉判据按 "
+                "175% 标定，缩放不符会读错消息甚至一条都读不到。"
+                "请到 Windows 设置 → 系统 → 屏幕 → 缩放与布局，把缩放改为 "
+                "175%，然后重启小漓（微信窗口会被自动调回标定尺寸）")
         self._hwnd = hwnd
         # 窗口几何：尺寸不再交给用户设置——统一强制为标定尺寸（WINDOW_SIZE，
         # 三区域与像素判据都按它标定）；位置由用户自由摆放，只在（部分）移出
@@ -1687,5 +1700,5 @@ def register():
 # 这里保留函数便于测试与显式调用）
 __all__ = [
     "VisualBackend", "register", "capture_window", "ocr_image",
-    "region_changed", "find_wechat_window",
+    "region_changed", "find_wechat_window", "monitor_dpi_scale",
 ]
