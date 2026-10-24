@@ -197,49 +197,58 @@ class TestSchedulerAndDrain(unittest.TestCase):
 
 
 class TestSetReminderTool(unittest.TestCase):
+    """set_reminder 在工具循环内执行（回执交模型自然确认，固定文案已废）：
+    _exec_set_reminder 返回回执文本；_apply_vision_result 不再有 set_reminder
+    分支（tool_call 到达那里 = 未识别工具，降级 None）。"""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="setrem_")
         self.bot = make_rem_bot(self.dir)
         self.bot.nickname = "小漓"
 
-    def test_valid_tool_call_creates_reminder_and_replies(self):
+    def test_valid_exec_creates_reminder_and_receipt(self):
         fire = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 3600))
-        result = {"kind": "tool_call", "name": "set_reminder",
-                  "arguments": json.dumps({"time": fire, "content": "查成绩",
-                                           "repeat": "once"})}
-        out = self.bot._apply_vision_result("林小满", "林小满", result,
-                                            user_text="明天提醒我查成绩")
-        self.assertTrue(out)
+        receipt = self.bot._exec_set_reminder(
+            "林小满", json.dumps({"time": fire, "repeat": "once"}))
         recs = self.bot.reminders.list()
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0]["chat"], "林小满")
         self.assertEqual(recs[0]["kind"], "time")
-        self.assertEqual(self.bot.wx.sent[-1][0], "林小满")
-        # 无预写文案（用户定案）：确认回复只确认时间，不带「提醒事项」
-        self.assertIn("记住啦", self.bot.wx.sent[-1][1])
+        # 回执带 id/时间/重复 + 让模型自然确认的指令；不是固定客套话
+        self.assertIn(f"[{recs[0]['id']}]", receipt)
+        self.assertIn(fire, receipt)
+        self.assertIn("once", receipt)
+        self.assertNotIn("记住啦", receipt)
+        # 程序侧零发送——确认由模型拿到回执后续写
+        self.assertEqual(self.bot.wx.sent, [])
 
     def test_time_without_content_ok(self):
         """time 模式不填 content 也能创建（到点回递 API 自行回复）。"""
         fire = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 3600))
-        result = {"kind": "tool_call", "name": "set_reminder",
-                  "arguments": json.dumps({"time": fire})}
-        self.assertTrue(
-            self.bot._apply_vision_result("林小满", "林小满", result,
-                                          user_text="明天下午三点叫我"))
+        receipt = self.bot._exec_set_reminder("林小满", json.dumps({"time": fire}))
+        self.assertIn("已创建定时触发", receipt)
         self.assertEqual(len(self.bot.reminders.list()), 1)
 
-    def test_bad_time_degrades_to_chat(self):
-        result = {"kind": "tool_call", "name": "set_reminder",
-                  "arguments": json.dumps({"time": "not-a-time",
-                                           "content": "x"})}
-        self.assertIsNone(
-            self.bot._apply_vision_result("林小满", "林小满", result))
+    def test_bad_time_returns_failure_receipt(self):
+        receipt = self.bot._exec_set_reminder(
+            "林小满", json.dumps({"time": "not-a-time", "content": "x"}))
+        self.assertIn("时间格式不对", receipt)
         self.assertEqual(self.bot.reminders.list(), [])
 
-    def test_past_time_degrades_to_chat(self):
+    def test_past_time_returns_failure_receipt(self):
         fire = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() - 3600))
+        receipt = self.bot._exec_set_reminder(
+            "林小满", json.dumps({"time": fire, "content": "x"}))
+        self.assertIn("已经过去", receipt)
+        self.assertEqual(self.bot.reminders.list(), [])
+
+    def test_tool_call_no_longer_dispatched_in_apply_result(self):
+        """set_reminder 已是循环内执行型工具：作为 tool_call 到达
+        _apply_vision_result 只会是未识别分支 → 降级 None（防御性断言，
+        保证不会出现「循环执行 + 分支再执行」的双创建）。"""
+        fire = time.strftime("%Y-%m-%d %H:%M", time.localtime(time.time() + 3600))
         result = {"kind": "tool_call", "name": "set_reminder",
-                  "arguments": json.dumps({"time": fire, "content": "x"})}
+                  "arguments": json.dumps({"time": fire})}
         self.assertIsNone(
             self.bot._apply_vision_result("林小满", "林小满", result))
         self.assertEqual(self.bot.reminders.list(), [])

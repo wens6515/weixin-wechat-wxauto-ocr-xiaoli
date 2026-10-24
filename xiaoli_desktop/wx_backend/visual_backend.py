@@ -1640,6 +1640,30 @@ class VisualBackend:
             }
         return empty
 
+    def block_screen_rect(self, top, bottom, x_frac=(0.02, 0.60)):
+        """消息区 1x 竖向区间 [top, bottom] → 屏幕矩形（对方侧横向范围）。
+
+        供空 emoji 块裁剪用：微信自带小表情（❤ 实测 33x28px）过不了媒体
+        检测的 40px 尺寸闸，没有媒体框可点——只能按消息块区间直接裁主窗口
+        当前帧。x_frac 限定对方侧横向范围（左侧头像带到一点上下文，右侧
+        不碰滚动条）。坐标失败返回 None。"""
+        if self._hwnd is None:
+            return None
+        win = window_rect(self._hwnd)
+        if not win:
+            return None
+        rl, rt, w, h = win
+        mr = self._message_region
+        reg_l = rl + int(w * mr[0])
+        reg_w = int(w * (mr[2] - mr[0]))
+        reg_t = rt + int(h * mr[1])
+        x0 = reg_l + int(reg_w * x_frac[0])
+        x1 = reg_l + int(reg_w * x_frac[1])
+        y0, y1 = reg_t + int(top), reg_t + int(bottom)
+        if x1 - x0 < 10 or y1 - y0 < 10:
+            return None
+        return (x0, y0, x1, y1)
+
     def send_file(self, chat: str, file_path: str) -> bool:
         """发送文件：暂未实现（视觉定位文件按钮 + 文件对话框输入路径）。"""
         logger.warning("visual 后端 send_file 暂未实现")

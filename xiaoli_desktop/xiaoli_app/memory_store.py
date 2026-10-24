@@ -61,6 +61,22 @@ def migrate_memory_data(data):
 
 # ---------- 深层文件级操作（bot 未运行时 UI 直读/直删走这里，与 bot 方法共用） ----------
 
+def _trim_important(items, cap):
+    """重要记忆截尾：从最旧开始丢非 pinned 条目直到不超 cap；pinned
+    （记忆页手动注入）条目无论位置一律保留。无 pinned 时与旧语义
+    「保最后 cap 条」完全一致。"""
+    out = []
+    used = 0
+    for x in reversed(items or []):
+        if x.get("pinned"):
+            out.append(x)
+        elif used < cap:
+            out.append(x)
+            used += 1
+    out.reverse()
+    return out
+
+
 def deep_count_lines(path):
     """深层 jsonl 有效行数（坏行不计）。文件缺失返回 0。"""
     n = 0
@@ -201,6 +217,10 @@ class MemoryStore:
         self.lock = threading.RLock()
         base = os.path.dirname(os.path.abspath(memory_file)) or "."
         self._deep_dir = os.path.join(base, "memory_deep")
+        # 全局记忆（跨聊天常驻注入）：独立文件，不进 memory_db——它不属于
+        # 任何聊天，记忆页 overview 遍历 memory_db 时也不该把它当会话列出。
+        self._global_path = os.path.join(base, "memory_global.json")
+        self._global = {"important": [], "index": []}
         self._dirty = False
         self._last_save = 0.0
 
@@ -209,6 +229,7 @@ class MemoryStore:
         self.memory_file = value
         base = os.path.dirname(os.path.abspath(value)) or "."
         self._deep_dir = os.path.join(base, "memory_deep")
+        self._global_path = os.path.join(base, "memory_global.json")
 
     # ---------- 近期记忆（注入上下文的 recent 窗口） ----------
 
@@ -295,6 +316,19 @@ class MemoryStore:
             except Exception as e:
                 logger.error(f"加载记忆失败: {e}，将使用空白记忆")
                 self.memory_db = {}
+        # 全局记忆文件（缺省/坏数据回空白——它独立于 memory_db）
+        try:
+            with open(self._global_path, "r", encoding="utf-8") as f:
+                g = json.load(f)
+            if isinstance(g, dict):
+                self._global = {
+                    "important": [x for x in (g.get("important") or [])
+                                  if isinstance(x, dict)],
+                    "index": [x for x in (g.get("index") or [])
+                              if isinstance(x, dict)],
+                }
+        except (OSError, ValueError):
+            self._global = {"important": [], "index": []}
         # 启动一次性溢出搬运：v1 迁移来的长历史超出 recent 上限的部分
         # 全部归档进深层文件（永不删除）；同时建立深层行数计数
         for chat, st in self.memory_db.items():
@@ -501,7 +535,9 @@ class MemoryStore:
         consumed：本次已压缩到的深层行数（绝对值）；important_new：
         [{"content": ...}]；index_new：[{"kw": [...], "mem": ...}]。
         条目超上限时裁掉最旧的（重要记忆上限 important_max，索引上限
-        300——索引只增会让注入匹配越来越慢且陈旧）。"""
+        300——索引只增会让注入匹配越来越慢且陈旧）。重要记忆截尾对
+        pinned 条目（记忆页手动注入的）豁免——手动注入是用户的明确意志，
+        不因压缩产出滚动而被挤掉。"""
         with self.lock:
             st = self._state(chat_id)
             st["indexed"] = max(int(st.get("indexed") or 0), int(consumed))
@@ -509,7 +545,8 @@ class MemoryStore:
                 if isinstance(item, dict) and str(item.get("content") or "").strip():
                     item = dict(item, time=time.strftime("%Y-%m-%d %H:%M:%S"))
                     st["important"].append(item)
-            st["important"] = st["important"][-max(3, int(important_max)):]
+            st["important"] = _trim_important(st["important"],
+                                              max(3, int(important_max)))
             for item in index_new:
                 if isinstance(item, dict) \
                         and [k for k in (item.get("kw") or []) if str(k).strip()] \
@@ -517,6 +554,282 @@ class MemoryStore:
                     st["index"].append(item)
             st["index"] = st["index"][-300:]
             self.schedule_save()
+
+    # ---------- 记忆注入 / 编辑（记忆页手动操作；全部持锁走节流落盘） ----------
+
+    def add_important(self, chat_id, content):
+        """手动注入一条重要记忆（pinned：压缩截尾豁免，常驻上下文）。
+        返回是否成功（空内容拒绝）。"""
+        c = str(content or "").strip()
+        if not c:
+            return False
+        with self.lock:
+            st = self._state(chat_id)
+            st["important"].append({
+                "content": c,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "pinned": True,
+            })
+            self.schedule_save()
+            return True
+
+    def append_deep_manual(self, chat_id, content):
+        """手动注入一条深层存档（不进上下文，只进 recall 检索库）。
+
+        以 user 消息形态落盘（语义 = 操作者告诉小漓的事），deep_count
+        同步 +1（压缩边界按行数推进，漏加会导致下轮压缩重复消费）。"""
+        c = str(content or "").strip()
+        if not c:
+            return False
+        with self.lock:
+            self._append_deep_unlocked(chat_id, {
+                "role": "user",
+                "content": c,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            return True
+
+    def edit_important(self, chat_id, idx, content):
+        """编辑第 idx（1 基）条重要记忆的文本（保留原 time/pinned）。"""
+        c = str(content or "").strip()
+        with self.lock:
+            st = self._state(chat_id)
+            if 1 <= idx <= len(st["important"]) and c:
+                st["important"][idx - 1]["content"] = c
+                self.schedule_save()
+                return True
+            return False
+
+    def edit_recent(self, chat_id, idx, content=None, role=None):
+        """编辑近期窗口第 idx（1 基）条消息的正文/角色（time 保留）。
+        改 recent 会打碎该聊天下一次请求的前缀缓存——手动操作，可接受。"""
+        with self.lock:
+            st = self._state(chat_id)
+            if not (1 <= idx <= len(st["recent"])):
+                return False
+            m = st["recent"][idx - 1]
+            if content is not None and str(content).strip():
+                m["content"] = str(content)
+            if role in ("user", "assistant"):
+                m["role"] = role
+            self.schedule_save()
+            return True
+
+    def edit_index(self, chat_id, idx, kw=None, mem=None):
+        """编辑第 idx（1 基）条关键词索引（kw 列表与记忆文本均可改）。"""
+        with self.lock:
+            st = self._state(chat_id)
+            if not (1 <= idx <= len(st["index"])):
+                return False
+            e = st["index"][idx - 1]
+            if kw is not None:
+                kws = [str(k).strip() for k in (kw or []) if str(k).strip()]
+                if kws:
+                    e["kw"] = kws
+            if mem is not None and str(mem).strip():
+                e["mem"] = str(mem).strip()
+            self.schedule_save()
+            return True
+
+    def edit_deep_message(self, chat_id, line_no, content):
+        """编辑深层存档第 line_no（1 基）条消息的正文（role/time 保留，
+        行数不变——压缩边界 indexed 无需移动）。原子重写。"""
+        c = str(content or "").strip()
+        if not c:
+            return False
+        with self.lock:
+            key = self._resolve_key(chat_id)
+            path = self.deep_path(key)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+            except OSError:
+                return False
+            out, n, hit = [], 0, False
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or not stripped.startswith("{"):
+                    out.append(line)  # 坏行原样保留
+                    continue
+                n += 1
+                if n == line_no:
+                    try:
+                        item = json.loads(stripped)
+                        item["content"] = c
+                        out.append(json.dumps(item, ensure_ascii=False) + "\n")
+                        hit = True
+                        continue
+                    except ValueError:
+                        pass
+                out.append(line)
+            if not hit:
+                return False
+            try:
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.writelines(out)
+                os.replace(tmp, path)
+            except OSError as e:
+                logger.error(f"[记忆] 深层文件重写失败: {e}")
+                return False
+            return True
+
+    # ---------- 共享记忆池（recall_memory 跨聊天检索，开关在 bot 层） ----------
+
+    def recall_all(self, query, exclude_chat=None):
+        """跨聊天检索：除 exclude_chat 外全部聊天的记忆（近期 + 重要 + 深层）。
+
+        共享记忆池的读取实现（开关由 bot 层控制，本方法不判断）。命中条目
+        带来源聊天名——来源信息如实交给模型，怎么用由它自己决定（用户定案：
+        不做来源隐藏之类的软性约束）。"""
+        from urllib.parse import unquote
+        terms = [t for t in re.split(r"[\s，。！？、：；\"'（）()\[\]【】]+",
+                                     str(query or "").strip()) if t]
+        if not terms:
+            return "检索词为空，请给出人名/事件/物品等关键词"
+        terms_l = [t.lower() for t in terms]
+
+        def _hit(text):
+            c = str(text or "").lower()
+            return any(t in c for t in terms_l)
+
+        ex_key = memory_key(exclude_chat or "")
+        hits = []  # (time, chat, label, content)
+        with self.lock:
+            chats = list(self.memory_db.keys())
+            # 深层目录里还有已不在 memory_db 的历史聊天（近期窗口清空过的）
+            if os.path.isdir(self._deep_dir):
+                for name in os.listdir(self._deep_dir):
+                    if not name.endswith(".jsonl"):
+                        continue
+                    chat = unquote(name[:-len(".jsonl")])
+                    if chat and chat not in chats:
+                        chats.append(chat)
+            for chat in chats:
+                if memory_key(chat) == ex_key:
+                    continue
+                st = self.memory_db.get(chat) or {}
+                for m in (st.get("recent") or []):
+                    if _hit(m.get("content")):
+                        hits.append((m.get("time") or "", chat, "近期",
+                                     str(m.get("content") or "")[:150]))
+                for x in (st.get("important") or []):
+                    if _hit(x.get("content")):
+                        hits.append((x.get("time") or "", chat, "重要",
+                                     str(x.get("content") or "")[:150]))
+                for m in self.iter_deep(chat):
+                    if _hit(m.get("content")):
+                        hits.append((m.get("time") or "", chat, "深层",
+                                     str(m.get("content") or "")[:150]))
+        if not hits:
+            return "没有找到相关记忆"
+        tail = hits[-20:]
+        lines = [f"[来自与 {chat} 的对话·{label}][{t}] {c}"
+                 for t, chat, label, c in tail]
+        head = (f"共命中 {len(hits)} 条（跨聊天），显示最近的 {len(tail)} 条：\n"
+                if len(hits) > len(tail) else "")
+        return head + "\n".join(lines)
+
+    # ---------- 全局记忆（跨聊天常驻注入；文件独立于 memory_db） ----------
+
+    def global_detail(self):
+        """全局记忆快照（记忆页「全局记忆」区块用）：{important, index}。"""
+        with self.lock:
+            return {
+                "important": [dict(x) for x in self._global["important"]],
+                "index": [dict(x) for x in self._global["index"]],
+            }
+
+    def global_add(self, content):
+        """追加一条全局重要记忆（save_global_memory 工具与记忆页注入共用）。
+        软上限 100 条（超出丢最旧）——全局块注入所有聊天，无界会撑爆上下文。"""
+        c = str(content or "").strip()
+        if not c:
+            return False
+        with self.lock:
+            self._global["important"].append({
+                "content": c,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            self._global["important"] = self._global["important"][-100:]
+            self.schedule_save()
+            return True
+
+    def global_add_index(self, kw, mem):
+        """追加一条全局关键词索引（记忆页注入用）。"""
+        kws = [str(k).strip() for k in (kw or []) if str(k).strip()]
+        m = str(mem or "").strip()
+        if not kws or not m:
+            return False
+        with self.lock:
+            self._global["index"].append({"kw": kws, "mem": m})
+            self._global["index"] = self._global["index"][-100:]
+            self.schedule_save()
+            return True
+
+    def global_edit(self, kind, idx, content=None, kw=None, mem=None):
+        """编辑全局记忆第 idx（1 基）条（kind = important | index）。"""
+        with self.lock:
+            items = self._global["important" if kind == "important" else "index"]
+            if not (1 <= idx <= len(items)):
+                return False
+            e = items[idx - 1]
+            if kind == "important":
+                if content is not None and str(content).strip():
+                    e["content"] = str(content).strip()
+            else:
+                if kw is not None:
+                    kws = [str(k).strip() for k in (kw or []) if str(k).strip()]
+                    if kws:
+                        e["kw"] = kws
+                if mem is not None and str(mem).strip():
+                    e["mem"] = str(mem).strip()
+            self.schedule_save()
+            return True
+
+    def global_delete(self, kind, idx):
+        """删除全局记忆第 idx（1 基）条（kind = important | index）。"""
+        with self.lock:
+            key = "important" if kind == "important" else "index"
+            if 1 <= idx <= len(self._global[key]):
+                self._global[key].pop(idx - 1)
+                self.schedule_save()
+                return True
+            return False
+
+    def global_block(self):
+        """全局重要记忆 system 块（无内容返回 None）。注入在 per-chat
+        important/related 之后的尾区——全局内容变化只作废后缀，不打碎
+        「人设+历史」前缀缓存。"""
+        items = [str(x.get("content") or "").strip()
+                 for x in self._global["important"]
+                 if isinstance(x, dict)]
+        items = [x for x in items if x]
+        if not items:
+            return None
+        return ("以下是跨聊天通用的全局记忆（与任何人对话时都成立）：\n"
+                + "\n".join(f"{i}. {c}" for i, c in enumerate(items, 1)))
+
+    def global_match(self, user_text):
+        """全局关键词索引匹配：命中返回注入块（≤3 条），无命中返回 None。"""
+        text = str(user_text or "")
+        if not text.strip():
+            return None
+        with self.lock:
+            hits = []
+            for e in self._global["index"]:
+                if not isinstance(e, dict):
+                    continue
+                kws = [str(k) for k in (e.get("kw") or []) if str(k).strip()]
+                mem = str(e.get("mem") or "").strip()
+                if mem and any(k in text for k in kws):
+                    hits.append(mem)
+                    if len(hits) >= 3:
+                        break
+        if not hits:
+            return None
+        return ("[全局相关记忆]（跨聊天通用）\n"
+                + "\n".join(f"- {h}" for h in hits))
 
     # ---------- 记忆管理页的数据通道（运行中经 engine.bot 调用；全部持锁） ----------
 
@@ -651,6 +964,8 @@ class MemoryStore:
         try:
             with open(self.memory_file, "w", encoding="utf-8") as f:
                 json.dump(self.memory_db, f, ensure_ascii=False, indent=2)
+            with open(self._global_path, "w", encoding="utf-8") as f:
+                json.dump(self._global, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存记忆失败: {e}")
 

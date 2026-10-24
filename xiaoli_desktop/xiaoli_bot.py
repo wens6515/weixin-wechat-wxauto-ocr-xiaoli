@@ -15,7 +15,7 @@ import requests as req
 import pyautogui
 from wechat_bot import (WeChatBot, Controller, logger,
                         is_group_chat, _extract_file_name_token,
-                        VISION_MODEL_DEFAULT)
+                        VISION_MODEL_DEFAULT, strip_reply_prefix)
 from wx_backend.models import MessageType
 from wx_backend.visual_backend import parse_title
 from wechat_bot import _memory_key
@@ -340,9 +340,9 @@ class AgentBot(WeChatBot):
         if not result:
             return None
         kind = result.get("kind")
-        if kind == "tool_call" and result.get("name") == "set_reminder":
-            # 定时提醒工具（与 dispatch_task 并列的节点 I 出口）
-            return self._handle_set_reminder(chat_name, sender, result, user_text)
+        if kind == "tool_call" and result.get("name") == "no_reply":
+            # 智能静默（no_reply_enabled 开启时声明）：模型决定不回复
+            return self._handle_no_reply(chat_name, result, user_text)
         if kind == "tool_call" and result.get("name") == "send_voice":
             # 语音发送工具（该聊天语音有效模式 auto/always 时注入）
             return self._handle_send_voice(chat_name, result, user_text)
@@ -378,20 +378,29 @@ class AgentBot(WeChatBot):
         if kind == "text":
             reply = str(result.get("content") or "").strip()
             sticker_sent = bool(result.get("sticker_sent"))
+            stickers = [str(s).strip() for s in (result.get("stickers") or [])
+                        if str(s).strip()]
             if not reply and not sticker_sent:
                 logger.warning("[vision] text 响应无回复文本，降级")
                 return None
             logger.info(f"[vision] 判定非任务，直接回复: "
                         f"{reply[:60] if reply else '[纯表情包]'}")
+            sticker_mark = ("[发送了表情包: " + "、".join(stickers) + "]"
+                            if stickers else "[发送了表情包]")
             if user_text:
                 self._add_history(chat_name, "user", user_text)
+            if stickers:
+                # 表情包动作写入历史（真机事故：模型连发两次同一张图——
+                # 历史里没有它发过表情包的痕迹，模型不知道自己发过）。
+                # 记在回复文本之前，时序与实际一致（工具循环内先发图后说话）
+                self._add_history(chat_name, "assistant", sticker_mark)
             if reply:
                 self._add_history(chat_name, "assistant", reply)
                 self._deliver_reply(chat_name, reply)
             else:
                 # 纯表情包回复：图已在工具循环内发出，这里只记记忆 + 占位
                 # 归零（实质回复语义，与 _send_text 对齐）
-                self._add_history(chat_name, "assistant", "[发送了表情包]")
+                self._add_history(chat_name, "assistant", sticker_mark)
                 self._pending_placeholders.pop(chat_name, None)
             return True
         logger.warning(f"[vision] 未知响应 kind={kind!r}，降级")
@@ -706,36 +715,78 @@ class AgentBot(WeChatBot):
 
     @staticmethod
     def _reminder_trigger_text(chat, item, fire_hm):
-        """定时触发的回递文案（按创建来源分路）。
+        """定时触发的回递文案（按创建来源分路）+ 本次触发元数据 + 主动调整提示。
 
-        界面手动创建的触发器（source=ui）内容由用户填写——模型无从知道用户
-        写了什么，必须把内容一并递过去（线上实测：内容「每天晚上和王姐姐问好
-        并询问是否吃过晚饭」被回成了「到点啦，我来提醒你咯」）；模型在对话里
-        创建的（source=model，内容恒为空）保持「创建时的对话就在历史里」这条
-        既有语义。旧数据没有 source 字段，按 content 是否为空回退判定（模型
-        路径写死空串，不会误判）。
+        元数据（[id]/重复/内容）与调整提示是触发器主动性的关键（真机事故：
+        用户说「每天这个时候都在回家的路上」，模型毫无反应——lazy 档下它
+        既看不到触发器清单、fire 文案里也没有任何触发器信息，不知道有东西
+        可改）。界面手动创建的触发器（source=ui）内容由用户填写——模型无从
+        知道用户写了什么，必须把内容一并递过去；模型在对话里创建的
+        （source=model，内容恒为空）保持「创建时的对话就在历史里」这条既有
+        语义。旧数据没有 source 字段，按 content 是否为空回退判定。
         """
         content = str(item.get("content") or "").strip()
         source = str(item.get("source") or ("ui" if content else "model"))
+        rid = str(item.get("id") or "")
+        repeat = str(item.get("repeat") or "once")
+        hint = ("\n\n（这条触发器归你管理：如果你从对话中发现它的安排该调整"
+                "——时间总在不合适的时刻、内容过时、或者该取消了——可以用 "
+                "manage_reminder 修改或取消，改完自然地跟用户提一句。）")
         if source == "ui" and content:
             return ("[定时触发] 时间到了，该去做这件事了。\n"
                     f"聊天对象：{chat}\n"
+                    f"本次触发：[{rid}]（{repeat}）「{content}」\n"
                     f"你之前和用户约好的事：{content}\n"
                     "请按人设自然地主动把这件事说出来——直接说事，"
-                    "不要提「提醒」「定时」「触发器」这类字眼。")
+                    "不要提「提醒」「定时」「触发器」这类字眼。" + hint)
         return (f"[定时触发] 与用户约定的指定时间（{fire_hm}）到了。"
+                f"本次触发：[{rid}]（{repeat}）。"
                 "这条触发器创建时的对话就在历史里，"
-                "请按人设自然地主动回复。")
+                "请按人设自然地主动回复。" + hint)
+
+    def _trigger_generate_reply(self, chat, trigger):
+        """触发器回递生成（定时/条件统一火线）：优先走 vision 链路——工具
+        全程可用（manage_reminder 现场调整触发器 / web_search / no_reply），
+        生成后由调用方 _deliver_reply(trigger=True) 发送；vision 失败/未收敛
+        降级旧 call_chat_ai 链路。历史两条链路对齐：user=触发事件、
+        assistant=最终回复（call_chat_ai 自带写入；vision 链路在此手写——
+        它不自动写历史）。
+
+        返回 ("reply", 文本) / ("silent", None) / ("fallback", None)。"""
+        resp = None
+        try:
+            resp = self.call_vision_api(
+                [{"type": "text", "text": trigger}], chat_id=chat)
+        except Exception as e:
+            logger.error(f"[触发回递] vision 链路异常: {e}")
+        if resp and resp.get("kind") == "text":
+            reply = strip_reply_prefix(str(resp.get("content") or "").strip())
+            if reply:
+                self._add_history(chat, "user", trigger)
+                self._add_history(chat, "assistant", reply)
+                return "reply", reply
+            return "fallback", None
+        if resp and resp.get("kind") == "tool_call" \
+                and resp.get("name") == "no_reply":
+            # 模型对触发事件本身选择沉默（罕见）：记录在案，不发送不降级
+            self._add_history(chat, "user", trigger)
+            self._add_history(chat, "assistant", "[触发未回复]")
+            logger.info(f"[静默] {chat!r} 模型对触发事件选择沉默")
+            return "silent", None
+        if resp and resp.get("kind") == "tool_call":
+            logger.warning(f"[触发回递] 触发事件返回工具调用 "
+                           f"{resp.get('name')!r}（触发场景不走该出口），降级聊天链路")
+        return "fallback", None
 
     def _drain_reminders(self):
         """消费到期定时触发器（kind=time）队列（主循环节点）。
 
-        火线统一（用户定案）：到点不再发固定文案【定时提醒】，而是把触发
-        事件作为消息回递给 API（call_chat_ai，唯一链路，人设+历史+缓存布局
-        全沿用）生成角色内回复后发送。发送失败也确认出队（mark_fired），
-        避免死循环重发刷屏。回递文案按创建来源分路（见
-        `_reminder_trigger_text`）：界面创建的带用户填的内容，模型创建的
-        靠历史。"""
+        火线统一（用户定案）：到点把触发事件回递给 API 生成角色内回复后
+        发送。回递优先走 vision 链路（工具可用——模型可在触发现场用
+        manage_reminder 调整触发器，见 `_reminder_trigger_text` 的元数据与
+        提示），失败降级 call_chat_ai。发送失败也确认出队（mark_fired），
+        避免死循环重发刷屏。回递文案按创建来源分路：界面创建的带用户填的
+        内容，模型创建的靠历史。"""
         while True:
             try:
                 r = self._reminder_queue.get_nowait()
@@ -753,7 +804,12 @@ class AgentBot(WeChatBot):
                 fire_hm = time.strftime("%m-%d %H:%M",
                                         time.localtime(r.get("fire_at") or now))
                 trigger = self._reminder_trigger_text(chat, r, fire_hm)
-                reply = self.call_chat_ai(chat, trigger)
+                mode, reply = self._trigger_generate_reply(chat, trigger)
+                if mode == "silent":
+                    continue
+                if mode != "reply":
+                    # 降级：旧 call_chat_ai 链路（人设/历史/缓存布局全沿用）
+                    reply = self.call_chat_ai(chat, trigger)
                 self._deliver_reply(chat, reply, trigger=True)
                 logger.info(f"[定时] 已触发 -> {chat}: {reply[:40]}")
             except Exception as e:
@@ -794,8 +850,11 @@ class AgentBot(WeChatBot):
                            f"的网页一直无法访问（可能改版了），监视被迫停止。\n"
                            f"请按人设向用户说明情况并致歉。")
             try:
-                reply = self.call_chat_ai(chat, trigger)
-                self._deliver_reply(chat, reply, trigger=True)
+                mode, reply = self._trigger_generate_reply(chat, trigger)
+                if mode != "silent":
+                    if mode != "reply":
+                        reply = self.call_chat_ai(chat, trigger)
+                    self._deliver_reply(chat, reply, trigger=True)
                 logger.info(f"[状态监视] 已回递 -> {chat} ({kind})")
             except Exception as e:
                 logger.error(f"[状态监视] 回递失败 {chat}: {e}")
@@ -901,6 +960,32 @@ class AgentBot(WeChatBot):
         self._send_voice_reply(chat_name, text, emotion=emotion)
         return True
 
+    def _handle_no_reply(self, chat_name, result, user_text):
+        """no_reply 工具分支：模型决定对这条消息保持沉默（不发送任何回复）。
+
+        三件必须做的事（漏一件都会出问题）：
+        1. 清红圈：静默 = 全程零点击，微信不会标记已读 → 红圈滞留、8s 退避
+           后无限循环重处理同一条消息（与群聊无 @ 跳过路径同一处理：点一次
+           输入框标记已读）；
+        2. 记忆标注：user 消息 + assistant「[已读未回复]」写入历史——下一轮
+           模型看得到这条消息出现过且被看过，上下文不断裂；
+        3. 占位归零：静默是「实质处理完成」语义，占位计数不清会把 skip_bot
+           撑大、分析区上沿上移，漏读对方后续消息。
+        """
+        if user_text:
+            self._add_history(chat_name, "user", user_text)
+        self._add_history(chat_name, "assistant", "[已读未回复]")
+        self._pending_placeholders.pop(chat_name, None)
+        mark_read = getattr(self.wx, "mark_session_read", None)
+        if mark_read is not None:
+            try:
+                mark_read()
+            except Exception as e:
+                logger.warning(f"[静默] 标记已读失败: {e}")
+        logger.info(f"[静默] {chat_name!r} 模型决定不回复"
+                    f"（{str(user_text or '')[:40]!r}）")
+        return True
+
     def _deliver_reply(self, chat, text, trigger=False):
         """模型生成的对话回复统一出口。该聊天语音有效模式为 always
         （voice_state：per-chat 覆盖优先）时先试语音（任一环节失败内部已
@@ -934,83 +1019,71 @@ class AgentBot(WeChatBot):
         except Exception as e:
             logger.debug(f"[用量] 回复耗时记录失败: {e}")
 
-    def _handle_set_reminder(self, chat_name, sender, result, user_text):
-        """节点 I 的 set_reminder 工具分支（统一触发器）：kind=time 定时 /
-        kind=condition 状态监视。解析 → 校验 → 入库 → 固定文案确认。
+    def _exec_set_reminder(self, chat_id, raw_args):
+        """set_reminder 工具执行（call_vision_api 工具循环内调用）。
 
-        参数非法 / 时间已过 / reminders 不可用 → 返回 None 降级普通聊天；
-        状态监视未在设置开启 → 不降级（降级会让模型凭空答应），直接友好
-        告知用户去设置页开启。"""
+        创建成功/失败一律返回回执文本——模型拿回执后用自己的话自然确认、
+        致歉或再问一次（固定确认文案已废，用户定案）。user 消息与最终自然
+        回复由 text 分支统一写历史，这里不写（避免重复记录）。"""
         try:
-            args = json.loads(result.get("arguments") or "{}")
+            args = json.loads(raw_args or "{}")
         except (ValueError, TypeError):
-            return None
+            return "set_reminder 参数解析失败，请检查参数格式"
         if not isinstance(args, dict):
-            return None
+            return "set_reminder 参数解析失败，请检查参数格式"
         kind = str(args.get("kind") or "").strip().lower()
         if not kind:
             # 旧格式兼容：给了 time 即定时，给了 url 即状态监视
             kind = "condition" if str(args.get("url") or "").strip() else "time"
         if kind == "condition":
-            return self._create_condition_watch(chat_name, args, user_text)
+            return self._create_condition_watch(chat_id, args)
         # 无 content 概念（用户定案）：到点/达成只回递事件，回复由 API 结合
         # 创建时的历史对话自行生成，模型不预写任何提醒文案
-        return self._create_time_reminder(chat_name, args, user_text)
+        return self._create_time_reminder(chat_id, args)
 
-    def _create_time_reminder(self, chat_name, args, user_text):
+    def _create_time_reminder(self, chat_name, args):
+        """创建定时触发器，返回回执文本（成功带 id/时间/重复，失败带原因）。"""
         if getattr(self, "reminders", None) is None:
-            return None
+            return "定时功能不可用（触发器存储未就绪）"
         raw_time = str(args.get("time") or "").strip()
         repeat = str(args.get("repeat") or "once").strip()
         if not raw_time:
-            return None
+            return "缺少触发时间 time（格式 YYYY-MM-DD HH:MM）"
         try:
             fire_at = time.mktime(time.strptime(raw_time, "%Y-%m-%d %H:%M"))
         except (ValueError, TypeError):
-            logger.info(f"[定时] 时间解析失败: {raw_time!r}，降级聊天")
-            return None
+            return f"时间格式不对（{raw_time}），应为 YYYY-MM-DD HH:MM"
         if fire_at <= time.time():
-            logger.info(f"[定时] 模型给的触发时间已过: {raw_time}，降级聊天")
-            return None
+            return (f"触发时间 {raw_time} 已经过去了；要现在就做的事不用建"
+                    "触发器，请和用户确认清楚时间再试")
         # source="model"：模型创建的触发器内容为空、靠创建时的对话历史兜底
         # （界面「触发器管理」创建的走 webbridge.add_trigger，内容由用户填写，
         # 到点回递必须把内容递过去）
-        self.reminders.add(chat_name, "", fire_at, repeat, source="model")
-        if user_text:
-            self._add_history(chat_name, "user", user_text)
-        self._add_history(chat_name, "assistant",
-                          f"[已设定时触发 {raw_time}，到点回递自行回复]")
-        reply = f"记住啦，{raw_time} 我会准时找你 (๑•̀ㅁ•́๑)"
-        logger.info(f"[定时] 已创建触发器 -> {chat_name} @ {raw_time}")
-        self._send_text(reply, chat_name)
-        return True
+        item = self.reminders.add(chat_name, "", fire_at, repeat, source="model")
+        logger.info(f"[定时] 已创建触发器 -> {chat_name} @ {raw_time}（{repeat}）")
+        return (f"已创建定时触发：[{item['id']}] {raw_time}（{repeat}）——"
+                "到点系统会把触发事件回递给你，届时结合当时的对话自然回复，"
+                "不需要预先写提醒文案。请用你自己的话自然地跟用户确认一下")
 
-    def _create_condition_watch(self, chat_name, args, user_text):
-        """创建状态监视：校验 → 入库 → 固定文案确认。
+    def _create_condition_watch(self, chat_name, args):
+        """创建状态监视，返回回执文本。
 
         条件监视不再依赖 content（提醒事项）——达成后是回递 API 让其根据
         条件与页面状况自行回复（用户定案），content 仅作备注存档可缺省。
-        校验失败返回 None 降级普通聊天；功能有效开关关闭（全局开关 + 按
-        聊天覆盖均未放开，会产生额外 API 调用）→ 发提示并返回 True。"""
+        开关未开启 → 回执说明原因，模型自然转告用户（不再由程序发固定提示，
+        也不降级普通聊天——降级会让模型凭空答应）。"""
         if getattr(self, "reminders", None) is None:
-            return None
+            return "状态监视功能不可用（触发器存储未就绪）"
         if not self.feature_enabled(chat_name, "state_watch"):
             logger.info(f"[状态监视] {chat_name!r} 未开启（全局开关与按聊天"
-                        "覆盖均未放开），已告知用户")
-            if user_text:
-                self._add_history(chat_name, "user", user_text)
-            self._add_history(chat_name, "assistant",
-                              "[状态监视未开启，已告知用户到设置页打开]")
-            self._send_text("这个「盯着状态提醒我」的功能在我们这个聊天还没有"
-                            "开启呢～请先在小漓的设置页里打开「状态监视」"
-                            "（全局或本聊天的例外里放开），再让我试一次好不好",
-                            chat_name)
-            return True
+                        "覆盖均未放开），已回执模型转告用户")
+            return ("状态监视功能在这个聊天没有开启（小漓设置页「状态监视」"
+                    "全局开关或本聊天的例外里放开）——请自然地告诉用户先去"
+                    "开启再让你试一次，不要凭空答应")
         url = str(args.get("url") or "").strip()
         condition = str(args.get("condition") or "").strip()
         if not url.startswith(("http://", "https://")) or not condition:
-            logger.warning(f"[状态监视] 参数非法 url={url[:60]!r}，降级聊天")
-            return None
+            return "参数不完整：condition 监视需要合法的 url 与 condition"
         # 解析跳转链到真实目标页（模型常直接选搜索结果里的搜狗 /link——
         # 跳转链接会过期且展示无意义；失败原样保留）
         resolved = resolve_redirect(url)
@@ -1024,8 +1097,8 @@ class AgentBot(WeChatBot):
             raw_kws = re.split(r"[,，、\s]+", raw_kws)
         kws = [str(k).strip() for k in (raw_kws or []) if str(k).strip()]
         if judge == "local" and not kws:
-            logger.warning("[状态监视] local 判定缺 met_keywords，降级聊天")
-            return None
+            return ("local 判定需要 met_keywords（按页面实际措辞给全同义形式）；"
+                    "条件无法用关键词判断时改用 judge=api")
         try:
             interval = int(float(args.get("interval_seconds") or 60))
         except (TypeError, ValueError):
@@ -1035,8 +1108,7 @@ class AgentBot(WeChatBot):
             try:
                 expire_at = time.mktime(time.strptime(raw_expire, "%Y-%m-%d %H:%M"))
                 if expire_at <= time.time():
-                    logger.info("[状态监视] 截止时间已过，降级聊天")
-                    return None
+                    return "截止时间已经过去了，请和用户确认截止时间再试"
             except (ValueError, TypeError):
                 expire_at = time.time() + WATCH_DEFAULT_TTL
         else:
@@ -1047,16 +1119,13 @@ class AgentBot(WeChatBot):
             met_keywords=kws, scope_start=args.get("scope_start"),
             scope_end=args.get("scope_end"), interval_seconds=interval,
             expire_at=expire_at)
-        if user_text:
-            self._add_history(chat_name, "user", user_text)
-        self._add_history(chat_name, "assistant",
-                          f"[已创建状态监视 {condition[:40]} -> {url[:60]}]")
-        reply = (f"好，我会盯着「{condition[:40]}」，一有动静或者到截止时间"
-                 f"就告诉你 (๑•̀ㅁ•́๑)")
         logger.info(f"[状态监视] 已创建 -> {chat_name}: {condition[:40]} "
                     f"@ {item['url'][:60]} every {item['interval_seconds']}s")
-        self._send_text(reply, chat_name)
-        return True
+        exp_s = time.strftime("%m-%d %H:%M", time.localtime(expire_at))
+        return (f"已创建状态监视：[{item['id']}]「{condition[:40]}」→ "
+                f"{url[:60]}，每 {item['interval_seconds']}s 查一次，"
+                f"截止 {exp_s}。达成或到截止系统会把事件回递给你，届时结合"
+                "上下文自然回复。请用你自己的话自然地跟用户确认一下")
 
     def _handle_text(self, chat_name, sender, content, msg_id=None, multi_sender=False):
         """文本消息统一处理：vision-exp 单调用判断+回复 → 天枢投递 或 普通聊天。
@@ -1274,20 +1343,25 @@ class AgentBot(WeChatBot):
         file_text = next(
             (m.content.strip() for m in window_msgs if m.type == MessageType.FILE),
             None)
-        # 文字部分（排除文件消息）
+        # 文字部分（排除文件消息）。多条合并时**逐行发送者名只在「群聊且
+        # 发送者确实不止一人」时加**——前缀本是为区分群聊多发送者设计的；
+        # 私聊 sender 恒等于会话名，逐行加名再被外层「私聊 - sender：」包
+        # 一次 = 双层嵌套（真机事故：记忆里存下「私聊 - 王文生：王文生：
+        # 话说 ⏎ 王文生：…」）；群聊同一人连发多条同理，外层按单条语义包
+        # 过一次名即可。
         text_candidates = [
             m for m in window_msgs
             if m.content.strip() and m.type != MessageType.FILE
         ]
-        if len(text_candidates) > 1:
-            # 多发送者合并：每条带各自发送者名（群聊名兜底，不整批只带最后一条）
-            multi_sender = True
+        senders = {(m.sender or chat_name) for m in text_candidates}
+        multi_sender = bool(is_group) and len(text_candidates) > 1 \
+            and len(senders) > 1
+        if multi_sender:
             text_parts = [
                 f"{m.sender or chat_name}：{m.content.strip()}"
                 for m in text_candidates
             ]
         else:
-            multi_sender = False
             text_parts = [m.content.strip() for m in text_candidates]
         text_content = "\n".join(text_parts)
         has_media = bool(win.get("has_media"))
@@ -1343,6 +1417,18 @@ class AgentBot(WeChatBot):
             logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")
             return self._handle_text(
                 chat_name, sender, text_content, None, multi_sender=multi_sender)
+        if win.get("has_other") and not has_media:
+            # 纯空块轮：对方只发了微信自带小表情（❤ 实测 33x28px——过不了
+            # 媒体检测的 40px 尺寸闸，OCR 也无文字）。旧逻辑整条丢弃且不发
+            # 任何东西清红圈 → 红圈滞留、8s 退避循环重处理（真机事故）。
+            # 按块裁剪当前帧走表情识别，正常角色化回复；识别失败也要回一句
+            # 清圈（与纯图路径的失败语义一致）。
+            blocks = [b for b in (win.get("other_blocks") or [])]
+            logger.info(f"💜 判断为小表情消息：{chat_name}（{len(blocks)} 个空块）")
+            if self._process_emoji_blocks(chat_name, blocks):
+                return True
+            self._send_text("这条小鱼没看清楚呀，再发一次好不好", chat_name)
+            return True
         return False
 
     def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None, multi_sender=False):

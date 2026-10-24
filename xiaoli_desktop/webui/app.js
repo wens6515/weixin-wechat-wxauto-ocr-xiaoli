@@ -44,15 +44,37 @@ function closeModal() {
   $("#modalMask").hidden = true;
   $$(".modal").forEach((m) => (m.hidden = true));
   if (confirmResolve) {
-    /* 兜底关窗：带下拉的弹窗取消语义是 null（调用方以 === null 判取消），
-       普通确认弹窗维持 false。历史缺陷：一律 false → selectModal 的
-       「取消」被调用方当成有效选项继续执行 */
-    confirmResolve($("#confirmSelect") ? null : false);
+    /* 兜底关窗：带下拉/输入框的弹窗取消语义是 null（调用方以 === null 判
+       取消），普通确认弹窗维持 false。历史缺陷：一律 false → selectModal
+       的「取消」被调用方当成有效选项继续执行 */
+    confirmResolve(($("#confirmSelect") || $("#confirmInput")) ? null : false);
     confirmResolve = null;
+    confirmInputEl = null;
   }
 }
 
 let confirmResolve = null;
+let confirmInputEl = null;
+/* 带文本输入的确认弹窗（记忆注入 / 编辑）：确定 = 输入内容（trim），
+   取消 / 兜底关窗 = null；确定时空串照常返回（由调用方自行校验）。 */
+function inputModal(title, label, initial = "", placeholder = "") {
+  $("#confirmTitle").textContent = title;
+  const ct = $("#confirmText");
+  ct.textContent = "";
+  const lab = document.createElement("div");
+  lab.textContent = label;
+  lab.style.margin = "2px 0 6px";
+  const ta = document.createElement("textarea");
+  ta.id = "confirmInput";
+  ta.value = initial;
+  ta.placeholder = placeholder;
+  ct.appendChild(lab);
+  ct.appendChild(ta);
+  confirmInputEl = ta;
+  openModal("modalConfirm");
+  setTimeout(() => ta.focus(), 60);
+  return new Promise((res) => (confirmResolve = res));
+}
 function confirmModal(title, text) {
   $("#confirmTitle").textContent = title;
   const ct = $("#confirmText");
@@ -91,13 +113,15 @@ function confirmSelectValue() {
 function settleConfirm(value) {
   const r = confirmResolve;
   confirmResolve = null;
+  confirmInputEl = null;
   closeModal();
   r?.(value);
 }
 $("#confirmYes").addEventListener("click",
-  () => settleConfirm(confirmSelectValue() ?? true));
+  () => settleConfirm(confirmSelectValue()
+    ?? (confirmInputEl ? confirmInputEl.value.trim() : true)));
 $("#confirmNo").addEventListener("click",
-  () => settleConfirm($("#confirmSelect") ? null : false));
+  () => settleConfirm(($("#confirmSelect") || $("#confirmInput")) ? null : false));
 
 /* ============================================================
    导航（方向感知动画 + 页面惰性加载）
@@ -1132,8 +1156,15 @@ async function loadMemory() {
   S.memRows = r.rows || [];
   const box = $("#memChats");
   box.innerHTML = "";
+  /* 全局记忆入口（固定置顶，独立于会话列表——全局记忆不属于任何聊天） */
+  const g = document.createElement("button");
+  g.className = "mem-chat-item global" + (S.memChat === "__global__" ? " active" : "");
+  g.dataset.global = "1";
+  g.innerHTML = `<b>🌐 全局记忆</b><small>跨聊天常驻 · 重要记忆与关键词索引</small>`;
+  g.addEventListener("click", openGlobalMem);
+  box.appendChild(g);
   if (!S.memRows.length) {
-    box.innerHTML = `<div class="mem-empty">还没有会话记忆</div>`;
+    box.insertAdjacentHTML("beforeend", `<div class="mem-empty">还没有会话记忆</div>`);
     return;
   }
   for (const row of S.memRows) {
@@ -1151,7 +1182,8 @@ async function openMemChat(chat) {
   S.deepQuery = "";
   $("#deepQuery").value = "";
   $("#memChatName").textContent = chat;
-  ["#btnMemBind", "#btnMemExport", "#btnMemClearChat"].forEach((s) => ($(s).hidden = false));
+  ["#btnMemInject", "#btnMemBind", "#btnMemExport", "#btnMemClearChat"].forEach((s) => ($(s).hidden = false));
+  $("#memTabs").children[1].hidden = false;  // 全局模式临时藏起的深层页签，普通会话恢复
   const row = S.memRows.find((r) => r.chat === chat);
   const tag = $("#memCardTag");
   if (row?.card_name) { tag.hidden = false; tag.textContent = "🎭 " + row.card_name; }
@@ -1162,23 +1194,90 @@ async function openMemChat(chat) {
 }
 async function refreshMemDetail(append) {
   if (!S.memChat) return;
+  if (S.memChat === "__global__") return refreshGlobalMem();
   const r = await API.memory_detail(S.memChat, append ? S.deepOffset : 0, S.deepQuery);
   if (!r.ok) { toast(r.error || "读取失败", "err"); return; }
   if (S.memMode === "overview") renderMemOverview(r);
   else renderMemDeep(r, append);
 }
-function memItem(text, time, kind, idx) {
+function memItem(text, time, kind, idx, raw) {
+  /* raw：编辑初值（important/recent/deep 为正文原文；index 为 {kw, mem}；
+     g_important/g_index 为全局记忆条目）。全部类别都支持编辑与删除。 */
   const div = document.createElement("div");
   div.className = "mem-item";
   div.innerHTML = `<span class="mi-text">${esc(text)}${time ? `<span class="mi-time">${esc(time)}</span>` : ""}</span>` +
-    `<button class="mem-del">删除</button>`;
+    `<span class="mi-actions"><button class="mem-edit">编辑</button><button class="mem-del">删除</button></span>`;
+  div.querySelector(".mem-edit").addEventListener("click", () => editMemItem(kind, idx, raw));
   div.querySelector(".mem-del").addEventListener("click", async () => {
     if (!(await confirmModal("删除该条记忆", "确定删除这一条吗？该操作不可撤销。"))) return;
-    const r = await API.memory_delete(kind, S.memChat, idx);
+    let r;
+    if (kind === "g_important") r = await API.memory_global_delete("important", idx);
+    else if (kind === "g_index") r = await API.memory_global_delete("index", idx);
+    else r = await API.memory_delete(kind, S.memChat, idx);
     toast(r.ok ? "已删除" : "删除失败", r.ok ? "ok" : "err");
-    if (r.ok) refreshMemDetail();
+    if (r.ok) (S.memChat === "__global__") ? refreshGlobalMem() : refreshMemDetail();
   });
   return div;
+}
+/* 编辑一条记忆：按类别走对应弹窗与 API；index/全局索引先改内容再改关键词 */
+async function editMemItem(kind, idx, raw) {
+  let r;
+  if (kind === "g_important") {
+    const v = await inputModal("编辑全局记忆", "内容：", (raw && raw.content) || "");
+    if (v === null || !v) return;
+    r = await API.memory_global_edit("important", idx, v);
+  } else if (kind === "g_index") {
+    const mem = await inputModal("编辑全局索引", "记忆内容：", (raw && raw.mem) || "");
+    if (mem === null || !mem) return;
+    const kw = await inputModal("编辑全局索引", "关键词（逗号 / 顿号分隔，命中即注入）：", ((raw && raw.kw) || []).join("、"));
+    if (kw === null || !kw) return;
+    r = await API.memory_global_edit("index", idx, "", kw, mem);
+  } else if (kind === "index") {
+    const mem = await inputModal("编辑关键词索引", "记忆内容：", (raw && raw.mem) || "");
+    if (mem === null || !mem) return;
+    const kw = await inputModal("编辑关键词索引", "关键词（逗号 / 顿号分隔，命中即注入）：", ((raw && raw.kw) || []).join("、"));
+    if (kw === null || !kw) return;
+    r = await API.memory_edit(S.memChat, "index", idx, "", kw, mem);
+  } else {
+    const v = await inputModal("编辑记忆", "内容：", typeof raw === "string" ? raw : ((raw && raw.content) || ""));
+    if (v === null || !v) return;
+    r = await API.memory_edit(S.memChat, kind, idx, v);
+  }
+  toast(r.ok ? "已保存 ✓" : "保存失败", r.ok ? "ok" : "err");
+  if (r.ok) (S.memChat === "__global__") ? refreshGlobalMem() : refreshMemDetail();
+}
+/* ---- 全局记忆视图（固定入口，不走 memory_detail） ---- */
+async function openGlobalMem() {
+  S.memChat = "__global__";
+  $("#memChatName").textContent = "🌐 全局记忆";
+  $("#memCardTag").hidden = true;
+  $("#btnMemInject").hidden = false;
+  ["#btnMemBind", "#btnMemExport", "#btnMemClearChat"].forEach((s) => ($(s).hidden = true));
+  $$(".mem-chat-item").forEach((b) =>
+    b.classList.toggle("active", b.dataset.global === "1"));
+  $("#memTabs").children[1].hidden = true;   // 全局没有深层存档页签
+  if (S.memMode === "deep") {
+    S.memMode = "overview";
+    $("#memTabs").children[0].classList.add("active");
+    $("#memTabs").children[1].classList.remove("active");
+    $("#memOverview").hidden = false;
+    $("#memDeep").hidden = true;
+  }
+  await refreshGlobalMem();
+}
+async function refreshGlobalMem() {
+  const r = await API.memory_global_detail();
+  if (!r.ok) { toast(r.error || "读取失败", "err"); return; }
+  const imp = $("#memImportant"), rec = $("#memRecent"), idx = $("#memIndex");
+  imp.innerHTML = ""; rec.innerHTML = ""; idx.innerHTML = "";
+  (r.important || []).forEach((m, i) =>
+    imp.appendChild(memItem(m.content || "", m.time || "", "g_important", i + 1, m)));
+  if (!r.important || !r.important.length)
+    imp.appendChild(emptyBox("暂无全局重要记忆（点右上「注入记忆」添加）"));
+  (r.index || []).forEach((m, i) =>
+    idx.appendChild(memItem(`${(m.kw || []).join("、")} → ${m.mem}`, "", "g_index", i + 1, m)));
+  if (!r.index || !r.index.length) idx.appendChild(emptyBox("暂无全局关键词索引"));
+  rec.appendChild(emptyBox("全局记忆只有重要记忆与索引，没有对话窗口"));
 }
 function emptyBox(text) {
   const d = document.createElement("div");
@@ -1190,14 +1289,14 @@ function renderMemOverview(d) {
   const imp = $("#memImportant"), rec = $("#memRecent"), idx = $("#memIndex");
   imp.innerHTML = ""; rec.innerHTML = ""; idx.innerHTML = "";
   (d.important || []).forEach((m, i) =>
-    imp.appendChild(memItem(m.content || m, "", "important", i + 1)));
-  if (!d.important?.length) imp.appendChild(emptyBox("暂无重要记忆"));
+    imp.appendChild(memItem(m.content || m, m.time || "", "important", i + 1, m.content || m)));
+  if (!d.important?.length) imp.appendChild(emptyBox("暂无重要记忆（点右上「注入记忆」添加）"));
   (d.recent || []).forEach((m, i) =>
     rec.appendChild(memItem(`[${m.role === "assistant" ? "小漓" : "用户"}] ${m.content}`,
-      m.time, "recent", i + 1)));
+      m.time, "recent", i + 1, m.content)));
   if (!d.recent?.length) rec.appendChild(emptyBox("暂无近期对话"));
   (d.index || []).forEach((m, i) =>
-    idx.appendChild(memItem(`${(m.kw || []).join("、")} → ${m.mem}`, "", "index", i + 1)));
+    idx.appendChild(memItem(`${(m.kw || []).join("、")} → ${m.mem}`, "", "index", i + 1, m)));
   if (!d.index?.length) idx.appendChild(emptyBox("暂无关键词索引"));
 }
 function renderMemDeep(d, append) {
@@ -1205,7 +1304,7 @@ function renderMemDeep(d, append) {
   if (!append) body.innerHTML = "";
   (d.deep || []).forEach((m) =>
     body.appendChild(memItem(`#${m.line_no} [${m.role === "assistant" ? "小漓" : "用户"}] ${m.content}`,
-      m.time, "deep", m.line_no)));
+      m.time, "deep", m.line_no, m.content)));
   if (S.deepQuery) {
     $("#deepInfo").textContent = `命中 ${d.deep_matched ?? 0} 条（最多显示 200 条）`;
     $("#btnDeepMore").hidden = true;
@@ -1219,6 +1318,8 @@ function renderMemDeep(d, append) {
 $("#memTabs").addEventListener("click", async (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
+  if (S.memChat === "__global__" && btn.dataset.v === "deep") return;
+  $("#memTabs").children[1].hidden = false;  // 全局模式临时藏起，普通会话恢复
   [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
   S.memMode = btn.dataset.v;
   $("#memOverview").hidden = S.memMode !== "overview";
@@ -1267,6 +1368,41 @@ async function clearAllMemory() {
 }
 $("#btnMemClearAll").addEventListener("click", clearAllMemory);
 $("#btnMemClearAll2").addEventListener("click", clearAllMemory);
+/* ---- 注入记忆（会话：重要记忆/深层存档；全局：重要记忆/关键词索引） ---- */
+$("#btnMemInject").addEventListener("click", async () => {
+  if (!S.memChat) return;
+  if (S.memChat === "__global__") {
+    const kind = await selectModal("注入全局记忆", "注入类型：",
+      [{ value: "important", label: "重要记忆（所有聊天常驻带上）" },
+       { value: "index", label: "关键词索引（命中自动注入）" }], "important");
+    if (!kind) return;
+    let r;
+    if (kind === "index") {
+      const mem = await inputModal("注入全局索引", "记忆内容：", "");
+      if (mem === null || !mem) return;
+      const kw = await inputModal("注入全局索引", "关键词（逗号 / 顿号分隔，命中即注入）：", "");
+      if (kw === null || !kw) return;
+      r = await API.memory_global_add("index", "", kw, mem);
+    } else {
+      const c = await inputModal("注入全局记忆", "要记住的内容（对任何聊天都成立的事实）：", "");
+      if (c === null || !c) return;
+      r = await API.memory_global_add("important", c);
+    }
+    toast(r.ok ? "已注入全局记忆 ✓" : "注入失败", r.ok ? "ok" : "err");
+    if (r.ok) await refreshGlobalMem();
+    return;
+  }
+  const kind = await selectModal("注入记忆", `注入到「${S.memChat}」的记忆类型：`,
+    [{ value: "important", label: "重要记忆（常驻上下文，压缩不淘汰）" },
+     { value: "deep", label: "深层存档（仅检索库，不进上下文）" }], "important");
+  if (!kind) return;
+  const c = await inputModal("注入记忆", "要记住的内容：", "");
+  if (c === null || !c) return;
+  const r = await API.memory_add(S.memChat, kind, c);
+  toast(r.ok ? "已注入 ✓" : "注入失败", r.ok ? "ok" : "err");
+  if (r.ok) { refreshMemDetail(); loadMemory(); }
+});
+
 $("#btnMemBind").addEventListener("click", async () => {
   if (!S.memChat) return;
   const opts = [{ value: "", label: "跟随全局活跃卡（解除绑定）" }]
@@ -1297,6 +1433,9 @@ function refreshSettings() {
   $("#edFirstPrompt").textContent = m.first_prompt_path || "内置模板";
   $("#cbTaskBridge").checked = m.task_enabled !== false;
   $("#cbWebSearch").checked = m.web_search_enabled !== false;
+  $("#cbNoReply").checked = !!m.no_reply_enabled;
+  $("#cbGlobalMem").checked = !!m.global_memory_enabled;
+  $("#cbSharedPool").checked = !!m.shared_pool_enabled;
   $("#edWebProxy").value = m.web_proxy || "";
   $("#cbStateWatch").checked = !!m.state_watch_enabled;
   $("#edNickname").value = m.bot_nickname || "小漓";
@@ -1447,6 +1586,21 @@ $("#cbStateWatch").addEventListener("change", async (e) => {
   const r = await API.save_config({ state_watch_enabled: e.target.checked });
   toast(r.ok ? (e.target.checked ? "状态监视已开启" : "状态监视已关闭") : "保存失败",
     r.ok ? "ok" : "err");
+});
+$("#cbNoReply").addEventListener("change", async (e) => {
+  const r = await API.save_config({ no_reply_enabled: e.target.checked });
+  toast(r.ok ? (e.target.checked ? "智能静默已开启：AI 可自行决定不接某条话" : "智能静默已关闭")
+    : "保存失败", r.ok ? "ok" : "err");
+});
+$("#cbGlobalMem").addEventListener("change", async (e) => {
+  const r = await API.save_config({ global_memory_enabled: e.target.checked });
+  toast(r.ok ? (e.target.checked ? "全局记忆已开启（记忆页可注入/审计）" : "全局记忆已关闭")
+    : "保存失败", r.ok ? "ok" : "err");
+});
+$("#cbSharedPool").addEventListener("change", async (e) => {
+  const r = await API.save_config({ shared_pool_enabled: e.target.checked });
+  toast(r.ok ? (e.target.checked ? "共享记忆池已开启：AI 可跨聊天检索记忆" : "共享记忆池已关闭")
+    : "保存失败", r.ok ? "ok" : "err");
 });
 /* ---- 模型管理触发器（三态，点击即存） ---- */
 $("#trigManageSeg").addEventListener("click", async (e) => {

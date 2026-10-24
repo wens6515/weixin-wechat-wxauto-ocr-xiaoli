@@ -195,6 +195,38 @@ class MediaCaptureMixin:
         tmp_paths = self._capture_media_images(chat_name, min_top=min_top)
         if not tmp_paths:
             return None
+        return self._vision_image_reply(chat_name, tmp_paths)
+
+    def _capture_emoji_images(self, chat_name, blocks):
+        """空 emoji 块捕获：微信自带小表情（❤ 实测 33x28px）过不了媒体
+        检测的 40px 尺寸闸、OCR 也读不出文字——按消息块区间直接裁主窗口
+        当前帧（不点击：小表情没有可点的媒体框，点击反而有风险）。"""
+        rect_fn = getattr(self.wx, "block_screen_rect", None)
+        if rect_fn is None:
+            return []
+        paths = []
+        for blk in blocks or []:
+            rect = rect_fn(blk.get("top"), blk.get("bottom"))
+            if not rect:
+                continue
+            p = self._crop_media_region(*rect)
+            if p:
+                paths.append(p)
+        return paths
+
+    def _process_emoji_blocks(self, chat_name, blocks):
+        """纯空块轮处理（对方只发了小表情/emoji）：逐块裁剪 → vision 单
+        调用角色化回复。与 _process_pure_image 同一链路语义，只是捕获源
+        从媒体框换成块区间。"""
+        tmp_paths = self._capture_emoji_images(chat_name, blocks)
+        if not tmp_paths:
+            return None
+        return self._vision_image_reply(chat_name, tmp_paths)
+
+    def _vision_image_reply(self, chat_name, tmp_paths):
+        """图片/表情 vision 单调用公共段：全部图一次调用 → 结果路由给
+        _route_vision_result；临时文件由本方法 finally 清理（覆写方需在
+        返回前同步消费 img_paths）。返回 True = 已处理，None = 失败降级。"""
         content = [{"type": "text", "text": VISION_IMAGE_PROMPT}]
         try:
             for p in tmp_paths:

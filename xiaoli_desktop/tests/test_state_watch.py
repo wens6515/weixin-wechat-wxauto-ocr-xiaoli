@@ -280,23 +280,23 @@ class TestConditionWatcher(unittest.TestCase):
 
 
 class TestHandleSetReminderCondition(unittest.TestCase):
+    """set_reminder 在工具循环内执行（回执交模型自然确认）：
+    _exec_set_reminder 返回回执文本，_apply_vision_result 不再有该分支。"""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="setcond_")
         self.bot = make_watch_bot(self.dir)
         self.bot.nickname = "小漓"
 
     def _call(self, args, user_text="下雨了提醒我拿快递"):
-        result = {"kind": "tool_call", "name": "set_reminder",
-                  "arguments": json.dumps(args)}
-        return self.bot._apply_vision_result("林小满", "林小满", result,
-                                             user_text=user_text)
+        return self.bot._exec_set_reminder("林小满", json.dumps(args))
 
     def test_disabled_sends_hint_no_entry(self):
         self.bot.state_watch_enabled = False
         out = self._call({"kind": "condition", "content": "拿快递",
                           "url": "https://x/w", "condition": "下雨",
                           "judge": "local", "met_keywords": ["雨"]})
-        self.assertTrue(out)
+        self.assertIn("状态监视", out)  # 回执说明原因，模型自然转告
         self.assertEqual(self.bot.reminders.list(), [])
         self.assertEqual(len(self.bot.reminders.list_conditions()), 0)
 
@@ -308,7 +308,7 @@ class TestHandleSetReminderCondition(unittest.TestCase):
                           "match_type": "absent",
                           "met_keywords": ["雨", "降雨"],
                           "interval_seconds": 10})
-        self.assertTrue(out)
+        self.assertIn("已创建状态监视", out)
         rows = self.bot.reminders.list_conditions()
         self.assertEqual(len(rows), 1)
         r = rows[0]
@@ -320,16 +320,18 @@ class TestHandleSetReminderCondition(unittest.TestCase):
 
     def test_local_missing_keywords_degrades(self):
         self.bot.state_watch_enabled = True
-        self.assertIsNone(self._call({"kind": "condition", "content": "x",
-                                      "url": "https://x", "condition": "雨停",
-                                      "judge": "local"}))
+        out = self._call({"kind": "condition", "content": "x",
+                          "url": "https://x", "condition": "雨停",
+                          "judge": "local"})
+        self.assertIn("met_keywords", out)  # 失败回执（模型可见原因）
         self.assertEqual(self.bot.reminders.list_conditions(), [])
 
     def test_bad_url_degrades(self):
         self.bot.state_watch_enabled = True
-        self.assertIsNone(self._call({"kind": "condition", "content": "x",
-                                      "url": "不是网址", "condition": "雨停",
-                                      "judge": "api"}))
+        out = self._call({"kind": "condition", "content": "x",
+                          "url": "不是网址", "condition": "雨停",
+                          "judge": "api"})
+        self.assertIn("参数不完整", out)
         self.assertEqual(self.bot.reminders.list_conditions(), [])
 
     def test_condition_without_content_ok(self):
@@ -338,7 +340,7 @@ class TestHandleSetReminderCondition(unittest.TestCase):
         out = self._call({"kind": "condition", "url": "https://x/w",
                           "condition": "雨停", "match_type": "absent",
                           "met_keywords": ["雨"]})
-        self.assertTrue(out)
+        self.assertIn("已创建状态监视", out)
         rows = self.bot.reminders.list_conditions()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["content"], "")
@@ -348,7 +350,7 @@ class TestHandleSetReminderCondition(unittest.TestCase):
         fire = time.strftime("%Y-%m-%d %H:%M",
                              time.localtime(time.time() + 3600))
         out = self._call({"time": fire, "content": "查成绩"})
-        self.assertTrue(out)
+        self.assertIn("已创建定时触发", out)
         self.assertEqual(len(self.bot.reminders.list()), 1)
         self.assertEqual(self.bot.reminders.list()[0]["kind"], "time")
 

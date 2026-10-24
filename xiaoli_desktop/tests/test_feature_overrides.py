@@ -187,18 +187,17 @@ class TestApplyVisionResultGating(unittest.TestCase):
         self.assertIsNone(b._handle_send_voice("林小满", result, user_text=None))
 
     def test_condition_watch_tells_user_when_disabled(self):
-        """状态监视未开启（全局关 + 无覆盖）→ 友好告知，不凭空答应。"""
+        """状态监视未开启（全局关 + 无覆盖）→ 回执说明原因（模型自然转告，
+        不再由程序发固定提示），不凭空答应。"""
         b = _make_bot()
         sent = []
         b._send_text = lambda text, chat, placeholder=False: \
             sent.append((chat, text))
         args = {"url": "https://example.com", "condition": "下雨",
                 "judge": "local", "met_keywords": ["雨"]}
-        r = b._create_condition_watch(
-            "林小满", args, user_text="下雨了提醒我")
-        self.assertTrue(r)
-        self.assertEqual(len(sent), 1)
-        self.assertIn("状态监视", sent[0][1])
+        r = b._create_condition_watch("林小满", args)
+        self.assertIn("状态监视", r)
+        self.assertEqual(sent, [])  # 程序侧零发送——确认由模型续写
 
     def test_condition_watch_creates_with_chat_override_on(self):
         """全局关 + 单聊强制开 → 该聊天可创建监视（轮询靠条目存在驱动）。"""
@@ -208,8 +207,8 @@ class TestApplyVisionResultGating(unittest.TestCase):
         b.chat_feature_overrides = {"林小满": {"state_watch": True}}
         args = {"url": "https://example.com", "condition": "下雨",
                 "judge": "local", "met_keywords": ["雨"]}
-        r = b._create_condition_watch("林小满", args, user_text="下雨了提醒我")
-        self.assertTrue(r)
+        r = b._create_condition_watch("林小满", args)
+        self.assertIn("已创建状态监视", r)
         self.assertEqual(len(b.reminders.list_conditions()), 1)
 
     def test_state_watch_polling_active_with_entries_only(self):
