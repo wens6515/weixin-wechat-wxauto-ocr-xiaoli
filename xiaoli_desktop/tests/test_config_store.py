@@ -57,6 +57,20 @@ class TestMigrate(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def test_fresh_config_task_bridge_default_off(self):
+        """新装默认关任务桥（用户定案）：天枢 CLI 未配置前开着，模型会投递
+        注定失败的任务。缺键时由 AI_DEFAULTS 补 False；显式设过的值不覆盖。"""
+        cfg = config_store.load_config_store(
+            os.path.join(self.tmp, "fresh.json"), self.cards_dir)
+        self.assertIs(cfg["task_enabled"], False)
+
+    def test_explicit_task_bridge_value_not_overridden(self):
+        p = os.path.join(self.tmp, "explicit.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"task_enabled": True}, f)
+        cfg = config_store.load_config_store(p, self.cards_dir)
+        self.assertIs(cfg["task_enabled"], True)
+
     def test_legacy_migrate_creates_provider_and_card(self):
         cfg = make_legacy_config()
         out = config_store.migrate_config(cfg, self.cards_dir)

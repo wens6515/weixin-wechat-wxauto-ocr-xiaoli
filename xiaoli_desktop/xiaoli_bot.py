@@ -34,7 +34,9 @@ if getattr(sys.stdout, "encoding", "utf-8") != "utf-8":
 # =====================================================================
 
 TASK_DEFAULTS = {
-    "task_enabled": True,
+    # 新装默认关（与 config_store.AI_DEFAULTS 同口径）：天枢 CLI 未配置前
+    # 开着，模型会投递注定失败的任务；显式设过该键的老配置不受影响
+    "task_enabled": False,
     "tasks_dir": r"D:\工作间\wxauto",
     "tianshu_window_title": "",            # 空 = 启动时交互选择
     "tianshu_trigger_command": "开始处理",
@@ -131,7 +133,7 @@ class AgentBot(WeChatBot):
         不传：保留无限重试（用户开着 bot 等微信启动）。"""
         super().__init__(cfg, stop_event=stop_event,
                          max_connect_retries=max_connect_retries)
-        self.task_enabled = cfg.get("task_enabled", True)
+        self.task_enabled = cfg.get("task_enabled", False)
         self.tasks_dir = cfg.get("tasks_dir", r"D:\工作间\wxauto")
         self.tianshu_window_title = cfg.get("tianshu_window_title", "")
         self.tianshu_trigger_command = cfg.get("tianshu_trigger_command", "开始处理")

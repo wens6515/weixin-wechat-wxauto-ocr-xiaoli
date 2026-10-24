@@ -71,7 +71,7 @@ const MOCK = (() => {
             memory_compress_model: "", file_storage_path: "C:\\演示\\Documents\\xwechat_files",
             tasks_dir: "D:\\演示\\wxauto", tianshu_workdir: "D:\\演示",
             web_proxy: "", first_prompt_path: "", bot_nickname: "小漓", start_paused: true,
-            web_search_enabled: true, task_enabled: true, state_watch_enabled: false,
+            web_search_enabled: true, task_enabled: false, state_watch_enabled: false,
             model_trigger_manage: "off", sticker_mode: "off",
             segment_wait_enabled: true, segment_wait_seconds: 2,
             segment_jitter_enabled: false, segment_jitter_min: 1.5, segment_jitter_max: 3,
