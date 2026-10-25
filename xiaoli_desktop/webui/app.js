@@ -136,6 +136,7 @@ const PAGE_LOADERS = {
   usage: () => loadUsage(), cards: () => loadCards(),
   models: () => loadModels(), memory: () => loadMemory(),
   logs: () => initLogPage(), tasks: () => loadTasks(),
+  persona: () => loadPersona(),
 };
 
 function indicatorMode() {
@@ -627,9 +628,13 @@ function logLevelOf(line) {
   return "info";
 }
 function appendLogLines(lines, cap) {
+  /* 首页小窗：追加在底、自动滚到最新（旧语义）；
+     日志页：**最新在顶**——按自然序逐条 prepend（处理完最新恰在第一行），
+     超限从尾部删最旧，不自动滚动（用户在读顶部）。 */
   for (const sel of ["#logBody", "#logPageBody"]) {
     const body = $(sel);
     if (!body) continue;
+    const newestTop = sel === "#logPageBody";
     const limit = sel === "#logBody" ? 60 : (cap || 800);
     for (const line of lines) {
       const div = document.createElement("div");
@@ -637,10 +642,12 @@ function appendLogLines(lines, cap) {
       const lv = logLevelOf(line);
       div.innerHTML = `<span class="lv ${lv}">${lv.toUpperCase()}</span><span></span>`;
       div.lastChild.textContent = line;
-      body.appendChild(div);
+      if (newestTop) body.prepend(div);
+      else body.appendChild(div);
     }
-    while (body.children.length > limit) body.firstChild.remove();
-    body.scrollTop = body.scrollHeight;
+    while (body.children.length > limit)
+      body.removeChild(newestTop ? body.lastChild : body.firstChild);
+    if (!newestTop) body.scrollTop = body.scrollHeight;
   }
 }
 $("#btnLogClear").addEventListener("click", () => { $("#logBody").innerHTML = ""; });
@@ -924,15 +931,15 @@ function downloadText(filename, content, mime) {
    ============================================================ */
 const PRESETS = [
   { id: "deepseek", name: "DeepSeek 深度求索", base_url: "https://api.deepseek.com/v1/chat/completions",
-    models: ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro", "deepseek:deepseek-v4-flash-vision-exp"] },
+    models: ["deepseek:deepseek-flash", "deepseek:deepseek-v4-pro"] },
   { id: "zhipu", name: "智谱 GLM", base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     models: ["zhipu:glm-5.3", "zhipu:glm-5.3-flash"] },
   { id: "qwen", name: "通义千问", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
     models: ["qwen:qwen3.8-max", "qwen:qwen3.8-flash"] },
   { id: "kimi", name: "月之暗面 Kimi", base_url: "https://api.moonshot.cn/v1/chat/completions",
-    models: ["kimi:kimi-k3"] },
+    models: ["kimi:kimi-k3.1-pro", "kimi:kimi-k3"] },
   { id: "doubao", name: "豆包（火山引擎）", base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-    models: ["doubao:doubao-seed-evolving", "doubao:doubao-seed-2.0-mini"] },
+    models: ["doubao:doubao-seed-2.1-pro", "doubao:doubao-seed-2.1-turbo"] },
   { id: "siliconflow", name: "硅基流动 SiliconFlow", base_url: "https://api.siliconflow.cn/v1/chat/completions",
     models: ["siliconflow:deepseek-ai/deepseek-v4-flash-0731", "siliconflow:deepseek-ai/deepseek-v4-pro"] },
 ];
@@ -952,7 +959,7 @@ async function loadModels() {
   fillProvSelect(card?.chat_provider || (S.providers[0] || {}).id,
     card?.chat_model || "");
   $("#edCtxBudget").value = (S.misc || {}).max_context_tokens ?? 100000;
-  $("#edReplyTokens").value = (S.misc || {}).reply_max_tokens ?? 400;
+  $("#edReplyTokens").value = (S.misc || {}).reply_max_tokens ?? 40000;
 }
 function renderProvTable() {
   const tb = $("#provTbody");
@@ -1018,7 +1025,7 @@ async function saveProviders() {
   S.providers = r.providers || provs;
   renderProvTable();
   const budget = parseInt($("#edCtxBudget").value) || 100000;
-  const replyCap = parseInt($("#edReplyTokens").value) || 400;
+  const replyCap = parseInt($("#edReplyTokens").value) || 40000;
   const cr = await API.save_config({
     max_context_tokens: budget,
     reply_max_tokens: replyCap,
@@ -1098,6 +1105,21 @@ async function loadUsage() {
     Object.values(r.day_model[d] || {}).reduce((a, b) => a + b, 0));
   S.lastTrend = { calls, days: r.days };
   drawTrend(calls, r.days);
+  /* 每日预算进度条（开关开启且上限>0 才显示；估算口径与预算闸一致） */
+  const bud = r.budget || {};
+  const card = $("#budgetCard");
+  if (card) {
+    if (bud.enabled && bud.limit > 0) {
+      card.hidden = false;
+      const pct = Math.min(100, ((bud.today || 0) / bud.limit) * 100);
+      $("#budgetBar").style.width = pct.toFixed(1) + "%";
+      $("#budgetText").textContent =
+        `今日估算 ¥${(bud.today || 0).toFixed(2)} / 上限 ¥${bud.limit.toFixed(2)}` +
+        (pct >= 100 ? " —— 已达上限，今天不再调用模型（明天自动恢复）" : "");
+    } else {
+      card.hidden = true;
+    }
+  }
 }
 async function loadTasks() {
   const r = await API.list_tasks();
@@ -1328,10 +1350,13 @@ function renderMemOverview(d) {
   (d.important || []).forEach((m, i) =>
     imp.appendChild(memItem(m.content || m, m.time || "", "important", i + 1, m.content || m)));
   if (!d.important?.length) imp.appendChild(emptyBox("暂无重要记忆（点右上「注入记忆」添加）"));
-  (d.recent || []).forEach((m, i) =>
+  /* 近期对话**最新在顶**（用户定案）：倒序渲染，idx 仍按存储顺序映射
+     （编辑/删除走第 N 条的存储位次，显示位次 ≠ 存储位次） */
+  const recList = d.recent || [];
+  recList.slice().reverse().forEach((m, j) =>
     rec.appendChild(memItem(`[${m.role === "assistant" ? "小漓" : "用户"}] ${m.content}`,
-      m.time, "recent", i + 1, m.content)));
-  if (!d.recent?.length) rec.appendChild(emptyBox("暂无近期对话"));
+      m.time, "recent", recList.length - j, m.content)));
+  if (!recList.length) rec.appendChild(emptyBox("暂无近期对话"));
   (d.index || []).forEach((m, i) =>
     idx.appendChild(memItem(`${(m.kw || []).join("、")} → ${m.mem}`, "", "index", i + 1, m)));
   if (!d.index?.length) idx.appendChild(emptyBox("暂无关键词索引"));
@@ -1339,16 +1364,22 @@ function renderMemOverview(d) {
 function renderMemDeep(d, append) {
   const body = $("#memDeepBody");
   if (!append) body.innerHTML = "";
+  /* 后端已按最新在前给页（offset 从尾部起算）：「加载更多」取更早的一批
+     追加在下方，时序仍自上而下变旧 */
   (d.deep || []).forEach((m) =>
     body.appendChild(memItem(`#${m.line_no} [${m.role === "assistant" ? "小漓" : "用户"}] ${m.content}`,
       m.time, "deep", m.line_no, m.content)));
+  const hasMore = d.deep_has_more !== undefined
+    ? d.deep_has_more : (d.deep || []).length >= 200;
   if (S.deepQuery) {
-    $("#deepInfo").textContent = `命中 ${d.deep_matched ?? 0} 条（最多显示 200 条）`;
-    $("#btnDeepMore").hidden = true;
+    $("#deepInfo").textContent =
+      `命中 ${d.deep_matched ?? 0} 条（显示最新 ${Math.min(200, d.deep_matched ?? 0)} 条）`;
+    $("#btnDeepMore").hidden = !hasMore;
   } else {
     $("#deepInfo").textContent =
-      `共 ${d.deep_total ?? 0} 条，显示第 ${S.deepOffset + 1}-${S.deepOffset + (d.deep || []).length} 条`;
-    $("#btnDeepMore").hidden = (d.deep || []).length < 200;
+      `共 ${d.deep_total ?? 0} 条，已显示最新 ${S.deepOffset + (d.deep || []).length} 条` +
+      (hasMore ? "（点「加载更多」看更早的）" : "");
+    $("#btnDeepMore").hidden = !hasMore;
   }
   if (!body.children.length) body.appendChild(emptyBox("暂无深层存档"));
 }
@@ -1453,6 +1484,46 @@ $("#btnMemBind").addEventListener("click", async () => {
 });
 
 /* ============================================================
+   状态页（小漓状态层可视化：时段 + 每聊天心情/精力）
+   ============================================================ */
+function fmtAgo(ts) {
+  if (!ts) return "—";
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "刚刚";
+  if (s < 3600) return Math.floor(s / 60) + " 分钟前";
+  if (s < 86400) return Math.floor(s / 3600) + " 小时前";
+  return Math.floor(s / 86400) + " 天前";
+}
+async function loadPersona() {
+  const r = await API.persona_state_overview();
+  if (!r.ok) return;
+  $("#personaPeriod").textContent = r.period || "—";
+  $("#personaDisabled").hidden = !!r.enabled;
+  const box = $("#personaRows");
+  box.innerHTML = "";
+  if (!(r.rows || []).length) {
+    box.appendChild(emptyBox(
+      r.enabled ? "还没有状态记录——聊几轮后（每次回复定量一次）这里会出现小漓的当前感受"
+                : "状态层未开启"));
+    return;
+  }
+  for (const row of r.rows) {
+    const div = document.createElement("div");
+    div.className = "feat-row slim";
+    const energy = Number.isFinite(+row.energy)
+      ? Math.max(0, Math.min(100, +row.energy)) : null;
+    div.innerHTML = `
+      <div class="feat-text"><b>${esc(row.chat)}</b>
+        <small>${row.mood ? "心情：" + esc(row.mood) : "心情还没定量"} · ${fmtAgo(row.ts)}更新</small></div>
+      <div class="persona-energy">
+        <div class="trig-bar"><span style="width:${energy ?? 0}%"></span></div>
+        <small class="baloo">${energy != null ? "精力 " + energy : "精力 —"}</small>
+      </div>`;
+    box.appendChild(div);
+  }
+}
+
+/* ============================================================
    设置页（记忆 / 目录 / 任务桥 / 联网 / 语音 / 覆盖 / 监视）
    ============================================================ */
 function refreshSettings() {
@@ -1473,6 +1544,19 @@ function refreshSettings() {
   $("#cbNoReply").checked = !!m.no_reply_enabled;
   $("#cbGlobalMem").checked = !!m.global_memory_enabled;
   $("#cbSharedPool").checked = !!m.shared_pool_enabled;
+  $("#cbPersonaState").checked = !!m.persona_state_enabled;
+  $$("#mediaWaitSeg button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.v === (m.media_wait_mode || "fixed")));
+  $("#spMediaWaitSec").value = m.media_wait_seconds ?? 10;
+  $("#spMediaQuietSec").value = m.media_wait_quiet_seconds ?? 5;
+  $("#cbBudget").checked = !!m.daily_cost_limit_enabled;
+  $("#edBudgetLimit").value = m.daily_cost_limit ?? 10;
+  $("#cbFollowup").checked = !!m.followup_enabled;
+  $("#spFuDelayMin").value = m.followup_delay_min ?? 45;
+  $("#spFuDelayMax").value = m.followup_delay_max ?? 90;
+  $("#spFuCooldown").value = m.followup_cooldown_minutes ?? 120;
+  $("#spFuDaily").value = m.followup_daily_max ?? 10;
+  $("#cbFuPrivate").checked = m.followup_private_only !== false;
   $("#edWebProxy").value = m.web_proxy || "";
   $("#cbStateWatch").checked = !!m.state_watch_enabled;
   $("#edNickname").value = m.bot_nickname || "小漓";
@@ -1642,6 +1726,60 @@ $("#cbSharedPool").addEventListener("change", async (e) => {
   const r = await API.save_config({ shared_pool_enabled: e.target.checked });
   toast(r.ok ? (e.target.checked ? "共享记忆池已开启：AI 可跨聊天检索记忆" : "共享记忆池已关闭")
     : "保存失败", r.ok ? "ok" : "err");
+});
+/* ---- 小漓状态层 ---- */
+$("#cbPersonaState").addEventListener("change", async (e) => {
+  const r = await API.save_config({ persona_state_enabled: e.target.checked });
+  toast(r.ok ? (e.target.checked
+    ? "状态层已开启：小漓会随时段与情绪起伏（情绪定量每聊天 5 分钟一次，有少量成本）"
+    : "状态层已关闭") : "保存失败", r.ok ? "ok" : "err");
+});
+/* ---- 媒体消息等待（双模式） ---- */
+$("#mediaWaitSeg").addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
+});
+$("#btnMediaWaitSave").addEventListener("click", async () => {
+  const num = (id, dft) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) && v > 0 ? v : dft;
+  };
+  const r = await API.save_config({
+    media_wait_mode: $("#mediaWaitSeg button.active")?.dataset.v || "fixed",
+    media_wait_seconds: num("#spMediaWaitSec", 10),
+    media_wait_quiet_seconds: num("#spMediaQuietSec", 5),
+  });
+  toast(r.ok ? "媒体等待设置已保存（热生效）" : "保存失败", r.ok ? "ok" : "err");
+});
+/* ---- 每日消费预算 ---- */
+$("#btnBudgetSave").addEventListener("click", async () => {
+  const enabled = $("#cbBudget").checked;
+  const v = parseFloat($("#edBudgetLimit").value);
+  const limit = Number.isFinite(v) && v > 0 ? v : 10;
+  const r = await API.save_config({ daily_cost_limit_enabled: enabled,
+                                    daily_cost_limit: limit });
+  toast(r.ok ? (enabled ? `每日预算已设为 ¥${limit}（估算口径，达到即停一天）` : "每日预算已关闭")
+    : "保存失败", r.ok ? "ok" : "err");
+  if (r.ok) loadUsage();
+});
+/* ---- 主动追尾 ---- */
+$("#btnFollowupSave").addEventListener("click", async () => {
+  const num = (id, dft) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) && v >= 0 ? v : dft;
+  };
+  const enabled = $("#cbFollowup").checked;
+  const r = await API.save_config({
+    followup_enabled: enabled,
+    followup_delay_min: num("#spFuDelayMin", 45),
+    followup_delay_max: num("#spFuDelayMax", 90),
+    followup_cooldown_minutes: num("#spFuCooldown", 120),
+    followup_daily_max: Math.round(num("#spFuDaily", 10)),
+    followup_private_only: $("#cbFuPrivate").checked,
+  });
+  toast(r.ok ? (enabled ? "主动追尾已开启（热生效）" : "主动追尾已关闭") : "保存失败",
+    r.ok ? "ok" : "err");
 });
 /* ---- 模型管理触发器（三态，点击即存） ---- */
 $("#trigManageSeg").addEventListener("click", async (e) => {

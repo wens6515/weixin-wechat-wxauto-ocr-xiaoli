@@ -395,7 +395,7 @@ class TestPrivateMultiMessageJoin(unittest.TestCase):
             lambda chat, skip_bot=0, assume_switched=False: dict(win)
         captured = []
         b._handle_text = lambda chat, sender, content, msg_id=None, \
-            multi_sender=False: (captured.append((content, multi_sender))
+            multi_sender=False, img_paths=None: (captured.append((content, multi_sender))
                                  or True)
         return b, captured
 

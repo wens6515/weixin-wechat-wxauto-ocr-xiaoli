@@ -460,7 +460,7 @@ class TestVisionRoute(unittest.TestCase):
         bot.call_vision_api = lambda content, chat_id=None, related_memory=None: None
         bot._capture_media_images = lambda chat, min_top=None, exclude_rows=None: []
         handled = []
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append(content)
         bot._handle_image_with_text("小明", "王", "在吗")
         self.assertEqual(handled, ["在吗"])

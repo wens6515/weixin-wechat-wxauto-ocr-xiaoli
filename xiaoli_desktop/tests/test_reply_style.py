@@ -142,7 +142,7 @@ class TestStyleRulesConstant(unittest.TestCase):
                       "人设本体必须保留（只迁走纪律）")
 
     def test_reply_max_tokens_constant(self):
-        self.assertEqual(REPLY_MAX_TOKENS, 400)
+        self.assertEqual(REPLY_MAX_TOKENS, 40000)
         self.assertEqual(REPLY_SEGMENT_INTERVAL_SECONDS, 2.0)
 
 

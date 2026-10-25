@@ -1267,3 +1267,7 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
   font: inherit; font-size: 13px; line-height: 1.5;
 }
+
+/* 状态页：精力条列（右对齐定宽） */
+.persona-energy { width: 200px; flex: none; text-align: right; }
+.persona-energy .trig-bar { height: 8px; }

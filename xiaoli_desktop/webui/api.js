@@ -75,7 +75,14 @@ const MOCK = (() => {
             model_trigger_manage: "off", sticker_mode: "off",
             segment_wait_enabled: true, segment_wait_seconds: 2,
             segment_jitter_enabled: false, segment_jitter_min: 1.5, segment_jitter_max: 3,
-            tianshu_guided: false },
+            tianshu_guided: false,
+            persona_state_enabled: false,
+            media_wait_mode: "fixed", media_wait_seconds: 10,
+            media_wait_quiet_seconds: 5,
+            followup_enabled: false, followup_delay_min: 45,
+            followup_delay_max: 90, followup_cooldown_minutes: 120,
+            followup_daily_max: 10, followup_private_only: true,
+            daily_cost_limit_enabled: false, daily_cost_limit: 10 },
     voice: { voice_mode: "off", tts_endpoint: "http://演示:9880/tts",
              tts_timeout_seconds: 120, voice_max_seconds: 55,
              voice_profiles: [{ id: "p-demo", name: "演示音色",
@@ -224,7 +231,10 @@ const MOCK = (() => {
     memory_clear_all: () => ({ ok: true }),
     memory_export: (chat, mode) => ({ ok: true, filename: chat + "-记忆." + mode, content: "演示数据" }),
     memory_bind_card: () => ({ ok: true }),
-    get_usage: () => ({ ok: true, ...JSON.parse(JSON.stringify(state.usage)) }),
+    persona_state_overview: () => ({ ok: true, enabled: false,
+      period: "深夜", rows: [] }),
+    get_usage: () => ({ ok: true, ...JSON.parse(JSON.stringify(state.usage)),
+      budget: { enabled: false, limit: 0, today: 0 } }),
     refresh_balances: () => {
       setTimeout(() => window.__push("balances", { rows: [
         { name: "DeepSeek（演示）", supported: true, ok: false, error: "演示数据，无真实余额" }] }), 500);

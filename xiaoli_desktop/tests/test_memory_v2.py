@@ -294,14 +294,20 @@ class TestMemoryDeletion(unittest.TestCase):
             d = bot.memory_detail("小明", deep_offset=0, deep_limit=200)
             self.assertEqual(len(d["recent"]), 5)
             self.assertEqual(d["important"][0]["content"], "过敏")
-            self.assertEqual(d["deep"][0]["content"], "你好")
-            # 分页：第 2 页从深层0 开始
-            d2 = bot.memory_detail("小明", deep_offset=1, deep_limit=2)
+            # 深层**最新在前**（记忆页最新的内容放最上面）：首页 = 最新 5 行倒序
+            self.assertEqual([m["content"] for m in d["deep"]],
+                             ["深层3", "深层2", "深层1", "深层0", "你好"])
+            self.assertFalse(d["deep_has_more"])
+            # 分页：offset 从尾部（最新）起算——第 2 页 = 更早的 2 条倒序
+            d2 = bot.memory_detail("小明", deep_offset=2, deep_limit=2)
             self.assertEqual([m["content"] for m in d2["deep"]],
-                             ["深层0", "深层1"])
-            # 过滤
-            dq = bot.memory_detail("小明", deep_query="深层0")
-            self.assertEqual((dq["deep_matched"], len(dq["deep"])), (1, 1))
+                             ["深层1", "深层0"])
+            self.assertTrue(d2["deep_has_more"])
+            # 过滤：命中按最新在前
+            dq = bot.memory_detail("小明", deep_query="深层")
+            self.assertEqual((dq["deep_matched"], len(dq["deep"])), (4, 4))
+            self.assertEqual([m["content"] for m in dq["deep"]],
+                             ["深层3", "深层2", "深层1", "深层0"])
             dq2 = bot.memory_detail("小明", deep_query="不存在")
             self.assertEqual((dq2["deep_matched"], len(dq2["deep"])), (0, 0))
 
