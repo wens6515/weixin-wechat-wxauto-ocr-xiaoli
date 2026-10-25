@@ -4,7 +4,7 @@
   <p><b>微信 AI 机器人 · 视觉版</b></p>
   <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x</sub></p>
   <p>
-    <img src="https://img.shields.io/badge/version-3.2.1-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
+    <img src="https://img.shields.io/badge/version-3.3.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
     <img src="https://img.shields.io/badge/WeChat_PC-4.x-35C48D?style=flat-square&amp;labelColor=0B2540" alt="WeChat PC 4.x">
     <img src="https://img.shields.io/badge/Windows-10+-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=windows&amp;logoColor=white" alt="Windows 10+">
     <img src="https://img.shields.io/badge/Python-3.12-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=python&amp;logoColor=white" alt="Python 3.12">
@@ -42,6 +42,8 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
+> **v3.3.0「引用识别与小漓状态层」** · **引用消息完整识别**：判型重构（气泡面板 + 引用竖线 + 内容物专用检测）+ `[引用 …]` 标注进模型——引用图片点击缩略图捕获原图随调、引用文件按名定位走文件流程（此前引用正文整行丢失、缩略图被当图裁剪）· **小漓状态层**（默认关）：语气随时段/聊天热度/情绪自然起伏，情绪由回复后的定量小调用更新，新增「状态」页可视化 · **主动追尾**（默认关，延迟/冷却/上限全可设）：回完话偶尔自然补一句 · **媒体等待双模式**：固定 10 秒或纯像素智能静默（说完了立即继续）· **每日消费预算**：估算超限当天停调用次日恢复 · 模型预设与价目更新（deepseek-flash=V4.1 现行价 / kimi-k3.1-pro / 豆包 Seed 2.1）· 日志页与记忆页最新在顶 · 小表情识别剔除头像区 · 回复长度上限默认 40000
+>
 > **v3.2.1「初始化失败诊断与显示缩放前置」** · 初始化失败必弹诊断弹窗（失败原因 + 现场检测 + 修复指引 + 一键重试，不再只有一闪而过的 toast）· **显示缩放非 175% 时连接即拦下**并给出设置路径（此前会「连上却读不到消息」地静默瞎跑）· 缩放检测改实时值（启动后改缩放不重启也能读对）· 首页新增「显示缩放」检测卡（成功绿灯/失败红灯）· 环境卡单行排布、任务桥关闭时隐藏天枢两卡
 >
 > **v3.2.0「智能静默与跨聊天记忆」** · **智能静默**：AI 自己决定要不要回某条消息——对方话没说完（「感觉」「emmm」）、自言自语时保持沉默等下一条，静默也标记已读不漏处理 · **记忆注入与编辑**：记忆页可手动添加重要记忆/深层存档，四类条目全部可编辑 · **全局记忆 + 共享记忆池**（默认关）：跨聊天常驻的事实记得住、其他会话的记忆查得到 · **触发器主动性**：AI 能在发现作息与闹钟安排错配时主动改时间/改内容/取消 · 定闹钟的确认回复改由 AI 自然表达（固定客套话删除） · 微信自带小表情（❤ 等）识别 · 未读红圈改**固定品牌红**判据（预览里的红心 emoji 不再被当成未读） · 表情包发送写入对话记忆（AI 知道自己刚发过哪张，不再连发同图）
@@ -62,9 +64,9 @@
 
 ## 下载安装（桌面版）
 
-**v3.2.1 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 表情包库 + 托盘常驻）：
+**v3.3.0 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 表情包库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v3.2.1.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.2.1/xiaoli-setup-v3.2.1.exe)
+👉 [点击下载 `xiaoli-setup-v3.3.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.3.0/xiaoli-setup-v3.3.0.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -254,6 +256,7 @@ assets/                      # README 展示图（mascot / showcase-voice / show
 
 ## 更新记录
 
+- [v3.3.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.3.0.md)（引用消息识别与内容联动/小漓状态层与状态页/主动追尾/媒体等待双模式/每日消费预算/模型预设与价目更新/日志与记忆页最新在顶/小表情剔除头像）
 - [v3.2.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.2.1.md)（初始化失败诊断弹窗/显示缩放 175% 连接前置与实时检测/首页显示缩放检测卡与环境卡排布调整）
 - [v3.2.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.2.0.md)（智能静默：AI 自决是否回复/记忆注入与编辑/全局记忆与共享记忆池/触发器主动调整与自然确认/微信自带小表情识别/红圈固定品牌红判据/表情包动作写入历史/私聊多消息双层嵌套修复）
 - [v3.1.6 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.6.md)（窗口尺寸按系统可用区域收口（任务栏未隐藏也能用）/三区域竖向锚点上沿贴窗口顶·下沿贴输入面板/期望头像高固定 63px/输入框聚焦点距窗口底固定/README 明确要求显示缩放 175%）
