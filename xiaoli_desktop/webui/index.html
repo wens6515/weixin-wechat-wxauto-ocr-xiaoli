@@ -157,6 +157,7 @@
       <button class="nav-item" data-page="models"><svg class="ic"><use href="#i-cpu"/></svg><span>模型</span></button>
       <button class="nav-item" data-page="usage"><svg class="ic"><use href="#i-chart"/></svg><span>用量</span></button>
       <button class="nav-item" data-page="memory"><svg class="ic"><use href="#i-brain"/></svg><span>记忆</span></button>
+      <button class="nav-item" data-page="persona"><svg class="ic"><use href="#i-spark"/></svg><span>状态</span></button>
       <button class="nav-item" data-page="logs"><svg class="ic"><use href="#i-file"/></svg><span>日志</span></button>
       <button class="nav-item" data-page="settings"><svg class="ic"><use href="#i-gear"/></svg><span>设置</span></button>
       <div class="nav-indicator" id="navInd"></div>
@@ -337,7 +338,7 @@
           </div>
           <div class="form-grid">
             <label class="form-item grow"><span>上下文预算（token，超限自动裁最旧历史，大上下文模型可调高）</span><input id="edCtxBudget" type="number" min="1000" step="1000" placeholder="100000"></label>
-            <label class="form-item grow"><span>回复长度上限（token，含推理模型的思考 token，思考模型建议 1000+）</span><input id="edReplyTokens" type="number" min="100" step="50" placeholder="400"></label>
+            <label class="form-item grow"><span>回复长度上限（token，含推理模型的思考 token；物理兜底，长度纪律由回复风格管）</span><input id="edReplyTokens" type="number" min="100" step="50" placeholder="40000"></label>
           </div>
           <div class="editor-actions"><button class="mini-btn" id="btnModelSave">保存模型配置</button></div>
         </div>
@@ -374,6 +375,12 @@
           <div class="glass sum-card"><span class="sum-k">缓存命中率</span><span class="sum-v"><b class="baloo" id="uTodayCache">—</b></span><span class="sum-delta up">稳定前缀布局生效</span></div>
           <div class="glass sum-card"><span class="sum-k">近 30 天 tokens</span><span class="sum-v baloo" id="uTokens30">—</span><span class="sum-delta" id="uCost30">—</span></div>
           <div class="glass sum-card"><span class="sum-k">近 30 天失败</span><span class="sum-v baloo" id="uFail30">—</span><span class="sum-delta">429/5xx 自动重试</span></div>
+        </div>
+        <!-- 每日预算进度（开关开启且上限>0 时显示） -->
+        <div class="glass sec-card" id="budgetCard" hidden>
+          <div class="card-title"><svg class="ic"><use href="#i-chart"/></svg>今日预算
+            <span class="title-hint" id="budgetText"></span></div>
+          <div class="trig-bar" style="height:10px"><span id="budgetBar" style="width:0%"></span></div>
         </div>
         <div class="usage-row">
           <div class="glass chart-card">
@@ -437,6 +444,20 @@
         </div>
       </section>
 
+      <!-- ================= 状态页（小漓状态层可视化） ================= -->
+      <section class="page" data-page="persona">
+        <h1 class="page-title">小漓状态</h1>
+        <div class="glass sec-card" id="personaDisabled" hidden>
+          <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>状态层未开启</div>
+          <p class="confirm-text">到「设置 → 对话行为与跨聊天记忆」打开「小漓状态层」，小漓就会随时段、聊天热度与情绪自然起伏；开启后聊几轮，这里会显示她对每个聊天的当前感受。</p>
+        </div>
+        <div class="glass sec-card">
+          <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>当前时段：<span id="personaPeriod">—</span>
+            <span class="title-hint">情绪与精力由每次回复后的定量调用更新（每聊天 5 分钟一次，深夜犯困、聊得投入会兴奋）</span></div>
+          <div id="personaRows"></div>
+        </div>
+      </section>
+
       <!-- ================= 日志页 ================= -->
       <section class="page" data-page="logs">
         <h1 class="page-title">运行日志</h1>
@@ -463,6 +484,7 @@
           <button class="anchor" data-anchor="sec-voice">语音发送</button>
           <button class="anchor" data-anchor="sec-override">按聊天覆盖</button>
           <button class="anchor" data-anchor="sec-remind">定时与监视</button>
+          <button class="anchor" data-anchor="sec-followup">主动追尾</button>
           <button class="anchor" data-anchor="sec-pace">回复节奏</button>
           <button class="anchor" data-anchor="sec-sticker">表情包</button>
         </div>
@@ -587,7 +609,8 @@
 
         <!-- 语音发送 -->
         <div class="glass sec-card" id="sec-voice">
-          <div class="card-title"><svg class="ic"><use href="#i-mic"/></svg>语音发送</div>
+          <div class="card-title"><svg class="ic"><use href="#i-mic"/></svg>语音发送
+            <span class="title-hint">接收语音需在电脑版微信 设置 → 通用 开启「语音自动转文字」，小漓才能读到语音内容</span></div>
           <div class="feat-row slim">
             <div class="feat-text"><b>发送模式</b><small>接自部署 TTS（GPT-SoVITS api_v2），环回质检不过自动回退文本，回复永不丢</small></div>
             <div class="seg tri" id="voiceSeg">
@@ -688,6 +711,56 @@
             <div class="feat-text"><b>共享记忆池</b><small>开启后 AI 检索记忆时可跨聊天拉取其他会话的记忆（含深层存档，结果带来源聊天名）。各聊天的内容会互相可见——开启即接受这个边界</small></div>
             <label class="switch"><input type="checkbox" id="cbSharedPool"><span class="track"></span></label>
           </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>小漓状态层</b><small>让小漓随时段/聊天热度/近期情绪自然起伏（深夜犯困、聊得投入兴奋）。时段与热度本地计算；情绪由每次回复后的一次小调用定量（每聊天 5 分钟一次，有少量额外成本）</small></div>
+            <label class="switch"><input type="checkbox" id="cbPersonaState"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>媒体消息等待</b><small>对方发图片/文件后等一等跟发的文字，防拆散。「固定等待」简单可靠；「智能静默」纯像素检测对方是否还在连发（说完了立即继续，通常更快）</small>
+              <div class="form-btns" style="margin-top:8px">
+                <div class="seg" id="mediaWaitSeg">
+                  <button data-v="fixed">固定等待</button><button data-v="smart">智能静默</button>
+                </div>
+              </div>
+              <div class="form-grid" style="margin-top:8px">
+                <label class="form-item"><span>固定等待秒数</span><input id="spMediaWaitSec" type="number" min="2" max="30" step="1"></label>
+                <label class="form-item"><span>静默判定秒数（智能）</span><input id="spMediaQuietSec" type="number" min="2" max="10" step="1"></label>
+              </div>
+            </div>
+            <div class="form-btns"><button class="mini-btn" id="btnMediaWaitSave">保存等待设置</button></div>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>每日消费预算</b><small>按内置价目估算今日消费，达到上限当天不再调用模型（红圈仍会清掉、不漏处理），第二天自动恢复。注意是估算不是账单，无价目的模型不计入</small>
+              <div class="form-grid" style="margin-top:8px">
+                <label class="form-item grow"><span>每日上限（元）</span><input id="edBudgetLimit" type="number" min="0.5" step="0.5"></label>
+              </div>
+            </div>
+            <div class="form-btns" style="align-items:center">
+              <label class="switch" style="margin-right:10px"><input type="checkbox" id="cbBudget"><span class="track"></span></label>
+              <button class="mini-btn" id="btnBudgetSave">保存预算</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 主动追尾 -->
+        <div class="glass sec-card" id="sec-followup">
+          <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>主动追尾
+            <span class="title-hint">回完话偶尔回想起来补一句——系统到点问模型「要不要补」，不靠模型自觉</span></div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>启用主动追尾</b><small>回复发出后随机延迟做一次小评估：值得补就发一句短的（想到什么、顺口一问），不想补就跳过。模型被要求「十次最多补两三次」；等待期间对方又发消息会自动取消（不打断正在进行的对话）</small></div>
+            <label class="switch"><input type="checkbox" id="cbFollowup"><span class="track"></span></label>
+          </div>
+          <div class="form-grid four">
+            <label class="form-item"><span>延迟下限（秒）</span><input id="spFuDelayMin" type="number" min="5" max="600" step="5"></label>
+            <label class="form-item"><span>延迟上限（秒）</span><input id="spFuDelayMax" type="number" min="5" max="600" step="5"></label>
+            <label class="form-item"><span>每聊天冷却（分钟）</span><input id="spFuCooldown" type="number" min="0" max="1440" step="10"></label>
+            <label class="form-item"><span>每日全局上限（条）</span><input id="spFuDaily" type="number" min="0" max="100" step="1"></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>仅私聊</b><small>群聊里追尾容易打扰，默认只在私聊启用</small></div>
+            <label class="switch"><input type="checkbox" id="cbFuPrivate"><span class="track"></span></label>
+          </div>
+          <div class="editor-actions"><button class="mini-btn" id="btnFollowupSave">保存追尾设置</button></div>
         </div>
 
         <!-- 回复节奏 -->
@@ -861,6 +934,7 @@
   <div class="modal glass" id="modalFirstRun" hidden>
     <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>欢迎使用小漓</b></div>
     <p class="confirm-text">首次使用请确认三个工作目录，并填写小漓在微信里的名称（群里 @ 这个称呼认小漓）。</p>
+    <p class="confirm-text" style="font-size:.85em;opacity:.8">建议同时到电脑版微信的 <b>设置 → 通用</b> 里开启「语音自动转文字」——开启后小漓才能读懂对方发来的语音消息。</p>
     <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="frTasks"></code><button class="mini-btn ghost" id="frPickTasks">浏览…</button></div>
     <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="frFiles"></code><button class="mini-btn ghost" id="frPickFiles">浏览…</button></div>
     <div class="dir-row"><span class="dir-k">记忆存储位置</span><code id="frMemory"></code></div>

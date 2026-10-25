@@ -354,7 +354,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -413,7 +413,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -475,7 +475,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -526,7 +526,7 @@ class TestProcessNewMessagesUnreadDrive(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -733,7 +733,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \
@@ -796,7 +796,7 @@ class TestGroupMultiSenderText(unittest.TestCase):
         bot._task_was_active = False
         bot._task_end_time = None
         bot._listen_hold_seconds = 10
-        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False: \
+        bot._handle_text = lambda chat, sender, content, msg_id=None, multi_sender=False, img_paths=None: \
             handled.append((sender, content))
         with _mock.patch("xiaoli_bot.should_resume_listen",
                          return_value=(True, False, None)), \

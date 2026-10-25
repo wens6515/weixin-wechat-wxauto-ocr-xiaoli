@@ -50,9 +50,10 @@ from .visual_win32 import (
 )
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
-    _near_color, drop_panel_contents, detect_avatar_tops,
+    _near_color, detect_quote_line, drop_panel_contents, detect_avatar_tops,
     detect_bubble_colors, estimate_theme, find_bubble_boxes, find_media_boxes,
-    find_panel_icon, filter_media_boxes, region_changed,
+    find_panel_icon, filter_media_boxes, find_quote_content_box,
+    region_changed,
 )
 from .visual_badge import (
     _BADGE_ANCHOR_MAX_DIST, _BADGE_CLICK_OFFSET_X, _BADGE_ROW_TOL,
@@ -221,9 +222,12 @@ def analyze_blocks(img: Image.Image, colors: dict, bot_tops: list[int],
       other_new_tops [int,...]  本轮对方新消息的头像 top（升序）
       all_tops       [int,...]  全部头像 top（升序）
       blocks         [dict,...] 每个对方头像一条：{avatar_top, top, bottom,
-                                left, right, kind, panel, media, icon}
-      has_text       bool       含文字消息块
-      has_media      bool       含多媒体块（图片或文件卡片）
+                                left, right, kind, panel, media, icon, quote}
+                                kind ∈ text / quote（面板下方引用竖线命中，
+                                块底延伸到线底）/ image / file
+      has_text       bool       含文字类消息块（text / quote）
+      has_media      bool       含多媒体块（图片或文件卡片；quote 不算——
+                                引用内容物不点击不裁剪，也不触发媒体防抖）
     """
     import numpy as np
     arr = np.asarray(img.convert("RGB"), dtype=np.int16)
@@ -267,17 +271,35 @@ def analyze_blocks(img: Image.Image, colors: dict, bot_tops: list[int],
             # 头像在、框没检到（气泡色漂移等）：块范围退到下一个头像为止，
             # 类型按文字处理，保证该头像新消息的文字仍被读走；不做归属降级。
             bottom, left, right = cap, 0, rw
-        if anchored_media:
-            kind = "image"
-        elif panel is not None and icons.get(panel) is not None:
+        # 引用竖线只对「有面板」的块检测（真图片消息没有面板）。命中即引用
+        # 消息：面板外的游离媒体框是引用内容物（缩略图/文件图标），不当图片。
+        quote = detect_quote_line(arr, colors, panel) if panel is not None else None
+        quote_media = None
+        if quote:
+            # 引用内容物专用检测（低阈值）：通用媒体判据 40px 闸漏窄缩略图
+            # （真机 30×55），这里在竖线条带内 24px 起判
+            quote_media = find_quote_content_box(arr, colors, panel, quote)
+        if panel is not None and icons.get(panel) is not None:
             kind = "file"
+        elif panel is not None:
+            # 有气泡面板 = 文字类消息（真图片媒体裸奔无面板）——面板下方
+            # 竖线命中 → quote（块底延伸到线底，引用行才读得到）；否则 text
+            # （游离媒体框若竖线漏检也按 text 处理，文字优先，绝不误判图片）。
+            kind = "quote" if quote else "text"
+        elif anchored_media:
+            kind = "image"
         else:
             kind = "text"
+        if quote:
+            # 块底沿延伸到引用区底部：引用文字行在面板下方，按旧底沿（面板
+            # 底）会被行归位整行丢弃（真机实测：引用文字从未进过模型）。
+            bottom = max(bottom, quote[1] + 2)
         blocks.append({
             "avatar_top": T, "top": min(T, boxes[0][0]) if boxes else T,
             "bottom": bottom, "left": left, "right": right, "kind": kind,
             "panel": panel, "media": (anchored_media[0] if anchored_media else None),
             "icon": (icons.get(panel) if panel is not None else None),
+            "quote": quote, "quote_media": quote_media,
         })
     return {
         "bot_last_top": last_bot_top,
@@ -285,7 +307,7 @@ def analyze_blocks(img: Image.Image, colors: dict, bot_tops: list[int],
         "other_new_tops": other_new_tops,
         "all_tops": all_tops,
         "blocks": blocks,
-        "has_text": any(b["kind"] == "text" for b in blocks),
+        "has_text": any(b["kind"] in ("text", "quote") for b in blocks),
         "has_media": any(b["kind"] in ("image", "file") for b in blocks),
     }
 
@@ -321,6 +343,38 @@ def _same_chat_name(a: str, b: str) -> bool:
     if not ka or not kb:
         return False
     return ka == kb or ka.startswith(kb) or kb.startswith(ka)
+
+
+# 引用标注里的文件扩展名（仅判「引用的是文件还是图片」用；完整文件名
+# 提取在上层 xiaoli_app.file_text——底层不反向依赖上层，这里内联最小集）
+_QUOTE_FILE_EXT_RE = re.compile(
+    r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|"
+    r"jpe?g|gif|mp4|mp3)(?![A-Za-z0-9])", re.I)
+
+
+def _quote_marker(below_lines, has_content=False):
+    """引用区 OCR 行 → 注入前缀（纯函数，单测直测）。
+
+    has_content：该引用块检出了内容物（缩略图/文件图标，find_quote_content_box
+    或通用媒体框）。有内容物时按内容判型——引用行含文件扩展名 → 文件引用
+    （整行进标注）；否则 → **图片引用**：标注只留名字（「[引用 X发来的图片]」），
+    缩略图内嵌的 OCR 文字（真机事故：图上印的「好耶」被读走 → 判成文字
+    引用 → 模型只看到两个字）不进标注——原图会被捕获随调发给模型，文字
+    留着反而误导判型。无内容物保持旧逻辑（名字行以冒号结尾 = 图片引用）。
+    """
+    q = re.sub(r"\s+", " ",
+               " ".join(l["text"] for l in below_lines)).strip()
+    if not q:
+        return ""
+    if has_content:
+        if _QUOTE_FILE_EXT_RE.search(q.replace("·", ".")):
+            return f"[引用 {q}] "
+        name = below_lines[0]["text"].strip().rstrip(":：").strip()
+        return f"[引用 {name}发来的图片] "
+    name = q.rstrip(":：").strip()
+    if name and q.endswith((":", "：")):
+        return f"[引用 {name}发来的图片] "
+    return f"[引用 {q}] "
 
 # ---------- 后端实现 ----------
 
@@ -1278,19 +1332,34 @@ class VisualBackend:
                 # （真机 '我不是'）。图片本体由媒体捕获路径处理。
                 continue
             panel = blk["panel"]
+            # 引用块按面板底分家（panel = (top, bottom, left, right)）：
+            # 面板内 = 正文；面板下方（引用区）= 引用行——引用行标注后前置
+            # 到正文，模型才知道「回复的是哪条」。
+            pb = panel[1] if panel is not None else None
+            in_lines = lines if pb is None else [
+                l for l in lines if (l["y"] + l["h"] // 2) <= pb + 2]
+            below_lines = [] if pb is None else [
+                l for l in lines if (l["y"] + l["h"] // 2) > pb + 2]
             sender = chat
-            content_lines = lines
+            content_lines = in_lines
             # 群聊发送者名：面板（气泡）外、气泡上方的短文本行（真机
             # '哆拉A萝'）；私聊没有这行，sender 退回会话名。
-            if panel is not None and len(lines) > 1:
-                head = lines[0]
+            if panel is not None and len(in_lines) > 1:
+                head = in_lines[0]
                 if (head["y"] + head["h"] // 2) < panel[0] \
                         and len(head["text"].strip()) <= 8:
                     sender = head["text"].strip()
-                    content_lines = lines[1:]
+                    content_lines = in_lines[1:]
             text = " ".join(l["text"] for l in content_lines).strip()
             text = re.sub(r"\s+", " ", text)
-            if not text or _is_noise(text):
+            quote_mark = ""
+            if blk["kind"] == "quote":
+                quote_mark = _quote_marker(
+                    below_lines,
+                    has_content=bool(blk.get("quote_media")
+                                     or blk.get("media")))
+            content = (quote_mark + text).strip()
+            if not content or _is_noise(content):
                 continue
             seq += 1
             mtype = MessageType.FILE if blk["kind"] == "file" else MessageType.TEXT
@@ -1298,7 +1367,7 @@ class VisualBackend:
                 id=f"visual_{seq}",
                 chat=chat,
                 sender=sender,
-                content=text,
+                content=content,
                 type=mtype,
                 y=blk["top"],
             ))
@@ -1531,9 +1600,22 @@ class VisualBackend:
         # 独立小框，点它会打开用户文件（真机风险）——先剔除再过滤。
         panels = [(t, b, l, r) for (t, b, l, r, is_self)
                   in find_bubble_boxes(region, colors) if not is_self]
+        # 引用内容物（面板下方竖线 span 内的缩略图/文件图标）不是可点图片：
+        # 点引用区会跳去被引用的原消息、打断当前会话视图——按竖线 span 剔除
+        # （浅色下白色缩略图与背景融合、媒体框检不全，竖线才是可靠边界）。
+        import numpy as np
+        arr = np.asarray(region.convert("RGB"), dtype=np.int16)
+        quote_rows = []
+        for p in panels:
+            q = detect_quote_line(arr, colors, p)
+            if q:
+                quote_rows.append((q[0] - 4, q[1] + 4))
+        boxes = [bx for bx in drop_panel_contents(find_media_boxes(region, colors),
+                                                  panels)
+                 if not any(bx[0] >= rt - 2 and bx[1] <= rb + 2
+                            for rt, rb in quote_rows)]
         boxes = filter_media_boxes(
-            drop_panel_contents(find_media_boxes(region, colors), panels),
-            min_top=min_top, exclude_rows=exclude_rows)
+            boxes, min_top=min_top, exclude_rows=exclude_rows)
         if not boxes:
             return []
         rect = wt.RECT()
@@ -1543,6 +1625,24 @@ class VisualBackend:
         msg_t = win_t + int(h * self._message_region[1])
         return [(msg_l + l, msg_t + t, msg_l + r, msg_t + b)
                 for (t, b, l, r) in boxes]
+
+    def box_screen_rect(self, box):
+        """消息区 1x 框 (top, bottom, left, right) → 屏幕矩形 (l, t, r, b)。
+
+        供引用内容物定点点击（引用图片缩略图在 media_screen_boxes 里被按
+        竖线 span 剔除——通用图片流程不能点它，只有引用联动流程定向点）。
+        坐标失败返回 None。"""
+        if self._hwnd is None or not box or len(box) != 4:
+            return None
+        win = window_rect(self._hwnd)
+        if not win:
+            return None
+        w, h = win[2], win[3]
+        mr = self._message_region
+        msg_l = win[0] + int(w * mr[0])
+        msg_t = win[1] + int(h * mr[1])
+        t, b, l, r = box
+        return (msg_l + int(l), msg_t + int(t), msg_l + int(r), msg_t + int(b))
 
     def analyze_window(self, chat: str, foreground: bool = True,
                        skip_bot: int = 0,
@@ -1636,7 +1736,7 @@ class VisualBackend:
                 # 框未检到的块（气泡色漂移）在列表里不出现——块本身仍在
                 # other_blocks 里（文字照读），列表只收真实框。
                 "other_text": [b["panel"] for b in blocks
-                               if b["kind"] == "text" and b["panel"]],
+                               if b["kind"] in ("text", "quote") and b["panel"]],
                 "other_media": [b["media"] for b in blocks
                                 if b["kind"] == "image" and b["media"]],
                 "other_files": [b["panel"] for b in blocks
@@ -1653,13 +1753,16 @@ class VisualBackend:
             }
         return empty
 
-    def block_screen_rect(self, top, bottom, x_frac=(0.02, 0.60)):
+    def block_screen_rect(self, top, bottom, x_frac=(0.15, 0.60)):
         """消息区 1x 竖向区间 [top, bottom] → 屏幕矩形（对方侧横向范围）。
 
         供空 emoji 块裁剪用：微信自带小表情（❤ 实测 33x28px）过不了媒体
         检测的 40px 尺寸闸，没有媒体框可点——只能按消息块区间直接裁主窗口
-        当前帧。x_frac 限定对方侧横向范围（左侧头像带到一点上下文，右侧
-        不碰滚动条）。坐标失败返回 None。"""
+        当前帧。x_frac 限定对方侧横向范围；**左沿 0.15 起裁**——0.02 会把
+        头像窄带（0.02~0.14）整个裁进图里，视觉模型对着用户的头像图片
+        （真机事故：猫咪头像被描述成「已无生命体征」）而不是小表情本身；
+        气泡左缘实测 ≈0.147，0.15 恰在其右。右侧不碰滚动条。坐标失败
+        返回 None。"""
         if self._hwnd is None:
             return None
         win = window_rect(self._hwnd)
@@ -1701,4 +1804,5 @@ def register():
 __all__ = [
     "VisualBackend", "register", "capture_window", "ocr_image",
     "region_changed", "find_wechat_window", "monitor_dpi_scale",
+    "detect_quote_line",
 ]

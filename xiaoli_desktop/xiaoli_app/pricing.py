@@ -16,41 +16,46 @@
 """
 import time
 
-PRICE_TABLE_VERSION = 2
+PRICE_TABLE_VERSION = 3
 
-# 单位：元 / 百万 token。来源：各平台官方定价页现行价（GLM-5.3-flash 为
-# 限时活动口径，活动结束实付可能变化）；覆盖字段 price_overrides：
+# 单位：元 / 百万 token。来源：各平台官方定价页现行价；覆盖字段 price_overrides：
 # {"模型名": {"input": ..., "cache_hit": ..., "output": ..., "off": {...}}}
+# 价目随平台调价滚动更新（换版核对各官方定价页；本表只给「按量折算」参考，
+# 以平台真实余额/账单为准）。
 _DS_PEAK = {"scope": "weekday", "ranges": [[9, 12], [14, 18]]}
 _SF_PEAK = {"scope": "daily", "ranges": [[0, 2], [8, 24]]}
+# DeepSeek V4.1 Flash 现行价（官方已无独立 vision 模型；旧名 v4-flash /
+# v4-flash-vision-exp 仍可调用，由同一模型提供服务并按本价计费）
+_DS_FLASH = {
+    "input": 2.0, "cache_hit": 0.04, "output": 8.0,
+    "off": {"input": 1.0, "cache_hit": 0.02, "output": 4.0},
+    "peak": _DS_PEAK,
+}
 PRICES = {
     # DeepSeek 官方（api-docs.deepseek.com/zh-cn/quick_start/pricing）：
     # 空闲时段价格为高峰的一半
-    "deepseek-v4-flash": {
-        "input": 3.0, "cache_hit": 0.10, "output": 9.0,
-        "off": {"input": 1.5, "cache_hit": 0.05, "output": 4.5},
-        "peak": _DS_PEAK,
-    },
+    "deepseek-flash": dict(_DS_FLASH),
+    # 旧模型名（并行保留期）：由 V4.1-Flash 提供服务，按 Flash 价计费
+    "deepseek-v4-flash": dict(_DS_FLASH),
+    "deepseek-v4-flash-vision-exp": dict(_DS_FLASH),
     "deepseek-v4-pro": {
         "input": 9.0, "cache_hit": 0.30, "output": 27.0,
         "off": {"input": 4.5, "cache_hit": 0.15, "output": 13.5},
         "peak": _DS_PEAK,
     },
-    "deepseek-v4-flash-vision-exp": {
-        "input": 3.0, "cache_hit": 0.10, "output": 9.0,
-        "off": {"input": 1.5, "cache_hit": 0.05, "output": 4.5},
-        "peak": _DS_PEAK,
-    },
-    # 智谱 BigModel（glm-5.3 与前代同价；flash 为限时活动价口径）
+    # 智谱 BigModel（glm-5.3 与前代同价；flash 缓存命中 0.23 为现行刊例）
     "glm-5.3": {"input": 8.0, "cache_hit": 2.0, "output": 28.0},
-    "glm-5.3-flash": {"input": 0.8, "cache_hit": 0.16, "output": 2.8},
-    # 月之暗面 Kimi 开放平台（K3：缓存命中 2 / 输入 20 / 输出 100）
+    "glm-5.3-flash": {"input": 0.8, "cache_hit": 0.23, "output": 2.8},
+    # 月之暗面 Kimi 开放平台（K3.1-pro 为当前旗舰；K3 并行在售）
+    "kimi-k3.1-pro": {"input": 13.0, "cache_hit": 1.30, "output": 68.0},
     "kimi-k3": {"input": 20.0, "cache_hit": 2.0, "output": 100.0},
     # 通义百炼（Qwen3.8 系列，中国站价格）
     "qwen3.8-max": {"input": 12.0, "cache_hit": 1.5, "output": 36.0},
     "qwen3.8-flash": {"input": 0.8, "cache_hit": 0.1, "output": 2.7},
-    # 火山方舟（豆包当前在售：旗舰 Evolving / 最低刊例 2.0-mini；
-    # 无公开缓存价 → 命中按全价保守计）
+    # 火山方舟（豆包当前主推 Seed 2.1 家族；turbo 无公开缓存价 → 命中按
+    # 全价保守计。旧名 seed-evolving/2.0-mini 条目保留——老配置仍可估算）
+    "doubao-seed-2.1-pro": {"input": 6.0, "cache_hit": 1.2, "output": 30.0},
+    "doubao-seed-2.1-turbo": {"input": 3.0, "output": 15.0},
     "doubao-seed-evolving": {"input": 6.0, "output": 30.0},
     "doubao-seed-2.0-mini": {"input": 0.2, "output": 2.0},
     # 硅基流动（只收 v4 系列；高峰=每日 0-2 点、8-24 点，空闲=2-8 点）

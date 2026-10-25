@@ -28,13 +28,15 @@ class TestPriceFor(unittest.TestCase):
     def test_builtin_lookup_strips_prefix_and_case(self):
         p = pricing.price_for("deepseek:DeepSeek-V4-Flash")
         self.assertIsNotNone(p)
-        self.assertEqual(p["input"], 3.0)
+        self.assertEqual(p["input"], 2.0)
         self.assertIn("off", p)
 
     def test_current_models_present(self):
-        for m in ("deepseek-v4-pro", "deepseek-v4-flash-vision-exp",
-                  "glm-5.3", "glm-5.3-flash", "kimi-k3",
+        for m in ("deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro",
+                  "deepseek-v4-flash-vision-exp",
+                  "glm-5.3", "glm-5.3-flash", "kimi-k3.1-pro", "kimi-k3",
                   "qwen3.8-max", "qwen3.8-flash",
+                  "doubao-seed-2.1-pro", "doubao-seed-2.1-turbo",
                   "doubao-seed-evolving", "doubao-seed-2.0-mini",
                   "deepseek-ai/deepseek-v4-flash-0731",
                   "deepseek-ai/deepseek-v4-pro"):
@@ -51,17 +53,17 @@ class TestPriceFor(unittest.TestCase):
         p = pricing.price_for("deepseek-v4-flash",
                               overrides={"deepseek-v4-flash": {"input": 9.9}})
         self.assertEqual(p["input"], 9.9)
-        self.assertEqual(p["off"]["input"], 1.5)   # 未覆盖的子档保留内置
-        self.assertEqual(p["output"], 9.0)
+        self.assertEqual(p["off"]["input"], 1.0)   # 未覆盖的子档保留内置
+        self.assertEqual(p["output"], 8.0)
         p3 = pricing.price_for("deepseek-v4-flash",
                                overrides={"deepseek-v4-flash": {"input": "abc"}})
-        self.assertEqual(p3["input"], 3.0)          # 非法覆盖值忽略
+        self.assertEqual(p3["input"], 2.0)          # 非法覆盖值忽略
 
     def test_overrides_off_subtier_and_unknown_model(self):
         p = pricing.price_for("deepseek-v4-flash", overrides={
             "deepseek-v4-flash": {"off": {"input": 0.9}}})
         self.assertEqual(p["off"]["input"], 0.9)
-        self.assertEqual(p["off"]["output"], 4.5)
+        self.assertEqual(p["off"]["output"], 4.0)
         # 表外模型显式给了价目 → 可计（用户显式覆盖优先于「不猜钱」）
         p2 = pricing.price_for("custom-model",
                                overrides={"custom-model": {"input": 1.0,
@@ -71,17 +73,25 @@ class TestPriceFor(unittest.TestCase):
 
 class TestEstimateCost(unittest.TestCase):
     def test_formula_peak_and_offpeak(self):
-        # 高峰：miss 1M×3 + hit 1M×0.1 + out 1M×9
+        # V4.1 Flash 高峰：miss 1M×2 + hit 1M×0.04 + out 1M×8
         self.assertAlmostEqual(pricing.estimate_cost(
             "deepseek-v4-flash", 2_000_000, 1_000_000,
-            cache_hit_tokens=1_000_000, ts=PEAK_DS), 12.1)
-        # 空闲：减半 1.5 + 0.05 + 4.5；周末全天空闲
+            cache_hit_tokens=1_000_000, ts=PEAK_DS), 10.04)
+        # 空闲：减半 1.0 + 0.02 + 4.0；周末全天空闲
         self.assertAlmostEqual(pricing.estimate_cost(
             "deepseek-v4-flash", 2_000_000, 1_000_000,
-            cache_hit_tokens=1_000_000, ts=OFF_TS), 6.05)
+            cache_hit_tokens=1_000_000, ts=OFF_TS), 5.02)
         self.assertAlmostEqual(pricing.estimate_cost(
             "deepseek-v4-flash", 2_000_000, 1_000_000,
-            cache_hit_tokens=1_000_000, ts=WEEKEND), 6.05)
+            cache_hit_tokens=1_000_000, ts=WEEKEND), 5.02)
+
+    def test_new_flash_name_same_price_as_old(self):
+        """deepseek-flash（V4.1 现行名）与旧名 v4-flash 同价（同一模型）。"""
+        self.assertAlmostEqual(
+            pricing.estimate_cost("deepseek-flash", 1_000_000, 1_000_000,
+                                  cache_hit_tokens=0, ts=PEAK_DS),
+            pricing.estimate_cost("deepseek-v4-flash", 1_000_000, 1_000_000,
+                                  cache_hit_tokens=0, ts=PEAK_DS))
 
     def test_siliconflow_tiers_and_uniform_pro(self):
         # SF flash：高峰（每日 0-2、8-24 点）3 + 0.3 + 9
@@ -98,16 +108,24 @@ class TestEstimateCost(unittest.TestCase):
             cache_hit_tokens=0, ts=OFF_TS), 36.0)
 
     def test_cache_hit_fallback_to_input_price(self):
-        """无公开缓存价的模型（doubao-seed-evolving）命中按全价保守计。"""
+        """无公开缓存价的模型（doubao-seed-2.1-turbo）命中按全价保守计。"""
         self.assertAlmostEqual(pricing.estimate_cost(
-            "doubao-seed-evolving", 1_000_000, 0,
-            cache_hit_tokens=1_000_000, ts=PEAK_DS), 6.0)
+            "doubao-seed-2.1-turbo", 1_000_000, 0,
+            cache_hit_tokens=1_000_000, ts=PEAK_DS), 3.0)
 
     def test_various_models(self):
+        # kimi-k3.1-pro：miss 1M×13 + hit 1M×1.3 + out 1M×68
+        self.assertAlmostEqual(pricing.estimate_cost(
+            "kimi-k3.1-pro", 2_000_000, 1_000_000,
+            cache_hit_tokens=1_000_000, ts=PEAK_DS), 82.3)
         # kimi-k3：miss 1M×20 + hit 1M×2 + out 1M×100
         self.assertAlmostEqual(pricing.estimate_cost(
             "kimi-k3", 2_000_000, 1_000_000,
             cache_hit_tokens=1_000_000, ts=PEAK_DS), 122.0)
+        # doubao-seed-2.1-pro：miss 1M×6 + hit 1M×1.2 + out 1M×30
+        self.assertAlmostEqual(pricing.estimate_cost(
+            "doubao-seed-2.1-pro", 2_000_000, 1_000_000,
+            cache_hit_tokens=1_000_000, ts=PEAK_DS), 37.2)
         self.assertAlmostEqual(pricing.estimate_cost(
             "qwen3.8-max", 1_000_000, 0, cache_hit_tokens=0,
             ts=PEAK_DS), 12.0)
@@ -126,17 +144,17 @@ class TestEstimateRecords(unittest.TestCase):
         rows = [
             {"ts": OFF_TS, "model": "deepseek-v4-flash",
              "prompt_tokens": 1_000_000, "completion_tokens": 0,
-             "cache_hit": 0},                                  # 空闲 1.5
+             "cache_hit": 0},                                  # 空闲 1.0
             {"ts": OFF_TS, "model": "deepseek-v4-flash",
              "prompt_tokens": 1_000_000, "completion_tokens": 0,
-             "cache_hit": 1_000_000},                          # 空闲全命中 0.05
+             "cache_hit": 1_000_000},                          # 空闲全命中 0.02
             {"ts": OFF_TS, "model": "no-price-model",
              "prompt_tokens": 999_999, "completion_tokens": 1},
             {"ts": OFF_TS - 40 * 86400, "model": "deepseek-v4-flash",
              "prompt_tokens": 1_000_000, "completion_tokens": 0},  # 时间窗外
         ]
         out = pricing.estimate_records(rows, days=30)
-        self.assertAlmostEqual(out["total"], 1.55)
+        self.assertAlmostEqual(out["total"], 1.02)
         self.assertEqual(out["priced"], 2)
         self.assertEqual(out["unpriced"], 1)
 

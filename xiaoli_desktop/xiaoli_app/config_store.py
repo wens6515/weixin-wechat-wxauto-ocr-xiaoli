@@ -212,8 +212,9 @@ AI_DEFAULTS = {
     "chat_top_p": 0.9,
     "max_history": 1000,
     # 回复长度物理上限（chat/vision 两链路共用；max_tokens 含推理模型的
-    # 思考 token，压太狠会出空回复——推理模型用户建议调高到 1000+）
-    "reply_max_tokens": 400,
+    # 思考 token，历史默认 400 会把思考模型的正文压没了——用户定案放宽到
+    # 40000，给足空间；回复纪律（1-2 条短句）仍由提示词管，这里是物理兜底）
+    "reply_max_tokens": 40000,
     # 单次请求上下文预算（估算 token，fit_messages_in_budget 裁剪依据）：
     # 大文件/长历史用户按模型真实上下文调大（如 128K/1M 模型），超限仍从
     # 最旧历史丢弃。估算偏保守（estimate_tokens 高估），不会击穿上限。
@@ -297,17 +298,42 @@ AI_DEFAULTS = {
     # 隐私边界由用户开这个开关时自担（用户定案：不做来源隐藏/内容过滤）。
     # 默认关。
     "shared_pool_enabled": False,
+    # 小漓状态层（默认关）：时段/热度本地算 + 情绪/精力由回复后的异步小调用
+    # 定量（每聊天 5 分钟节流），注入尾区背景——开启每条请求约多几十 token。
+    "persona_state_enabled": False,
+    # 媒体消息防抖等待（用户选模式）：fixed = 固定秒数（历史行为，默认 10）；
+    # smart = 纯像素静默期检测（每 2s 重数消息块，连续 quiet 秒无新块即继续，
+    # 硬上限 12s；对方跟发长任务描述不会被拆散，没跟文字时也不白等）。
+    "media_wait_mode": "fixed",
+    "media_wait_seconds": 10,
+    "media_wait_quiet_seconds": 5,
+    # 主动追尾（默认关，参数全部可设）：回复发出后随机延迟（区间内取）一次
+    # 小评估调用，模型决定补不补一句；护栏：等待期对方来新消息自动取消。
+    "followup_enabled": False,
+    "followup_delay_min": 45,
+    "followup_delay_max": 90,
+    "followup_cooldown_minutes": 120,
+    "followup_daily_max": 10,
+    "followup_private_only": True,
+    # 每日消费预算（默认关，按内置价目估算——无价目的调用不计入）：超限
+    # 当天不再发起模型调用（红圈仍清掉），跨天自动恢复。
+    "daily_cost_limit_enabled": False,
+    "daily_cost_limit": 10.0,
 }
 
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。
 # 模型 id 沿用"厂商:模型"前缀格式（与用户既有 config 一致，引擎直接透传）。
 # 预设模型与 xiaoli_app/pricing.py 价目表对齐（各平台当前在售主推，均有
 # 现行价目——用户用快捷添加选模型后估算消费不会落进「无价目未计入」）。
+# 模型名录以各平台官方定价页现行在售为准（价目常变，换版时一并核对）：
+# - deepseek: deepseek-flash = V4.1 Flash（原生多模态，官方已无独立 vision
+#   模型——旧名 v4-flash-vision-exp 由同一模型提供服务）；pro 无视觉。
+# - kimi: K3.1-pro 为当前旗舰（原生视觉，1M 上下文）；K3 并行在售。
+# - doubao: Seed 2.1 家族（pro/turbo）为当前在售主推。
 PRESET_PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek 深度求索",
      "base_url": "https://api.deepseek.com/v1/chat/completions",
-     "models": ["deepseek:deepseek-v4-flash", "deepseek:deepseek-v4-pro",
-                "deepseek:deepseek-v4-flash-vision-exp"]},
+     "models": ["deepseek:deepseek-flash", "deepseek:deepseek-v4-pro"]},
     {"id": "zhipu", "name": "智谱 GLM",
      "base_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
      "models": ["zhipu:glm-5.3", "zhipu:glm-5.3-flash"]},
@@ -316,10 +342,10 @@ PRESET_PROVIDERS = [
      "models": ["qwen:qwen3.8-max", "qwen:qwen3.8-flash"]},
     {"id": "kimi", "name": "月之暗面 Kimi",
      "base_url": "https://api.moonshot.cn/v1/chat/completions",
-     "models": ["kimi:kimi-k3"]},
+     "models": ["kimi:kimi-k3.1-pro", "kimi:kimi-k3"]},
     {"id": "doubao", "name": "豆包（火山引擎）",
      "base_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-     "models": ["doubao:doubao-seed-evolving", "doubao:doubao-seed-2.0-mini"]},
+     "models": ["doubao:doubao-seed-2.1-pro", "doubao:doubao-seed-2.1-turbo"]},
     {"id": "siliconflow", "name": "硅基流动 SiliconFlow",
      "base_url": "https://api.siliconflow.cn/v1/chat/completions",
      "models": ["siliconflow:deepseek-ai/deepseek-v4-flash-0731",

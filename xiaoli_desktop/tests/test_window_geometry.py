@@ -482,7 +482,9 @@ class TestBlockScreenRect(unittest.TestCase):
         reg_l = 100 + int(1300 * mr[0])
         reg_w = int(1300 * (mr[2] - mr[0]))
         reg_t = 200 + int(1610 * mr[1])
-        self.assertEqual(r[0], reg_l + int(reg_w * 0.02))
+        self.assertEqual(r[0], reg_l + int(reg_w * 0.15))
+        # 左沿 0.15 起裁：头像窄带（0.02~0.14）不再进小表情裁剪图
+        self.assertGreater(r[0], reg_l + int(reg_w * 0.14))
         self.assertEqual(r[2], reg_l + int(reg_w * 0.60))
         self.assertEqual(r[1], reg_t + 100)
         self.assertEqual(r[3], reg_t + 200)

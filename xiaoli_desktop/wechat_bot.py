@@ -110,18 +110,21 @@ logger = logging.getLogger("xiaoli")
 # 必须是 strip 后的纯名——API 只认纯模型名，带厂商前缀的兜底请求必 400
 # （历史缺陷：旧常量带 "deepseek:" 前缀，活跃卡缺失被模板补建（chat_model
 # 空）后 vision 兜底请求全部 400）。call_chat_ai 同样兜底，防空模型原样发出。
-VISION_MODEL_DEFAULT = "deepseek-v4-flash-vision-exp"
+# chat_model 为空时的共用兜底（chat / vision 两链路）。必须是 strip 后的纯名
+# ——API 只认纯模型名，带厂商前缀的兜底请求必 400。deepseek-flash = DeepSeek
+# V4.1 Flash（官方现行名，原生多模态——旧名 deepseek-v4-flash-vision-exp 仍可
+# 调用，但已由同一模型提供服务）。
+VISION_MODEL_DEFAULT = "deepseek-flash"
 
 # 重试常量与 ApiCallError 由 llm_client re-export 提供（见上方导入）
 
 # vision 工具循环的补全调用上限：搜索 + 抓取（含换源重试一次）+ 作答（防循环烧钱）
 VISION_TOOL_ROUNDS = 4
 
-# 回复长度的物理上限（两条链路共用：vision 与 chat）。历史默认 10000 ≈ 没有
-# 限制，长回复就是「AI 味」最直接的来源；配合 REPLY_STYLE_RULES 的 1-3 句
-# 纪律一起用。带 reasoning 的模型 max_tokens 包含思考 token，压太狠会出空
-# 回复（空 content 已有降级保护，不会炸），故留 400 起步。
-REPLY_MAX_TOKENS = 400
+# 回复长度的物理上限（两条链路共用：vision 与 chat）。历史默认 400 连推理
+# 模型的思考 token 都装不下（正文被压没）；用户定案放宽到 40000——长度
+# 纪律交给 REPLY_STYLE_RULES 的提示词，这里只是物理兜底。
+REPLY_MAX_TOKENS = 40000
 
 # always 语音模式纪律（用户定案：模型**必须**经 send_voice 回复——工具是
 # 模型挑情绪的唯一通道）。模型偶尔仍会直接输出文字：_deliver_reply 的通用
@@ -412,6 +415,29 @@ class WeChatBot(MediaCaptureMixin):
         # 记忆（近期+重要+深层），命中带来源聊天名。开与不开是用户的决定，
         # 不做内容过滤/来源隐藏之类的软性限制（用户定案）。
         self.shared_pool_enabled = bool(cfg.get("shared_pool_enabled", False))
+        # 小漓状态层（默认关）：时段/热度本地算 + 情绪精力由「回复发出后的
+        # 异步小调用」定量（见 xiaoli_app.persona_state），注入在当前时间
+        # 之后的尾区。开着每条请求多约几十 token，定量调用每聊天 5 分钟节流。
+        self.persona_state_enabled = bool(cfg.get("persona_state_enabled", False))
+        # 媒体消息防抖等待（双模式用户选）：fixed = 固定秒数（历史行为）；
+        # smart = 纯像素静默期检测——对方跟发的文字一到齐就继续（见
+        # AgentBot._media_debounce），零 OCR 零 API。
+        self.media_wait_mode = str(cfg.get("media_wait_mode", "fixed") or "fixed").strip().lower()
+        self.media_wait_seconds = max(2.0, float(cfg.get("media_wait_seconds", 10)))
+        self.media_wait_quiet_seconds = max(2.0, float(cfg.get("media_wait_quiet_seconds", 5)))
+        # 主动追尾（默认关，全部参数可设）：回复发出后随机延迟一次小评估
+        # 调用，模型决定补不补一句；调度/护栏见 AgentBot._followup_*。
+        self.followup_enabled = bool(cfg.get("followup_enabled", False))
+        self.followup_delay_min = max(5.0, float(cfg.get("followup_delay_min", 45)))
+        self.followup_delay_max = max(self.followup_delay_min,
+                                      float(cfg.get("followup_delay_max", 90)))
+        self.followup_cooldown_minutes = max(0.0, float(cfg.get("followup_cooldown_minutes", 120)))
+        self.followup_daily_max = max(0, int(cfg.get("followup_daily_max", 10)))
+        self.followup_private_only = bool(cfg.get("followup_private_only", True))
+        # 每日消费预算（默认关，按内置价目估算）：超限当天不再发起模型调用
+        # （红圈仍清掉防滞留循环），跨天自动恢复。见 AgentBot._budget_exhausted。
+        self.daily_cost_limit_enabled = bool(cfg.get("daily_cost_limit_enabled", False))
+        self.daily_cost_limit = max(0.0, float(cfg.get("daily_cost_limit", 10.0)))
         # per-chat 角色卡绑定：绑定表（聊天名 -> 卡 id）+ 解析后的运行时参数表
         # （config_store 加载/重投影时从 cards/ 生成）。设置页/记忆页改动经
         # AppContext.reproject_and_push 热推送，无需重启。
@@ -1070,6 +1096,21 @@ class WeChatBot(MediaCaptureMixin):
         except Exception as e:
             return f"保存失败：{e}"
 
+    def _persona_state_block(self, chat_id):
+        """状态层注入块（开关关闭/异常返回 None，两条 LLM 链路共用）。
+
+        位置在「当前时间」之后——状态随时段/每次回复缓慢变化，属于尾区
+        变化位，不打碎「人设+历史」缓存前缀。实现见 xiaoli_app.persona_state
+        （时段/热度本地算零成本；情绪/精力由回复后的异步小调用定量）。"""
+        if not getattr(self, "persona_state_enabled", False) or not chat_id:
+            return None
+        try:
+            from xiaoli_app.persona_state import build_state_block
+            return build_state_block(self, chat_id)
+        except Exception as e:
+            logger.debug(f"[状态层] 注入构建失败（跳过本轮）: {e}")
+            return None
+
     def _important_block(self, chat_id):
         if not getattr(self, "memory_compress_enabled", False):
             return None
@@ -1607,6 +1648,10 @@ class WeChatBot(MediaCaptureMixin):
         # 一条 system，消除空 messages 隐患。
         current_time = time.strftime("%Y-%m-%d %H:%M:%S")
         messages.append({"role": "system", "content": f"当前时间：{current_time}"})
+        # 状态层（开关开启时）：时段/热度/情绪背景，紧贴当前时间之后
+        _persona = self._persona_state_block(chat_id)
+        if _persona:
+            messages.append({"role": "system", "content": _persona})
         # eager 态触发器清单注入（manage_reminder 配套）：紧跟当前时间的尾区
         # ——清单变化极少（创建/取消才变），放这里不打碎「人设+历史」前缀
         # 缓存；模型拿到 id 后取消/修改可一轮完成，还能主动说出已有约定。
@@ -1895,6 +1940,10 @@ class WeChatBot(MediaCaptureMixin):
         if g_related:
             messages.append({"role": "system", "content": g_related})
         messages.append({"role": "system", "content": f"当前时间：{current_time}"})
+        # 状态层（开关开启时）：与 vision 链路同一注入位（当前时间之后）
+        _persona = self._persona_state_block(chat_id)
+        if _persona:
+            messages.append({"role": "system", "content": _persona})
         messages.append({"role": "user", "content": decorated})
 
         with self._model_lock:

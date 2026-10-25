@@ -850,8 +850,12 @@ class MemoryStore:
     def detail(self, chat_id, deep_offset=0, deep_limit=200, deep_query=None):
         """单聊天详情快照（锁内拷贝，UI 展示用）。
 
-        deep_query 非空：深层全量过滤，deep 截 200 条 + deep_matched 总数；
-        否则深层返回第 deep_offset 页（deep_limit 条），deep_matched=None。"""
+        深层列表**最新在前**（用户定案：记忆页最新的内容放最上面）：
+        - 无 query：deep_offset 从**尾部**（最新）起算——offset=0 取最新
+          deep_limit 条倒序，「加载更多」增大 offset 取更早的一批（追加在
+          已显示内容之后，时序仍正确）；deep_has_more = 前方还有更早的。
+        - query：全量过滤后取**最新** deep_limit 条倒序；deep_matched 为
+          命中总数，deep_has_more = 命中数超过显示上限。"""
         with self.lock:
             key = self._resolve_key(chat_id)
             st = self.memory_db.get(key) or {}
@@ -862,12 +866,14 @@ class MemoryStore:
                 hits = [dict(m) for m in self.iter_deep(chat_id)
                         if q in str(m.get("content") or "").lower()]
                 deep_matched = len(hits)
-                deep = hits[:200]
+                deep = hits[-deep_limit:][::-1]
+                deep_has_more = deep_matched > deep_limit
             else:
-                deep = []
-                for i, m in enumerate(self.iter_deep(chat_id)):
-                    if i >= deep_offset and len(deep) < deep_limit:
-                        deep.append(dict(m))
+                msgs = [dict(m) for m in self.iter_deep(chat_id)]
+                end = max(0, len(msgs) - max(0, deep_offset))
+                start = max(0, end - deep_limit)
+                deep = msgs[start:end][::-1]
+                deep_has_more = start > 0
             return {
                 "recent": [dict(m) for m in (st.get("recent") or [])],
                 "important": [dict(m) for m in (st.get("important") or [])],
@@ -875,6 +881,7 @@ class MemoryStore:
                 "deep_total": deep_total,
                 "deep": deep,
                 "deep_matched": deep_matched,
+                "deep_has_more": deep_has_more,
             }
 
     def delete_important(self, chat_id, idx):

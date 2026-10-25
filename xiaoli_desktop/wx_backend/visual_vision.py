@@ -578,6 +578,111 @@ def find_panel_icon(arr, panel: tuple, colors: dict) -> tuple | None:
         if best is None or score > best[0]:
             best = (score, (t + ct, t + cb, l + cl, l + cr))
     return best[1] if best else None
+# 引用消息判据（真机标定，1300x1610，深/浅双主题实测）：
+# 引用块画在气泡面板**下方**（竖线顶 ≈ 面板底 + 15），无填充背景色打底，
+# 左缘一条 2~4px 竖灰线——深色 (53,53,54)、浅色 (225,225,225)——竖线 x
+# 位置 ≈ 面板左缘 + 10，长度与引用内容物（引用文字行 / 图片缩略图 ~68px /
+# 文件图标 ~50px）等高，是引用区**下边界**的精确信号。引用内容物在面板外
+# 呈现为「游离媒体框」——真图片消息没有气泡面板（媒体裸奔），所以「有面板
+# + 面板下方竖线」= 引用消息，游离框是引用内容，绝不能当图片点开（点击
+# 会跳去被引用的原消息）或裁剪送视觉。
+# 竖线与气泡填充只差 ±13 色阶且仅 2~4px 宽（远低于 _connected_boxes 的
+# min_w=40），与气泡/媒体框互不干扰；只在面板下方扫描，也不会误吃面板本身。
+_QUOTE_LINE_X_OFF = 10      # 竖线 x = 面板左缘 + 10（真机 ±3 内稳定）
+_QUOTE_LINE_TOP_WIN = (5, 31)   # 竖线顶搜索窗：面板底 + 5 ~ + 31（实测 15~16）
+_QUOTE_LINE_MIN_LEN = 25    # 竖线最短长度（单行引用文字实测 ~57px）
+_QUOTE_LINE_COLOR = {"dark": (53, 53, 54), "light": (225, 225, 225)}
+
+
+def detect_quote_line(arr, colors, panel):
+    """在气泡面板下方找引用块的左缘竖线，返回 (line_top, line_bottom) 或 None。
+
+    按列扫描：x 在 面板左缘+10±3 的候选列里找「与主题竖线色匹配的连续
+    run」（容差三通道绝对差之和 ≤12——竖线与气泡填充只差 ±6/通道（深色
+    53 vs 气泡 47），容差放到 ±10/通道会把**下一条消息的气泡**误认成竖线，
+    PrintWindow 像素稳定（噪声<3）下 ±4/通道足够；容忍 2px 抗锯齿断口），
+    run 顶落在搜索窗内且长度达标即命中。多候选列取更长的 run（竖线斜切/
+    圆角时各列长度略有差异）。arr 为消息区 1x RGB int16 数组。"""
+    import numpy as np
+    t, b, l, r = panel
+    theme = colors.get("theme") if isinstance(colors, dict) else None
+    key = theme if theme in ("light", "dark") else "dark"
+    base = np.array(_QUOTE_LINE_COLOR[key], dtype=np.int16)
+    h = arr.shape[0]
+    lo_off, hi_off = _QUOTE_LINE_TOP_WIN
+    win_top, win_bot = min(b + lo_off, h - 1), min(b + hi_off, h - 1)
+    if win_bot <= win_top:
+        return None
+    x0 = l + _QUOTE_LINE_X_OFF
+    best = None
+    for x in range(x0 - 3, x0 + 4):
+        if x < 0 or x >= arr.shape[1]:
+            continue
+        col = arr[:, x]
+        hit = np.abs(col - base).sum(axis=1) <= 12
+        # run 顶必须落在搜索窗内（真机 +15；面板正下方的背景/圆角不匹配）
+        starts = np.flatnonzero(hit[win_top:win_bot + 1])
+        if starts.size == 0:
+            continue
+        start = int(starts[0]) + win_top
+        # 自顶向下延伸，容忍 2px 断口（抗锯齿）
+        bottom, gap = start, 0
+        for y in range(start, h):
+            if hit[y]:
+                bottom = y
+                gap = 0
+            else:
+                gap += 1
+                if gap > 2:
+                    break
+        if bottom - start + 1 >= _QUOTE_LINE_MIN_LEN:
+            if best is None or bottom - start > best[1] - best[0]:
+                best = (start, bottom)
+    return best
+
+
+def find_quote_content_box(arr, colors, panel, quote_span):
+    """引用区内容物（图片缩略图 / 文件图标）定位：竖线右侧、引用 span 内的
+    非背景实心块。返回 1x 框 (top, bottom, left, right) 或 None。
+
+    为什么不直接用 find_media_boxes 的框：通用判据 min 40x40 会漏掉窄
+    缩略图（真机：竖版图片引用的缩略图只有 ~30px 宽，有标注没得点）。
+    这里只在引用条带内做低阈值检测：min 24x24（排除 ~20px 的文字字形）、
+    填充率 ≥0.45（排除文字笔画，缩略图/图标是整片实心）、尺寸上限挡掉
+    误检的大块。浅色下浅色缩略图与背景融合时只检出饱和核心——点击其
+    中心仍落在缩略图上，够用。"""
+    import numpy as np
+    lt, lb = quote_span
+    t, b, l, r = panel
+    h, w = arr.shape[:2]
+    y0, y1 = max(0, lt - 4), min(h, lb + 4)
+    x0 = l + 16            # 跳过竖线（面板左 +10±3）
+    x1 = min(w, l + 420)   # 引用内容物不会离竖线太远
+    if y1 - y0 < 12 or x1 - x0 < 12:
+        return None
+    bg = colors.get("bg") if isinstance(colors, dict) else None
+    if bg is None:
+        return None
+    sub = arr[y0:y1, x0:x1]
+    dist = np.abs(sub - np.array(bg, dtype=np.int16)).sum(axis=2)
+    # 距离阈值按主题分档：深色背景暗、内容物对比强（90 稳）；浅色背景 250
+    # 与白底缩略图只差 15——阈值放到 45 才能让 QR 深色模块/饱和核心成块
+    # （文字灰字的距离远超 45，仍由尺寸+填充率闸排除）
+    mask = dist > (45 if colors.get("theme") == "light" else 90)
+    best = None
+    for (ct, cb, cl, cr) in _connected_boxes(mask, min_h=24, min_w=24,
+                                             x_gap=6, y_gap=4):
+        bw, bh = cr - cl, cb - ct
+        if bw > 280 or bh > 170:   # 引用内容物量级（缩略图 ~68、图标 ~50）
+            continue
+        if float(mask[ct:cb, cl:cr].mean()) < 0.45:
+            continue
+        area = bw * bh
+        if best is None or area > best[0]:
+            best = (area, (y0 + ct, y0 + cb, x0 + cl, x0 + cr))
+    return best[1] if best else None
+
+
 def region_changed(a: Image.Image, b: Image.Image, region=None,
                    threshold: int = 30) -> bool:
     """像素级差异检测（毫秒级）：region=(l,t,r,b) 局部区域或整图。

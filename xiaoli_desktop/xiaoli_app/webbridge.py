@@ -173,6 +173,11 @@ _ALLOWED_KEYS = {
     "chat_feature_overrides", "first_prompt_path", "bot_nickname",
     "start_paused",
     "no_reply_enabled", "global_memory_enabled", "shared_pool_enabled",
+    "persona_state_enabled",
+    "media_wait_mode", "media_wait_seconds", "media_wait_quiet_seconds",
+    "followup_enabled", "followup_delay_min", "followup_delay_max",
+    "followup_cooldown_minutes", "followup_daily_max", "followup_private_only",
+    "daily_cost_limit_enabled", "daily_cost_limit",
 }
 
 # 写 cfg 后需要同步热写到 bot 属性的键（旧 UI 设置页语义：先落盘再热写）。
@@ -190,6 +195,11 @@ _BOT_HOT_KEYS = {
     "voice_mode", "tts_endpoint", "voice_max_seconds", "voice_profiles",
     "active_voice_profile_id",
     "no_reply_enabled", "global_memory_enabled", "shared_pool_enabled",
+    "persona_state_enabled",
+    "media_wait_mode", "media_wait_seconds", "media_wait_quiet_seconds",
+    "followup_enabled", "followup_delay_min", "followup_delay_max",
+    "followup_cooldown_minutes", "followup_daily_max", "followup_private_only",
+    "daily_cost_limit_enabled", "daily_cost_limit",
 }
 
 _TERMINAL_STATES = ("已触发", "已错过", "已达成", "已到期", "已失效")
@@ -468,6 +478,38 @@ class BridgeApi:
     # ---------- 配置 ----------
 
     @_safe
+    def persona_state_overview(self) -> dict:
+        """状态页数据：状态层开关 + 当前时段 + 各聊天最新状态快照。
+
+        存储键是 memory_key 归一化名——能从记忆总览映射回原始聊天名的
+        （用户在微信里看到的名字）就映射，映射不到的显示归一化键。"""
+        from .persona_state import PersonaStateStore, period_label
+        cfg = self.ctx.cfg
+        enabled = bool(cfg.get("persona_state_enabled", False))
+        mf = str(cfg.get("memory_file") or "memory.json")
+        base = os.path.dirname(os.path.abspath(mf)) or "."
+        store = PersonaStateStore(os.path.join(base, "persona_state.json"))
+        names = {}
+        try:
+            ch, is_bot = self._mem_channel()
+            data = (ch.memory_overview() if is_bot else ch.overview()) or {}
+            for chat in data:
+                names[memory_key(chat)] = chat
+        except Exception:
+            pass
+        rows = []
+        for k, st in store.snapshot().items():
+            rows.append({
+                "chat": names.get(k, k),
+                "mood": str(st.get("mood") or "").strip() or None,
+                "energy": st.get("energy"),
+                "ts": st.get("ts"),
+            })
+        rows.sort(key=lambda r: -(r.get("ts") or 0))
+        return {"ok": True, "enabled": enabled,
+                "period": period_label(), "rows": rows}
+
+    @_safe
     def get_config(self) -> dict:
         cfg = self.ctx.cfg
         co = cfg.get("card_opacity")
@@ -492,7 +534,7 @@ class BridgeApi:
             "memory_important_max": cfg.get("memory_important_max", 20),
             "memory_compress_model": cfg.get("memory_compress_model", ""),
             "max_context_tokens": cfg.get("max_context_tokens", 100000),
-            "reply_max_tokens": cfg.get("reply_max_tokens", 400),
+            "reply_max_tokens": cfg.get("reply_max_tokens", 40000),
             "segment_wait_enabled": cfg.get("segment_wait_enabled", True),
             "segment_wait_seconds": cfg.get("segment_wait_seconds", 2.0),
             "segment_jitter_enabled": cfg.get("segment_jitter_enabled", False),
@@ -516,6 +558,18 @@ class BridgeApi:
             "no_reply_enabled": bool(cfg.get("no_reply_enabled", False)),
             "global_memory_enabled": bool(cfg.get("global_memory_enabled", False)),
             "shared_pool_enabled": bool(cfg.get("shared_pool_enabled", False)),
+            "persona_state_enabled": bool(cfg.get("persona_state_enabled", False)),
+            "media_wait_mode": cfg.get("media_wait_mode", "fixed"),
+            "media_wait_seconds": cfg.get("media_wait_seconds", 10),
+            "media_wait_quiet_seconds": cfg.get("media_wait_quiet_seconds", 5),
+            "followup_enabled": bool(cfg.get("followup_enabled", False)),
+            "followup_delay_min": cfg.get("followup_delay_min", 45),
+            "followup_delay_max": cfg.get("followup_delay_max", 90),
+            "followup_cooldown_minutes": cfg.get("followup_cooldown_minutes", 120),
+            "followup_daily_max": cfg.get("followup_daily_max", 10),
+            "followup_private_only": bool(cfg.get("followup_private_only", True)),
+            "daily_cost_limit_enabled": bool(cfg.get("daily_cost_limit_enabled", False)),
+            "daily_cost_limit": cfg.get("daily_cost_limit", 10.0),
             "tianshu_guided": bool(cfg.get("tianshu_guided")),
         }
         voice = {
@@ -1119,8 +1173,16 @@ class BridgeApi:
             if day in day_model and r.get("model"):
                 m = day_model[day]
                 m[r["model"]] = m.get(r["model"], 0) + 1
+        # 每日预算进度（用量页进度条）：估算口径同预算闸（内置价目，无价目
+        # 不计入），limit<=0 视为未设上限（前端隐藏进度条）
+        budget = {
+            "enabled": bool(self.ctx.cfg.get("daily_cost_limit_enabled")),
+            "limit": float(self.ctx.cfg.get("daily_cost_limit") or 0),
+            "today": est.get("today") or 0.0,
+        }
         return {"ok": True, "cards": cards, "by_model": by_model,
-                "days": day_names, "day_model": day_model}
+                "days": day_names, "day_model": day_model,
+                "budget": budget}
 
     @_safe
     def refresh_balances(self) -> dict:

@@ -10,6 +10,7 @@
 """
 import json, os, sys, time, re, traceback, base64
 import queue
+import random
 import threading
 import requests as req
 import pyautogui
@@ -100,6 +101,20 @@ VISION_NEUTRAL_PROMPT = (
 )
 
 
+# 主动追尾的评估指令（系统把「要不要补」作为一个必答问题递给模型——
+# 二选一输出，不依赖模型自发想起调工具，规避 no_reply 式的低调用率）。
+FOLLOWUP_EVAL_PROMPT = (
+    "你刚回完对方的话（最近对话见历史）。现在有一个可选动作：**自然地补"
+    "一句**——像真人那样偶尔回完话想起什么，追加一条短消息（想到了什么、"
+    "顺口一问、分享个相关的东西）。想补就只输出那一条消息的文本（口语化、"
+    "二十字左右）；不想补就只输出 [不补] 三个字符。要克制：十次里补两三次"
+    "就够了，只有真的自然才补。不要调用任何工具。"
+)
+
+# 引用标注解析（get_messages 装配的「[引用 …] 」前缀）
+_QUOTE_MARKER_RE = re.compile(r"^\[引用 (.+?)\]\s*")
+
+
 # =====================================================================
 # 任务桥与后台线程已拆至 xiaoli_app（纯移动）；此处显式 re-import，
 # 既有导入路径（tests / xiaoli_app.setup / xiaoli_web）不变。
@@ -169,6 +184,15 @@ class AgentBot(WeChatBot):
         # 防滞留红圈在 0.5s 快档下每轮都打一遍整条 OCR 管线，把单核打满
         self._chat_fail_at = {}
         self._fail_backoff = 8.0
+        # 主动追尾运行态（内存即可：冷却/日限跨重启重置可接受，追尾晚一轮
+        # 无害）。pending 由主循环消费（发送切会话，窗口互斥纪律同触发器）。
+        self._followup_pending = []   # [{chat, due_at, scheduled_at}]
+        self._followup_last = {}      # chat -> 上次追尾发出时刻
+        self._followup_day = {"date": None, "count": 0}
+        # 每日预算：当日告警标记 + 结果缓存（60s 一查——别在 0.5s 轮询里
+        # 每轮跑一次 SQL 聚合）
+        self._budget_day = {"date": None, "flagged": False}
+        self._budget_cache = {"at": 0.0, "out": False}
         # 定时消息：存储 + 闹钟线程 + 到期队列（发送在主循环节点消费）
         self.reminders = RemindersStore()
         self._reminder_queue = queue.Queue()
@@ -960,6 +984,7 @@ class AgentBot(WeChatBot):
             self._add_history(chat_name, "user", user_text)
         self._add_history(chat_name, "assistant", text)
         self._send_voice_reply(chat_name, text, emotion=emotion)
+        self._after_reply_sent(chat_name, text)
         return True
 
     def _handle_no_reply(self, chat_name, result, user_text):
@@ -996,17 +1021,20 @@ class AgentBot(WeChatBot):
         程序固定文案（占位「正在处理中」「文件已收到」、任务进度、错误
         兜底）不走这里，保持文字——always 语义只覆盖模型说出口的话。
         trigger=True 用触发器文本语义（旁路占位归零），语音回退同样旁路。
+        回复完整发出后经 _after_reply_sent 收尾（状态层定量 + 追尾登记）。
         """
         if self.voice_state(chat) == "always" and \
                 self._send_voice_reply(
                     chat, text,
                     text_fallback=(lambda t: self._send_trigger_reply(t, chat))
                     if trigger else None):
+            self._after_reply_sent(chat, text)
             return
         if trigger:
             self._send_trigger_reply(text, chat)
         else:
             self._send_text(text, chat)
+        self._after_reply_sent(chat, text)
 
     def _record_reply_latency(self, t0):
         """记录一次端到端回复耗时（识别到红圈 → 产出回复），供用量页
@@ -1129,14 +1157,16 @@ class AgentBot(WeChatBot):
                 f"截止 {exp_s}。达成或到截止系统会把事件回递给你，届时结合"
                 "上下文自然回复。请用你自己的话自然地跟用户确认一下")
 
-    def _handle_text(self, chat_name, sender, content, msg_id=None, multi_sender=False):
+    def _handle_text(self, chat_name, sender, content, msg_id=None,
+                     multi_sender=False, img_paths=None):
         """文本消息统一处理：vision-exp 单调用判断+回复 → 天枢投递 或 普通聊天。
 
         附件只由文件消息路径投递（_process_file_with_instruction，用户确实
         发了文件时才带）。纯文字任务不带任何附件——历史缺陷：文本路径无条件
         找接收目录"最新"文件，用户没发文件时把无关旧文件投给 agent 造成误判。
-        恒走 vision 单调用（工具按各自开关在 _vision_tools 逐项注入）；调用
-        失败（None）时降级回退普通聊天。
+        img_paths：引用联动预捕获的图片临时件（引用图片随文字进同一 vision
+        调用），可空。恒走 vision 单调用（工具按各自开关在 _vision_tools 逐项
+        注入）；调用失败（None）时降级回退普通聊天。
         """
         is_group = getattr(self.wx, "_current_is_group", None)
         if is_group is None:
@@ -1154,7 +1184,7 @@ class AgentBot(WeChatBot):
         resp = self._vision_route(
             chat_name, sender, question,
             msg_id=msg_id, raw_message=content,
-            is_group=is_group, multi_sender=multi_sender)
+            is_group=is_group, multi_sender=multi_sender, img_paths=img_paths)
         if resp is not None:
             return True
         # vision 降级（None）：API 失败回退普通聊天
@@ -1178,6 +1208,9 @@ class AgentBot(WeChatBot):
             self._drain_reminders()
         if getattr(self, "_condition_queue", None) is not None:
             self._drain_conditions()
+        # 追尾评估到期消费（主循环节点——发送切会话，窗口互斥纪律同触发器）
+        if getattr(self, "_followup_pending", None):
+            self._drain_followups()
         # 任务成果轮询不受 cooldown / 任务暂停限制，必须最先执行
         self._tick_poll_outbox()
         resume, self._task_was_active, self._task_end_time = should_resume_listen(
@@ -1215,6 +1248,18 @@ class AgentBot(WeChatBot):
                 if time.time() - self._chat_fail_at.get(key, 0.0) < self._fail_backoff:
                     logger.debug(f"[退避] {key} 上次处理失败未满 {self._fail_backoff:.0f}s，跳过")
                     continue
+                # 每日预算闸：超限当天不发起模型调用，但点输入框清红圈——
+                # 不清圈会被 8s 退避无限重处理（与静默路径同一纪律）
+                if self._budget_exhausted():
+                    mark_read = getattr(self.wx, "mark_session_read", None)
+                    if mark_read is not None:
+                        try:
+                            mark_read()
+                        except Exception as e:
+                            logger.warning(f"[预算] 标记已读失败: {e}")
+                    logger.info(f"[预算] 今日估算消费已达上限，跳过 {key} 的处理"
+                                "（红圈已清，明天自动恢复）")
+                    continue
                 logger.info(f"🔔 发现新消息（未读条目 {key}）"
                             f"{'，会话名由标题区给出' if switched else ''}")
                 t0 = time.time()  # 端到端回复耗时起点（识别到红圈）
@@ -1231,6 +1276,256 @@ class AgentBot(WeChatBot):
                 self._chat_fail_at[key] = time.time()
         except Exception as e:
             logger.error(f"Message processing error: {e}\n{traceback.format_exc()}")
+
+    # ---------- 每日预算 / 媒体防抖 / 主动追尾 ----------
+
+    def _budget_exhausted(self):
+        """今日估算消费是否已达预算上限（结果缓存 60s）。
+
+        估算口径 = 内置价目（pricing，无价目的调用不计入）——这是「按量
+        折算参考」不是账单，设置页/用量页文案均已标注。开关关闭恒 False；
+        查询异常按未超限处理（统计故障不该把人挡在门外）。"""
+        if not getattr(self, "daily_cost_limit_enabled", False):
+            return False
+        now = time.time()
+        if now - self._budget_cache.get("at", 0.0) < 60.0:
+            return self._budget_cache.get("out", False)
+        out = False
+        try:
+            from xiaoli_app import pricing
+            from xiaoli_app.usage_store import UsageStore
+            limit = float(getattr(self, "daily_cost_limit", 0) or 0)
+            if limit > 0:
+                est = pricing.estimate_records(
+                    UsageStore().load_records(days=2), days=2)
+                today_cost = float(est.get("today") or 0.0)
+                out = today_cost >= limit
+                today = time.strftime("%Y-%m-%d")
+                if self._budget_day.get("date") != today:
+                    self._budget_day = {"date": today, "flagged": False}
+                if out and not self._budget_day.get("flagged"):
+                    self._budget_day["flagged"] = True
+                    logger.warning(
+                        f"[预算] 今日估算消费 ¥{today_cost:.2f} 已达上限 "
+                        f"¥{limit:.2f}——今天不再调用模型（红圈仍会清掉，"
+                        "明天自动恢复）")
+        except Exception as e:
+            logger.debug(f"[预算] 查询失败（按未超限处理）: {e}")
+        self._budget_cache = {"at": now, "out": out}
+        return out
+
+    def _media_debounce(self, chat_name, switched):
+        """媒体消息防抖：等对方跟着媒体发的文字一起到，防拆散任务描述。
+
+        双模式（media_wait_mode 用户选）：
+        - fixed：固定 media_wait_seconds 秒（历史行为）——对方打长任务描述
+          也不怕拆，代价是没跟文字时白等；
+        - smart：纯像素静默期检测——每 2s 重数一次对方消息块（analyze_window
+          纯像素路径，零 OCR 零 API），出现新块（对方还在发）就重置静默
+          计时，连续 media_wait_quiet_seconds 秒无新块（说完了）即继续；
+          硬上限 12s 兜底（永远不超过固定档的等待上限量级）。"""
+        mode = str(getattr(self, "media_wait_mode", "fixed") or "fixed")
+        if mode != "smart":
+            time.sleep(max(2.0, float(getattr(self, "media_wait_seconds", 10))))
+            return
+        quiet_need = max(2.0, float(getattr(self, "media_wait_quiet_seconds", 5)))
+        cap = 12.0
+        waited = 0.0
+        quiet_for = 0.0
+        last_n = None
+        while waited < cap:
+            time.sleep(2.0)
+            waited += 2.0
+            try:
+                w = self.wx.analyze_window(
+                    chat_name,
+                    skip_bot=self._pending_placeholders.get(chat_name, 0),
+                    assume_switched=switched)
+                n = len(w.get("other_blocks") or [])
+            except Exception:
+                n = None
+            if last_n is not None and n is not None and n > last_n:
+                quiet_for = 0.0  # 对方又发了：重新等静默
+            else:
+                quiet_for += 2.0
+                if quiet_for >= quiet_need:
+                    return
+            if n is not None:
+                last_n = n
+
+    @staticmethod
+    def _chat_msg_time(m):
+        try:
+            return time.mktime(time.strptime(str(m.get("time") or ""),
+                                             "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            return 0.0
+
+    def _quote_attachment_plan(self, win, window_msgs):
+        """从 quote 块提取引用内容联动计划：返回 (图片 1x 框列表, 引用文件名)。
+
+        判型读的是 get_messages 装配好的引用标注（可靠来源）：
+        - 「[引用 X发来的图片]」且块带媒体框（缩略图）→ 引用图片，返回其
+          1x 框供点击开查看器捕获原图（用户定案：与普通图片同样处理）；
+        - 其余引用行能拆出文件名 token（「·」按 OCR 对「.」的高频误读先
+          归一）→ 引用文件名，交普通文件流程按显示名定位；
+        - 都不是 → 纯文字引用，无联动（标注已随文字进模型）。"""
+        boxes, quoted_file = [], None
+        for blk in (win.get("other_blocks") or []):
+            if blk.get("kind") != "quote":
+                continue
+            msg = next((m for m in window_msgs if m.y == blk.get("top")), None)
+            if msg is None:
+                continue
+            mobj = _QUOTE_MARKER_RE.match(msg.content or "")
+            if not mobj:
+                continue
+            inner = mobj.group(1)
+            if inner.endswith("发来的图片"):
+                # 缩略图框：专用检测（quote_media）优先，通用媒体框兜底——
+                # 窄缩略图（真机 ~30px 宽）过不了通用 40px 闸
+                box = blk.get("quote_media") or blk.get("media")
+                if box:
+                    boxes.append(box)
+                continue
+            body = re.split(r"[:：]", inner, 1)[-1].strip()
+            token = _extract_file_name_token(body.replace("·", "."))
+            if token:
+                quoted_file = token
+        return boxes, quoted_file
+
+    def _box_screen_rect_safe(self, box):
+        """box_screen_rect 的容错包装（测试桩后端可能没有该方法）。"""
+        fn = getattr(self.wx, "box_screen_rect", None)
+        if fn is None:
+            return None
+        try:
+            return fn(box)
+        except Exception as e:
+            logger.debug(f"[引用] 缩略图屏幕坐标换算失败: {e}")
+            return None
+
+    def _chat_recent_count(self, chat, seconds):
+        """该聊天近 seconds 秒内的消息条数（追尾热度判据，读 recent 窗口）。"""
+        now = time.time()
+        try:
+            hist = self._get_history(chat)
+        except Exception:
+            return 0
+        return sum(1 for m in hist if now - self._chat_msg_time(m) <= seconds)
+
+    def _chat_last_user_at(self, chat):
+        """该聊天最近一条 user 消息的时刻（追尾取消护栏用）。"""
+        try:
+            for m in reversed(self._get_history(chat)):
+                if m.get("role") == "user":
+                    return self._chat_msg_time(m)
+        except Exception:
+            pass
+        return 0.0
+
+    def _followup_schedule(self, chat, is_group=None):
+        """回复发出后登记一次追尾评估（发不发由触发时刻的评估调用决定）。
+
+        登记门槛（触发时刻重查）：开关开、（可选）仅私聊、近 10 分钟 ≥6 条
+        （聊得热才追尾，冷场追尾像骚扰）、每聊天冷却、当日上限。延迟在
+        [followup_delay_min, followup_delay_max] 内随机取——固定间隔是机器味。
+        同聊天只保留最新一个待评估（连发多条回复时不叠）。"""
+        if not getattr(self, "followup_enabled", False) or not chat:
+            return
+        if getattr(self, "followup_private_only", True):
+            if is_group is None:
+                is_group = bool(
+                    getattr(getattr(self, "wx", None), "_current_is_group", None)
+                    or is_group_chat(chat))
+            if is_group:
+                return
+        now = time.time()
+        if self._chat_recent_count(chat, 600) < 6:
+            return
+        if now - self._followup_last.get(chat, 0.0) < \
+                getattr(self, "followup_cooldown_minutes", 120) * 60:
+            return
+        today = time.strftime("%Y-%m-%d")
+        if self._followup_day.get("date") != today:
+            self._followup_day = {"date": today, "count": 0}
+        if self._followup_day["count"] >= int(getattr(self, "followup_daily_max", 10)):
+            return
+        lo = float(getattr(self, "followup_delay_min", 45))
+        hi = max(lo, float(getattr(self, "followup_delay_max", 90)))
+        self._followup_pending = [p for p in self._followup_pending
+                                  if p["chat"] != chat]
+        self._followup_pending.append(
+            {"chat": chat, "due_at": now + random.uniform(lo, hi),
+             "scheduled_at": now})
+
+    def _drain_followups(self):
+        """消费到期的追尾评估（主循环节点，窗口互斥纪律同定时/条件触发器）。
+
+        固定护栏（不可配置）：等待期间对方又发了消息 → 取消——人家正在说话，
+        插一句「对了」很怪。评估小调用无图带历史；[不补]/失败/工具调用一律
+        放弃本轮。发送走 _send_trigger_reply（切会话+标题复验防发错人）。"""
+        if self.paused or self._sending_lock or self._budget_exhausted():
+            # 到期项留在队列里：暂停/回传占用/预算耗尽期间不消费也不丢弃
+            # （暂停几小时后恢复，过期项会被「对方已说话」护栏或冷却拦下）
+            return
+        now = time.time()
+        due = [p for p in self._followup_pending if p["due_at"] <= now]
+        if not due:
+            return
+        self._followup_pending = [p for p in self._followup_pending
+                                  if p["due_at"] > now]
+        for p in due:
+            chat = p["chat"]
+            if self._chat_last_user_at(chat) > p["scheduled_at"]:
+                logger.debug(f"[追尾] {chat!r} 等待期间对方又发消息，取消")
+                continue
+            if now - self._followup_last.get(chat, 0.0) < \
+                    getattr(self, "followup_cooldown_minutes", 120) * 60:
+                continue
+            today = time.strftime("%Y-%m-%d")
+            if self._followup_day.get("date") != today:
+                self._followup_day = {"date": today, "count": 0}
+            if self._followup_day["count"] >= int(getattr(self, "followup_daily_max", 10)):
+                return
+            text = self._followup_generate(chat)
+            if not text:
+                continue
+            self._followup_last[chat] = time.time()
+            self._followup_day["count"] += 1
+            # 纯文本写历史（不加标记——带标记的 assistant 消息会被模型当
+            # 「段首格式」复读进后续回复），下一轮模型看得到自己补过这句
+            self._add_history(chat, "assistant", text)
+            self._send_trigger_reply(text, chat)
+            logger.info(f"[追尾] -> {chat}: {text[:40]}")
+
+    def _followup_generate(self, chat):
+        """触发时刻的追尾评估小调用。返回追尾文本或 None（放弃本轮）。"""
+        try:
+            resp = self.call_vision_api(
+                [{"type": "text", "text": FOLLOWUP_EVAL_PROMPT}], chat_id=chat)
+        except Exception as e:
+            logger.debug(f"[追尾] 评估调用失败: {e}")
+            return None
+        if not resp or resp.get("kind") != "text":
+            return None
+        t = strip_reply_prefix(str(resp.get("content") or "").strip())
+        if not t or "[不补]" in t:
+            return None
+        return t
+
+    def _after_reply_sent(self, chat, text):
+        """模型回复完整发出后的收尾钩子：状态层定量评估（异步小调用）+
+        主动追尾登记（到点由主循环评估）。占位/固定文案不经这里。"""
+        try:
+            from xiaoli_app.persona_state import schedule_eval
+            schedule_eval(self, chat, text)
+        except Exception:
+            pass
+        try:
+            self._followup_schedule(chat)
+        except Exception as e:
+            logger.debug(f"[追尾] 登记失败: {e}")
 
     def _handle_unread_session(self, entry, switched=False):
         """处理一个未读会话：窗口边界（bot 最后回复之后的对方消息）+ 分类分发。
@@ -1283,9 +1578,10 @@ class AgentBot(WeChatBot):
         # 群聊消息未 @小漓」；analyze_window 本身无 read_title 不刷新）。
         window_msgs = _window_msgs(win)
         # F/H: 有多媒体（图片或文件卡片，analyze_blocks 的 kind=file 计入
-        # has_media）→ sleep 10s 防话没说完/文件没下载完，再分析
+        # has_media；quote 不算——引用内容物不点击不裁剪无需防抖）→ 防抖
+        # 等待（双模式用户选）后再分析
         if win.get("has_media"):
-            time.sleep(10)
+            self._media_debounce(chat_name, switched)
             win = self.wx.analyze_window(
                 chat_name, skip_bot=self._pending_placeholders.get(chat_name, 0),
                 assume_switched=switched)
@@ -1375,63 +1671,99 @@ class AgentBot(WeChatBot):
                 pending["chat_name"], sender, pending["file_path"],
                 pending["filename"], text_content, multi_sender=multi_sender)
         # ============ 分类分发 ============
-        if file_text:
-            # 文件（可能同时有图片）：对方本轮新图一并投递，不再被文件分支吞掉。
-            # 文件卡片本身不会进媒体框（面板内部的图标已在像素层剔除），
-            # 所以这里不需要再按行剔除图标碎片；min_top=分析区上沿只放行
-            # 本轮对方的真图片。
-            extra_attachments = []
-            if has_media:
-                extra_attachments = self._capture_media_images(
-                    chat_name, min_top=win.get("bot_bottom"))
-            logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
-            try:
-                return self._handle_file_message(
-                    chat_name, sender, file_text, text_content,
-                    extra_attachments=extra_attachments,
-                    multi_sender=multi_sender)
-            finally:
-                # 临时图片由本分支捕获：dispatch 同步复制进任务目录后原件即
-                # 无用，非任务/降级分支同样不留残留（与 _process_pure_image 对齐）
-                for p in extra_attachments:
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
-        if has_media and text_content:
-            # 图片 + 文字 → 全部新图 + 文字一次 vision 调用，任务投递（全图
-            # 截图），非任务组装
-            logger.info(f"🖼💬 判断为图片+文字消息：{chat_name}")
-            return self._handle_image_with_text(
-                chat_name, sender, text_content, multi_sender=multi_sender,
-                min_top=win.get("bot_bottom"))
-        if has_media and not text_content:
-            # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 逐张 Ctrl+C/裁剪
-            logger.info(f"🖼 判断为图片消息：{chat_name}")
-            if self._process_pure_image(chat_name,
-                                        min_top=win.get("bot_bottom")):
+        # 引用内容联动（用户定案）：引用图片 → 点击引用区缩略图开查看器捕获
+        # 原图，随文字一起进 vision；引用文件 → 按显示名定位文件走普通文件
+        # 流程；纯文字引用维持标注语义。
+        quote_boxes, quoted_file = self._quote_attachment_plan(win, window_msgs)
+        quote_atts = []
+        if quote_boxes:
+            rects = [r for r in (self._box_screen_rect_safe(b)
+                                 for b in quote_boxes) if r]
+            if rects:
+                logger.info(f"📎 引用图片：点击缩略图捕获原图（{len(rects)} 张）")
+                quote_atts = self._capture_media_rects(rects)
+        try:
+            if quoted_file:
+                # 引用文件优先于一切分支：找到文件 → 与「文件+指令」同一流程
+                # （vision 判任务投递 / 非任务读内容回复）；找不到（如引用的
+                # 是小漓自己发的文件，接收目录没有）→ 落回文字，引用标注里
+                # 已带文件名，模型能自然回应
+                file_path = self._find_file_by_display_name(quoted_file)
+                if not file_path:
+                    time.sleep(3)  # 微信下载落盘有延迟，等一拍按同名再找一次
+                    file_path = self._find_file_by_display_name(quoted_file)
+                if file_path:
+                    logger.info(f"📎 判断为引用文件消息：{chat_name}（{quoted_file}）")
+                    return self._process_file_with_instruction(
+                        chat_name, sender, file_path, os.path.basename(file_path),
+                        text_content, multi_sender=multi_sender)
+                logger.info(f"[引用] 接收目录未找到引用的文件 {quoted_file!r}，按文字处理")
+            if file_text:
+                # 文件（可能同时有图片）：对方本轮新图一并投递，不再被文件分支吞掉。
+                # 文件卡片本身不会进媒体框（面板内部的图标已在像素层剔除），
+                # 所以这里不需要再按行剔除图标碎片；min_top=分析区上沿只放行
+                # 本轮对方的真图片。
+                extra_attachments = []
+                if has_media:
+                    extra_attachments = self._capture_media_images(
+                        chat_name, min_top=win.get("bot_bottom"))
+                logger.info(f"📁 判断为文件消息：{chat_name}（{file_text[:40]}）")
+                try:
+                    return self._handle_file_message(
+                        chat_name, sender, file_text, text_content,
+                        extra_attachments=extra_attachments,
+                        multi_sender=multi_sender)
+                finally:
+                    # 临时图片由本分支捕获：dispatch 同步复制进任务目录后原件即
+                    # 无用，非任务/降级分支同样不留残留（与 _process_pure_image 对齐）
+                    for p in extra_attachments:
+                        try:
+                            os.unlink(p)
+                        except OSError:
+                            pass
+            if has_media and text_content:
+                # 图片 + 文字 → 全部新图 + 文字一次 vision 调用，任务投递（全图
+                # 截图），非任务组装；引用图片的捕获件一并随调（quote_atts 由
+                # 本层 finally 统一清理，此处只消费不删）
+                logger.info(f"🖼💬 判断为图片+文字消息：{chat_name}")
+                return self._handle_image_with_text(
+                    chat_name, sender, text_content, multi_sender=multi_sender,
+                    min_top=win.get("bot_bottom"), extra_imgs=quote_atts or None)
+            if has_media and not text_content:
+                # 无文字 + 有媒体（图片/视频/表情统一当图片）→ 逐张 Ctrl+C/裁剪
+                logger.info(f"🖼 判断为图片消息：{chat_name}")
+                if self._process_pure_image(chat_name,
+                                            min_top=win.get("bot_bottom")):
+                    return True
+                # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
+                self._send_text("图片识别失败了，可能是什么地方出了问题呀～", chat_name)
                 return True
-            # 失败必须回一句：发送点输入框顺带清红圈，防滞留循环
-            self._send_text("图片识别失败了，可能是什么地方出了问题呀～", chat_name)
-            return True
-        if text_content:
-            # 纯文字 → 任务判断 + 聊天
-            logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")
-            return self._handle_text(
-                chat_name, sender, text_content, None, multi_sender=multi_sender)
-        if win.get("has_other") and not has_media:
-            # 纯空块轮：对方只发了微信自带小表情（❤ 实测 33x28px——过不了
-            # 媒体检测的 40px 尺寸闸，OCR 也无文字）。旧逻辑整条丢弃且不发
-            # 任何东西清红圈 → 红圈滞留、8s 退避循环重处理（真机事故）。
-            # 按块裁剪当前帧走表情识别，正常角色化回复；识别失败也要回一句
-            # 清圈（与纯图路径的失败语义一致）。
-            blocks = [b for b in (win.get("other_blocks") or [])]
-            logger.info(f"💜 判断为小表情消息：{chat_name}（{len(blocks)} 个空块）")
-            if self._process_emoji_blocks(chat_name, blocks):
+            if text_content:
+                # 纯文字（含引用文字）→ 任务判断 + 聊天；引用图片捕获件随调
+                logger.info(f"💬 判断为文字消息：{chat_name} {text_content[:40]!r}")
+                return self._handle_text(
+                    chat_name, sender, text_content, None,
+                    multi_sender=multi_sender, img_paths=quote_atts or None)
+            if win.get("has_other") and not has_media:
+                # 纯空块轮：对方只发了微信自带小表情（❤ 实测 33x28px——过不了
+                # 媒体检测的 40px 尺寸闸，OCR 也无文字）。旧逻辑整条丢弃且不发
+                # 任何东西清红圈 → 红圈滞留、8s 退避循环重处理（真机事故）。
+                # 按块裁剪当前帧走表情识别，正常角色化回复；识别失败也要回一句
+                # 清圈（与纯图路径的失败语义一致）。
+                blocks = [b for b in (win.get("other_blocks") or [])]
+                logger.info(f"💜 判断为小表情消息：{chat_name}（{len(blocks)} 个空块）")
+                if self._process_emoji_blocks(chat_name, blocks):
+                    return True
+                self._send_text("这条小鱼没看清楚呀，再发一次好不好", chat_name)
                 return True
-            self._send_text("这条小鱼没看清楚呀，再发一次好不好", chat_name)
-            return True
-        return False
+            return False
+        finally:
+            # 引用图片捕获件：被 vision/dispatch 同步消费后原件即无用，统一清理
+            for p in quote_atts:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None, multi_sender=False):
         """文件消息处理：按显示名定位（重名取 (N) 最大）→ 处理或回复收到并询问。
@@ -1469,17 +1801,23 @@ class AgentBot(WeChatBot):
         return True
 
     def _handle_image_with_text(self, chat_name, sender, text_content,
-                                multi_sender=False, min_top=None):
+                                multi_sender=False, min_top=None,
+                                extra_imgs=None):
         """图片 + 文字：vision-exp 单调用（全部新图 + 文字一次判断 + 回复）。
 
         min_top：消息区 1x 下沿阈值（analyze_window 的 bot_bottom），只捕获
-        对方本轮新图。任务 → 全部图 + 文字投递（tool_call 不发送回复文本）；
-        非任务 → 直接回复（不再两段式：GLM-4V 描述转述 + 主模型二次回复）。
-        vision 调用失败（None）→ 降级回退纯文字处理（保持现状）。
+        对方本轮新图。extra_imgs：引用联动预捕获的图片临时件（引用缩略图
+        点击复制/裁剪所得），与本轮新图一并进同一次 vision 调用，finally
+        统一清理（外层对同一批的二次清理是 OSError 空操作）。任务 → 全部
+        图 + 文字投递（tool_call 不发送回复文本）；非任务 → 直接回复（不再
+        两段式：GLM-4V 描述转述 + 主模型二次回复）。vision 调用失败（None）
+        → 降级回退纯文字处理（保持现状）。
         """
         # 恒走 vision 单调用（旧闸下任务桥关闭时图+文直接掉进纯文字处理，
         # 图片内容完全丢失）；工具由 _vision_tools 按开关逐项注入
         img_paths = self._capture_media_images(chat_name, min_top=min_top)
+        if extra_imgs:
+            img_paths = list(extra_imgs) + list(img_paths)
         try:
             resp = self._vision_route(
                 chat_name, sender, text_content, img_paths=img_paths,
