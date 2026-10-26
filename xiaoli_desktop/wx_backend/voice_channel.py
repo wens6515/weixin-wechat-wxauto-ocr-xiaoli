@@ -10,6 +10,7 @@ import ctypes
 import logging
 import time
 
+from .visual_scale import area as _area
 from .visual_win32 import capture_window
 
 u32 = ctypes.windll.user32
@@ -84,7 +85,7 @@ def _capsule_green_count(arr):
     """「松开发送」胶囊绿像素计数（纯函数，单测直测）。
 
     真机标定：胶囊在窗口底部 y∈[0.86h,0.99h]、x∈[0.5w,0.95w]，绿判据
-    G>120 且 G-R>40 且 G-B>20；计数 >150 即录音已触发（实测 915）。"""
+    G>120 且 G-R>40 且 G-B>20；175% 下计数 >150 即录音已触发（实测 915）。"""
     region = arr[int(arr.shape[0] * 0.86):int(arr.shape[0] * 0.99),
                  int(arr.shape[1] * 0.5):int(arr.shape[1] * 0.95)]
     r, g, b = region[:, :, 0], region[:, :, 1], region[:, :, 2]
@@ -93,13 +94,15 @@ def _capsule_green_count(arr):
 
 
 def _send_pill_visible(hwnd):
-    """按住右 Alt 后检测输入区绿色「松开发送」胶囊是否出现（录音已触发）。"""
+    """按住右 Alt 后检测输入区绿色「松开发送」胶囊是否出现（录音已触发）。
+
+    阈值 150 是 175% 标定的像素数（面积量）——按档位 k² 换算。"""
     import numpy as np
     shot = capture_window(hwnd)
     if shot is None:
         return False
     arr = np.asarray(shot.convert("RGB"), dtype=np.int16)
-    return _capsule_green_count(arr) > 150
+    return _capsule_green_count(arr) > _area(150)
 
 
 def _pick_cable_endpoints(devices, wasapi_idx):

@@ -50,18 +50,22 @@ from .visual_win32 import (
 )
 from .visual_vision import (
     _anchor_avatar, _bucket_avatar, _connected_boxes, _contains,
-    _near_color, detect_quote_line, drop_panel_contents, detect_avatar_tops,
-    detect_bubble_colors, estimate_theme, find_bubble_boxes, find_media_boxes,
-    find_panel_icon, filter_media_boxes, find_quote_content_box,
-    region_changed,
+    _near_color, detect_boundary_x, detect_quote_line, drop_panel_contents,
+    detect_avatar_tops, detect_bubble_colors, estimate_theme,
+    find_bubble_boxes, find_media_boxes, find_panel_icon,
+    filter_media_boxes, find_quote_content_box, region_changed,
 )
 from .visual_badge import (
     _BADGE_ANCHOR_MAX_DIST, _BADGE_CLICK_OFFSET_X, _BADGE_ROW_TOL,
     _color_close, _detect_red_clusters, _pick_block_near_badge,
 )
 from .visual_regions import (
-    _MESSAGE_REGION_RATIO, _SESSION_REGION_RATIO,
-    _TITLE_REGION_RATIO, WINDOW_SIZE, parse_title, regions_for_window,
+    _MESSAGE_REGION_RATIO, _SESSION_REGION_RATIO, _TITLE_REGION_RATIO,
+    WINDOW_SIZE, parse_title, regions_for_window, target_window_size,
+)
+from .visual_scale import (
+    active_scale, area as _area, k as _k, px as _px, pxr as _pxr,
+    set_active_scale,
 )
 from .voice_channel import (
     _VoiceChannel, _capsule_green_count, _get_voice_channel,
@@ -345,29 +349,69 @@ def _same_chat_name(a: str, b: str) -> bool:
     return ka == kb or ka.startswith(kb) or kb.startswith(ka)
 
 
-# 引用标注里的文件扩展名（仅判「引用的是文件还是图片」用；完整文件名
-# 提取在上层 xiaoli_app.file_text——底层不反向依赖上层，这里内联最小集）
-_QUOTE_FILE_EXT_RE = re.compile(
-    r"\.(?:docx?|xlsx?|pptx?|pdf|txt|md|html?|json|csv|zip|rar|7z|png|"
-    r"jpe?g|gif|mp4|mp3)(?![A-Za-z0-9])", re.I)
+# 引用判型的文件名信号（用户定案：按「发送人：简笔画图标+文件名文字+类型
+# 图标」的格式判文件引用，不看扩展名是否精确）。宽松文件名 token 作并联
+# 信号——覆盖冒号被 OCR 吃掉、后缀读花（真机 xlsx→xIsx）的残缺形态；完整
+# 文件名提取在上层 xiaoli_app.file_text——底层不反向依赖上层，这里内联。
+_QUOTE_FILE_HINT_RE = re.compile(
+    r"[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-.+()（）]+?"
+    r"\.[A-Za-z][A-Za-z0-9]{1,4}(?![A-Za-z0-9])")
 
 
-def _quote_marker(below_lines, has_content=False):
+def _line_overlaps_box(l, content_box, pad=4):
+    """OCR 行的 x 跨度是否与内容物框相交（容差 pad）。行缺坐标（测试桩）
+    返回 False——无法判定时不剔除。"""
+    x, w = l.get("x"), l.get("w")
+    if x is None or w is None:
+        return False
+    bl, br = content_box[2], content_box[3]
+    return x < br + pad and x + w > bl - pad
+
+
+def _quote_file_text_signal(below_lines, content_box):
+    """「冒号后有正文文字」的几何判定：存在一行，其 x 跨度与内容物框**不相交**
+    （文件名文字在类型图标左侧；缩略图内嵌文字的行落在缩略图框里 → 不算），
+    且行内冒号后还有实质内容。行缺坐标（测试桩）时不给信号。"""
+    if not content_box or len(content_box) != 4:
+        return False
+    for l in below_lines:
+        if _line_overlaps_box(l, content_box):
+            continue  # 与内容物框相交 → 缩略图内嵌文字，不算文件名
+        text = str(l.get("text") or "")
+        m = re.search(r"[:：]", text)
+        if m and text[m.end():].strip():
+            return True
+    return False
+
+
+def _quote_marker(below_lines, has_content=False, content_box=None):
     """引用区 OCR 行 → 注入前缀（纯函数，单测直测）。
 
     has_content：该引用块检出了内容物（缩略图/文件图标，find_quote_content_box
-    或通用媒体框）。有内容物时按内容判型——引用行含文件扩展名 → 文件引用
-    （整行进标注）；否则 → **图片引用**：标注只留名字（「[引用 X发来的图片]」），
-    缩略图内嵌的 OCR 文字（真机事故：图上印的「好耶」被读走 → 判成文字
-    引用 → 模型只看到两个字）不进标注——原图会被捕获随调发给模型，文字
-    留着反而误导判型。无内容物保持旧逻辑（名字行以冒号结尾 = 图片引用）。
+    或通用媒体框）。判型按用户定案的格式规则：
+    - **文件引用** = 「发送人：简笔画图标+文件名文字+类型图标」——文字信号取
+      `_quote_file_text_signal`（冒号后的正文行在内容物框左侧不相交）或宽松
+      文件名 token（冒号被 OCR 吃掉/后缀读花的残缺形态，xlsx→xIsx 真机事故）
+      任一命中；标注整行进模型，交按名定位的文件流程（定位不到就带着文件
+      名文字降级为文字引用，绝不判成图片去点类型图标）；
+    - **图片引用**：标注只留名字（「[引用 X发来的图片]」），缩略图内嵌的 OCR
+      文字（真机事故：图上印的「好耶」被读走）不进标注——原图会被捕获随调
+      发给模型，文字留着反而误导判型。
+    无内容物保持旧逻辑（名字行以冒号结尾 = 图片引用）。
     """
+    # 内容物框内的 OCR 行（缩略图内嵌文字/类型图标的字形，真机「好耶」、
+    # Excel 图标「X」）不进标注——图被捕获随调/文件按名走流程，这些字留着
+    # 只会误导判型与模型。
+    kept = [l for l in below_lines
+            if not (has_content and content_box
+                    and _line_overlaps_box(l, content_box))]
     q = re.sub(r"\s+", " ",
-               " ".join(l["text"] for l in below_lines)).strip()
+               " ".join(l["text"] for l in kept)).strip()
     if not q:
         return ""
     if has_content:
-        if _QUOTE_FILE_EXT_RE.search(q.replace("·", ".")):
+        if _QUOTE_FILE_HINT_RE.search(q.replace("·", ".")) \
+                or _quote_file_text_signal(kept, content_box):
             return f"[引用 {q}] "
         name = below_lines[0]["text"].strip().rstrip(":：").strip()
         return f"[引用 {name}发来的图片] "
@@ -411,6 +455,11 @@ class VisualBackend:
         self._selected_row_color: tuple[int, int, int] = _SELECTED_ROW_COLOR["dark"]
         # 强制窗口几何的复查节流时间戳（见 enforce_window_geometry）
         self._size_check_at: float = 0.0
+        # 实测会话|聊天分界列（_measure_boundary）：窗口逻辑宽 < 标定宽时
+        # 微信压缩会话列，静态锚 543.4×k 失准——空谷扫描实测值覆盖之。
+        # _boundary_key = 上次测量时的截图尺寸（尺寸不变不重扫）。
+        self._boundary_x: int | None = None
+        self._boundary_key: tuple | None = None
         # 三区域恒为模块内置常量（用户自定义标定已撤回，见文件头注释）
         self._apply_regions()
 
@@ -422,15 +471,35 @@ class VisualBackend:
         输入面板上沿一起上移，不会把输入框算进聊天记录。无尺寸（测试桩 /
         connect 之前）用标定窗口 WINDOW_SIZE，与改前完全一致。
         """
-        w, h = size if size else WINDOW_SIZE
+        w, h = size if size else target_window_size(None)
         self._session_region, self._message_region, self._title_region = \
-            regions_for_window(w, h)
+            regions_for_window(w, h, active_scale(),
+                               boundary_px=self._boundary_x)
+
+    def _measure_boundary(self, shot: Image.Image) -> None:
+        """实测会话|聊天分界列（截图尺寸变化才重扫，纯像素零 OCR）。
+
+        空谷扫描（detect_boundary_x）命中 → 覆盖静态锚并立即重算三区域
+        （调用方 _refresh 返回的这张截图马上按新区域裁剪）；扫不出（纯色/
+        异常帧）→ 回退静态锚。"""
+        key = shot.size
+        if key == self._boundary_key:
+            return
+        bx = detect_boundary_x(shot)
+        self._boundary_key = key
+        if bx == self._boundary_x:
+            return
+        self._boundary_x = bx
+        self._apply_regions(shot.size)
+        if bx is not None:
+            logger.info(f"[分界] 实测会话|聊天分界列 x={bx}"
+                        f"（窗口 {key[0]}x{key[1]}）")
 
     # ---- 强制窗口几何（尺寸强制 + 出屏救援；位置不钉死）----
 
     def enforce_window_geometry(self, force: bool = False,
                                 now: float | None = None) -> bool:
-        """把微信窗口钉回标定尺寸 `WINDOW_SIZE`（放不下则按工作区收口）。
+        """把微信窗口钉回标定的**逻辑尺寸**（物理 = 标定 × k，放不下则按工作区收口）。
 
         为什么强制尺寸：三区域比例与全部像素判据（头像窄带 = 区域宽 2%~14%、
         气泡/媒体闸、媒体框尺寸闸）都按那台 1300x1610 的窗口标定——窗口尺寸
@@ -471,12 +540,17 @@ class VisualBackend:
         rect = window_rect(self._hwnd)
         if not rect:
             return False
-        want_w, want_h = WINDOW_SIZE
+        # 档位实时复查：窗口被拖到另一块缩放不同的屏时，判据口径随之换算
+        # （窗口目标只看工作区，与档位无关——下轮复查生效）
+        scale = monitor_dpi_scale(self._hwnd)
+        if scale and scale != active_scale():
+            set_active_scale(scale)
+            logger.info(f"📏 显示缩放变化 → {scale}%，判据口径已跟随")
         area = monitor_work_area(self._hwnd)
+        # 目标尺寸 = 工作区右半（用户定案：物理尺寸恒为半屏，跨档位不变）；
+        # 工作区读不到时回退标定尺寸再按现有 rect 收口
+        want_w, want_h = target_window_size(area)
         if area:
-            # 工作区（系统已扣任务栏）放不下标定尺寸 → 按工作区收口，别每轮
-            # 请求 1610 让系统截短（截短后每轮复查都判"尺寸不对"，每秒重设
-            # 一次 + 作废截图：任务栏一显示，读取全废）
             want_w = min(want_w, max(1, area[2] - area[0]))
             want_h = min(want_h, max(1, area[3] - area[1]))
         touched = []
@@ -552,23 +626,22 @@ class VisualBackend:
         hwnd = find_wechat_window()
         if hwnd is None:
             raise BackendUnavailableError("未找到微信主窗口（请确认微信已登录并打开）")
-        # 显示缩放预检（fail-fast）：全部像素判据（头像窄带/头像高 63px/
-        # 气泡与媒体闸/文件卡片图标）按 175% 缩放下的 1300×1610 窗口标定，
-        # 缩放不符时连上了也是「读错消息/一条都读不到」的隐性故障——这里
-        # 直接拦下，把「静默瞎跑」变成一条带修复路径的显式错误。检测不出
-        # 缩放（0）不拦：检测手段失效不该把人挡在门外。
+        # 显示缩放档位：判据常量全部按 175% 真机标定，微信布局按逻辑像素
+        # 固定（150% 真机实测验证），任意档位均可工作——窗口逻辑尺寸钉在
+        # 标定值（物理 = 标定 × k），判据经 visual_scale 口径表换算。检测
+        # 不出缩放（0）fail-open：按标定档口径工作并告警。
         scale = monitor_dpi_scale(hwnd)
-        if scale and scale != 175:
-            raise BackendConfigError(
-                f"微信所在显示器的显示缩放为 {scale}%，小漓的视觉判据按 "
-                "175% 标定，缩放不符会读错消息甚至一条都读不到。"
-                "请到 Windows 设置 → 系统 → 屏幕 → 缩放与布局，把缩放改为 "
-                "175%，然后重启小漓（微信窗口会被自动调回标定尺寸）")
+        if scale:
+            set_active_scale(scale)
+            logger.info(f"📏 显示缩放 {scale}%——判据按 k={_k():.3f} 换算"
+                        "（窗口恒为工作区右半屏）")
+        else:
+            logger.warning("📏 未能检测显示缩放，按标定档 175% 口径工作")
         self._hwnd = hwnd
-        # 窗口几何：尺寸不再交给用户设置——统一强制为标定尺寸（WINDOW_SIZE，
-        # 三区域与像素判据都按它标定）；位置由用户自由摆放，只在（部分）移出
-        # 屏幕导致点击失效时拉回可见范围。这里先对齐一次，之后每轮消息监听
-        # 与每次分析入口复查（enforce_window_geometry）。
+        # 窗口几何：尺寸不再交给用户设置——逻辑尺寸钉在标定值（物理尺寸
+        # 随档位 = 标定 × k，三区域与判据口径同源）；位置由用户自由摆放，
+        # 只在（部分）移出屏幕导致点击失效时拉回可见范围。这里先对齐一次，
+        # 之后每轮消息监听与每次分析入口复查（enforce_window_geometry）。
         self._ensure_not_iconic()
         self.enforce_window_geometry(force=True)
         shot = capture_window(hwnd)
@@ -658,6 +731,9 @@ class VisualBackend:
                 logger.warning("[哨兵] 截图尺寸骤缩（疑似最小化占位帧），丢弃本帧")
                 self._ensure_not_iconic()
                 return None
+        # 分界列实测：窗口尺寸变化时重扫（空谷扫描纯像素零 OCR），命中即
+        # 覆盖静态锚并重算三区域——本帧随后的区域裁剪立即用新值。
+        self._measure_boundary(shot)
         if not force and self._last_shot is not None:
             w, h = shot.size
             region = (
@@ -753,7 +829,7 @@ class VisualBackend:
         cand.sort(key=lambda it: it["y"])
         clusters: list[list[dict]] = []
         for it in cand:
-            if clusters and it["y"] - clusters[-1][-1]["y"] < 45:
+            if clusters and it["y"] - clusters[-1][-1]["y"] < _pxr(45):
                 clusters[-1].append(it)
             else:
                 clusters.append([it])
@@ -815,7 +891,8 @@ class VisualBackend:
         py = bcy - rect.top
         l = int(w * self._session_region[0])
         r = int(w * self._session_region[2])
-        t0, t1 = max(0, py - 58), min(h, py + 58)
+        half = _pxr(58)
+        t0, t1 = max(0, py - half), min(h, py + half)
         if r <= l or t1 <= t0:
             return None
         strip = shot.crop((l, t0, r, t1))
@@ -864,7 +941,7 @@ class VisualBackend:
         for (bl, bt, br, bb) in sorted(badges, key=lambda b: (b[1], b[0])):
             bcx = win_l + (bl + br) // 2
             bcy = win_t + (bt + bb) // 2
-            if any(abs(bcy - y) < _BADGE_ROW_TOL for y in seen_rows):
+            if any(abs(bcy - y) < _pxr(_BADGE_ROW_TOL) for y in seen_rows):
                 continue  # 同一行的重复红圈簇：按行归并（不需要名字就能去重）
             seen_rows.append(bcy)
             if not self._is_row_selected(bcy):
@@ -883,7 +960,7 @@ class VisualBackend:
         try:
             import pyautogui
             self._foreground()  # 点击依赖前台，先置前微信窗口
-            pyautogui.click(bcx + _BADGE_CLICK_OFFSET_X, bcy)
+            pyautogui.click(bcx + _pxr(_BADGE_CLICK_OFFSET_X), bcy)
             time.sleep(0.6)     # 等列表选中态与消息区刷新
         except Exception as e:
             logger.warning(f"[未读] 红圈 ({bcx},{bcy}) 点击失败: {e}")
@@ -1080,7 +1157,7 @@ class VisualBackend:
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         py = red_badge_y_or_item_y - rect.top
-        px = int(w * self._session_region[0]) + 5  # 列表区左缘内侧空白带（避开头像/文字）
+        px = int(w * self._session_region[0]) + _pxr(5)  # 列表区左缘内侧空白带（避开头像/文字）
         if not (0 <= py < h and 0 <= px < w):
             return False
         try:
@@ -1104,7 +1181,7 @@ class VisualBackend:
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
         py = screen_y - rect.top
-        px = int(w * self._session_region[0]) + 5
+        px = int(w * self._session_region[0]) + _pxr(5)
         if not (0 <= py < h and 0 <= px < w):
             return
         try:
@@ -1263,12 +1340,15 @@ class VisualBackend:
         if not blocks:
             return []
         region_w, region_h = region_1x.width, region_1x.height
-        avatar_h = max(40, region_h // 18)
+        # 头像带高 = 标定 63px 按档位换算（旧 region_h//18 在工作区收口的
+        # 矮窗口下会小于真实头像，头像带竖直范围随之失准）
+        avatar_h = max(_pxr(24), _pxr(63))
         # 头像窄带（与 detect_avatar_tops 的 x 窗口同源）：头像图片上的文字
         # 不是消息内容，必须按几何剔除——真机幻影行「用户已无生命体征」悬在
         # 头像上、且正好落在该条消息的文字范围内，不剔除会混进文件名 OCR。
-        left_band = (int(region_w * 0.02), int(region_w * 0.14))
-        right_band = (int(region_w * 0.84), int(region_w * 0.98))
+        # 头像带 = 距区域左右缘的固定逻辑距离 ×k（与 detect_avatar_tops 同源）
+        left_band = (_pxr(15), _pxr(105))
+        right_band = (region_w - _pxr(120), region_w - _pxr(15))
 
         def _in_avatar(cy: int, cx: int) -> bool:
             for (x0, x1), tops in ((left_band, other_tops),
@@ -1357,7 +1437,9 @@ class VisualBackend:
                 quote_mark = _quote_marker(
                     below_lines,
                     has_content=bool(blk.get("quote_media")
-                                     or blk.get("media")))
+                                     or blk.get("media")),
+                    content_box=(blk.get("quote_media")
+                                 or blk.get("media")))
             content = (quote_mark + text).strip()
             if not content or _is_noise(content):
                 continue
@@ -1540,9 +1622,9 @@ class VisualBackend:
         else:
             mr = self._message_region
             cx = rect_l + int(w * (mr[0] + mr[2]) / 2)
-        cy = rect_t + h - _INPUT_BOX_CENTER_FROM_BOTTOM
-        bw = int(max(120, w * (0.30 if cal else 0.45)))
-        bh = 40
+        cy = rect_t + h - _pxr(_INPUT_BOX_CENTER_FROM_BOTTOM)
+        bw = int(max(_pxr(120), w * (0.30 if cal else 0.45)))
+        bh = _pxr(40)
         return (cx - bw // 2, cy - bh // 2, bw, bh)
 
     def _load_input_box_calibration(self):
@@ -1609,10 +1691,11 @@ class VisualBackend:
         for p in panels:
             q = detect_quote_line(arr, colors, p)
             if q:
-                quote_rows.append((q[0] - 4, q[1] + 4))
+                pad = _pxr(4)
+                quote_rows.append((q[0] - pad, q[1] + pad))
         boxes = [bx for bx in drop_panel_contents(find_media_boxes(region, colors),
                                                   panels)
-                 if not any(bx[0] >= rt - 2 and bx[1] <= rb + 2
+                 if not any(bx[0] >= rt - _pxr(2) and bx[1] <= rb + _pxr(2)
                             for rt, rb in quote_rows)]
         boxes = filter_media_boxes(
             boxes, min_top=min_top, exclude_rows=exclude_rows)
@@ -1753,16 +1836,16 @@ class VisualBackend:
             }
         return empty
 
-    def block_screen_rect(self, top, bottom, x_frac=(0.15, 0.60)):
+    def block_screen_rect(self, top, bottom, x_span=None):
         """消息区 1x 竖向区间 [top, bottom] → 屏幕矩形（对方侧横向范围）。
 
         供空 emoji 块裁剪用：微信自带小表情（❤ 实测 33x28px）过不了媒体
         检测的 40px 尺寸闸，没有媒体框可点——只能按消息块区间直接裁主窗口
-        当前帧。x_frac 限定对方侧横向范围；**左沿 0.15 起裁**——0.02 会把
-        头像窄带（0.02~0.14）整个裁进图里，视觉模型对着用户的头像图片
-        （真机事故：猫咪头像被描述成「已无生命体征」）而不是小表情本身；
-        气泡左缘实测 ≈0.147，0.15 恰在其右。右侧不碰滚动条。坐标失败
-        返回 None。"""
+        当前帧。横向范围 = 距消息区左缘的固定逻辑距离 ×k（175% 标定
+        112~448px）：**左沿避开头像带**（0.02 起裁会把头像窄带整个裁进图
+        里，视觉模型对着用户的头像图片——真机事故：猫咪头像被描述成「已无
+        生命体征」——而不是小表情本身），恰在气泡左缘之右。右侧不碰滚动条。
+        坐标失败返回 None。"""
         if self._hwnd is None:
             return None
         win = window_rect(self._hwnd)
@@ -1771,10 +1854,10 @@ class VisualBackend:
         rl, rt, w, h = win
         mr = self._message_region
         reg_l = rl + int(w * mr[0])
-        reg_w = int(w * (mr[2] - mr[0]))
         reg_t = rt + int(h * mr[1])
-        x0 = reg_l + int(reg_w * x_frac[0])
-        x1 = reg_l + int(reg_w * x_frac[1])
+        span = (_pxr(112), _pxr(448)) if x_span is None else x_span
+        x0 = reg_l + int(span[0])
+        x1 = reg_l + int(span[1])
         y0, y1 = reg_t + int(top), reg_t + int(bottom)
         if x1 - x0 < 10 or y1 - y0 < 10:
             return None

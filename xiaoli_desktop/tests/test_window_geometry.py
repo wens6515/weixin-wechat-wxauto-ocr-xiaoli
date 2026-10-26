@@ -1,23 +1,24 @@
 # -*- coding: utf-8 -*-
-"""强制窗口几何：尺寸钉死在标定值（放不下则按工作区收口）；位置只做「出屏救援」。
+"""强制窗口几何：尺寸钉在**工作区右半屏**（物理，跨缩放档位不变）；位置只做「出屏救援」。
 
 钉住的定案：
 
-- 尺寸强制：三区域比例与全部像素判据（头像窄带 = 区域宽 2%~14%、气泡/媒体闸
-  同样是区域比例）都按 `WINDOW_SIZE` 那台窗口标定（**175% 显示缩放**，见
-  README 系统要求）——窗口宽度一变这些常量整体错位（真机事故：窗口拉大到
-  2178 宽后聊天区左边界从 0.415 挪到 0.246，消息区左沿切进聊天区 → 整列头像
-  检不出、消息读不到）。`connect()` 里 force 调一次，消息监听每轮 + 每次分析
+- 尺寸强制：判据锚点（三区域四沿、头像带、面板高）都是「距窗口边缘的固定
+  逻辑距离」，175% 档标定、跨档位 ×k 换算（visual_scale 口径表）——窗口
+  物理尺寸恒为半屏（用户定案），元素位置与窗口边缘的物理距离在标定档
+  就是锚点值本身。`connect()` 里 force 调一次，消息监听每轮 + 每次分析
   入口复查；
-- 尺寸**按工作区收口**：任务栏没隐藏的机器工作区只有 ~1516 高，1610 放不下，
-  不收口就会每轮请求 1610 → 被系统截短 → 每轮复查都判"尺寸不对" → 每秒重设
-  一次并作废截图（真机事故：任务栏一显示读取全废）。收口后窗口矮一截，
-  由「竖向锚点分顶/底两类」接住：消息区上沿贴窗口顶、下沿贴输入面板上沿；
+- 测试工作区取 (0,0,2600,1610)：右半 = 1300×1610 恰为标定值，既有期望
+  逐值保留；
 - 位置**不钉死**：窗口在屏幕内的位置完全由用户决定，程序只在窗口（部分）
   移出所在显示器工作区时把它拉回完整可见（出屏后 pyautogui 点击落到屏幕外，
   切会话/点图/发送全失灵）。历史缺陷：曾按「启动瞬间锚定 + 之后钉死」实现，
   启动时窗口恰好在旁边就把那个位置当成用户想要的位置，用户往右拖被拽回
   13 次（真机日志）——本文件用「可见范围内移动 → 不动手」的用例钉住这条。
+- **测试进程绝不碰真实窗口**：本文件所有 enforce 用例都打 DPI 桩（返回 0 =
+  检测不出 → 不换档），假句柄在 Win32 层天然无效——真机事故：某次全量测试
+  期间用户微信窗口被改尺寸（来源未定位），此后几何类测试一律显式断开
+  真实 DPI 读取。
 """
 import os
 import sys
@@ -33,9 +34,8 @@ from wx_backend.visual_backend import VisualBackend
 from wx_backend.visual_regions import WINDOW_SIZE
 
 W, H = WINDOW_SIZE
-# 测试用工作区（1920x2200，够放 1300x1610 的窗口且留出 y 余量——真机小屏
-# 会被 clamp 贴顶，单独用例覆盖）
-AREA = (0, 0, 1920, 2200)
+# 测试用工作区：宽 2600 → 右半恰为标定宽 1300；高 1610 = 标定高
+AREA = (0, 0, 2600, 1610)
 
 
 def _backend(hwnd=0x9):
@@ -46,11 +46,14 @@ def _backend(hwnd=0x9):
 
 class TestEnforceWindowGeometry(unittest.TestCase):
     def setUp(self):
-        # 默认工作区给足高度（够放 1300x1610）→ 这些用例按"标定尺寸"语义；
-        # 任务栏可见/小屏的"按工作区收口"语义由下方专用用例覆盖
-        p = mock.patch.object(vb, "monitor_work_area", return_value=AREA)
-        p.start()
-        self.addCleanup(p.stop)
+        # 默认工作区给足尺寸（右半 = 1300x1610 标定值）→ 这些用例按"标定
+        # 尺寸"语义；任务栏可见/小屏语义由下方专用用例覆盖。DPI 读数打桩
+        # 为 0（检测不出 → 不换档）：测试进程不读真实缩放、不碰真实窗口。
+        for name, val in (("monitor_work_area", AREA),
+                          ("monitor_dpi_scale", 0)):
+            p = mock.patch.object(vb, name, return_value=val)
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_no_window_is_noop(self):
         b = VisualBackend()
@@ -187,7 +190,7 @@ class TestEnforceWindowGeometry(unittest.TestCase):
                                side_effect=[(1270, 0, W, H),
                                             (1270, 0, W, 1516)]), \
                 mock.patch.object(vb, "monitor_work_area",
-                                  return_value=(0, 0, 2560, 1516)), \
+                                  return_value=(0, 0, 2600, 1516)), \
                 mock.patch.object(vb, "pull_window_into_view",
                                   return_value=(1270, 0)), \
                 mock.patch.object(vb, "position_window",
@@ -202,7 +205,7 @@ class TestEnforceWindowGeometry(unittest.TestCase):
         with mock.patch.object(vb, "window_rect",
                                return_value=(1270, 0, W, 1516)), \
                 mock.patch.object(vb, "monitor_work_area",
-                                  return_value=(0, 0, 2560, 1516)), \
+                                  return_value=(0, 0, 2600, 1516)), \
                 mock.patch.object(vb, "pull_window_into_view",
                                   return_value=(1270, 0)), \
                 mock.patch.object(vb, "position_window") as pos:
@@ -210,12 +213,13 @@ class TestEnforceWindowGeometry(unittest.TestCase):
             self.assertFalse(b.enforce_window_geometry(force=True))
         pos.assert_not_called()
 
-    def test_narrow_work_area_clamps_width(self):
-        """小屏（工作区 1200 宽）→ 宽度同样收口，不请求放不下的 1300。"""
+    def test_narrow_work_area_halves_width(self):
+        """窄屏（工作区 1200 宽）→ 目标 = 工作区右半（600×全高），恒能放下、
+        不存在「请求了放不下被系统截短」的循环。"""
         b = _backend()
         with mock.patch.object(vb, "window_rect",
                                side_effect=[(0, 0, 900, 700),
-                                            (0, 0, 1200, H)]), \
+                                            (0, 0, 600, 2200)]), \
                 mock.patch.object(vb, "monitor_work_area",
                                   return_value=(0, 0, 1200, 2200)), \
                 mock.patch.object(vb, "pull_window_into_view",
@@ -224,7 +228,7 @@ class TestEnforceWindowGeometry(unittest.TestCase):
                                   return_value=True) as pos, \
                 mock.patch.object(vb.u32, "IsZoomed", return_value=False):
             self.assertTrue(b.enforce_window_geometry(force=True))
-        pos.assert_called_once_with(0x9, 0, 0, 1200, H)
+        pos.assert_called_once_with(0x9, 0, 0, 600, 2200)
 
     def test_regions_follow_actual_window_height(self):
         """收口后区域按实际尺寸重算：消息区底沿跟着输入面板上沿上移。"""
@@ -232,7 +236,7 @@ class TestEnforceWindowGeometry(unittest.TestCase):
         with mock.patch.object(vb, "window_rect",
                                return_value=(0, 0, W, 1516)), \
                 mock.patch.object(vb, "monitor_work_area",
-                                  return_value=(0, 0, 2560, 1516)), \
+                                  return_value=(0, 0, 2600, 1516)), \
                 mock.patch.object(vb, "pull_window_into_view",
                                   return_value=(0, 0)):
             b.enforce_window_geometry(force=True)
@@ -480,12 +484,12 @@ class TestBlockScreenRect(unittest.TestCase):
             r = b.block_screen_rect(100, 200)
         mr = b._message_region
         reg_l = 100 + int(1300 * mr[0])
-        reg_w = int(1300 * (mr[2] - mr[0]))
         reg_t = 200 + int(1610 * mr[1])
-        self.assertEqual(r[0], reg_l + int(reg_w * 0.15))
-        # 左沿 0.15 起裁：头像窄带（0.02~0.14）不再进小表情裁剪图
-        self.assertGreater(r[0], reg_l + int(reg_w * 0.14))
-        self.assertEqual(r[2], reg_l + int(reg_w * 0.60))
+        # 横向 = 距消息区左缘的固定逻辑距离（175% 标定 112~448）
+        self.assertEqual(r[0], reg_l + 112)
+        # 左沿在头像带（标定 15~105）之右：头像不进小表情裁剪图
+        self.assertGreater(r[0], reg_l + 105)
+        self.assertEqual(r[2], reg_l + 448)
         self.assertEqual(r[1], reg_t + 100)
         self.assertEqual(r[3], reg_t + 200)
 
