@@ -501,7 +501,7 @@ async function showEngineError() {
   $("#engineErrReason").textContent =
     (r.ok && r.error) ? r.error : "未知原因（详见日志页）";
   const live = [];
-  if (r.scale) live.push(`显示缩放 ${r.scale}%（要求 175%）`);
+  if (r.scale) live.push(`显示缩放 ${r.scale}%（已按档位自适应）`);
   if (r.wechat_found != null)
     live.push(r.wechat_found ? "微信窗口已检测到" : "微信窗口未找到");
   $("#engineErrLive").textContent = live.length ? "当前检测：" + live.join(" · ") : "";
@@ -545,11 +545,6 @@ async function checkEnv() {
     envCard("#envPrompt", "#envPromptDetail", rp.first_prompt);
   }
   S.envWechat = rp.wechat;
-  if (rp.scale && rp.scale.ok === false) {
-    /* 缩放不符是「读不到消息」的硬前置：卡片红点太静默，启动就明说 */
-    toast("显示缩放不是 175%——小漓的视觉判据按 175% 标定，请到 设置 → 系统 → " +
-      "屏幕 → 缩放与布局 改为 175% 后重启小漓", "warn");
-  }
 }
 /* 慢操作按钮的 busy 态：转圈 + 禁点，让「点了有没有反应」看得见 */
 async function withBusy(btn, fn) {

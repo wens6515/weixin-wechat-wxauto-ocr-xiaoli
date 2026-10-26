@@ -258,8 +258,11 @@ class TestQuoteContentBox(unittest.TestCase):
 
 
 class TestQuoteMarkerContent(unittest.TestCase):
-    """引用标注判型（has_content=True）：含扩展名 → 文件整行标注；
-    内嵌文字无扩展名 → 只留名字的图片标注（缩略图内嵌文字不进标注）。"""
+    """引用标注判型（has_content=True，用户定案的格式规则）：按
+    「发送人：简笔画图标+文件名文字+类型图标」判文件引用——文字信号 =
+    冒号后正文行与内容物框不相交，或宽松文件名 token 命中（后缀读花
+    xlsx→xIsx、冒号被 OCR 吃掉的残缺形态都算文件）；缩略图内嵌文字
+    （行落在框里）不算文件名 → 图片标注（好耶真机事故回归）。"""
 
     def test_file_with_content_keeps_full_line(self):
         m = visual_backend._quote_marker(
@@ -271,6 +274,37 @@ class TestQuoteMarkerContent(unittest.TestCase):
         文字引用；新逻辑有内容物且无扩展名 → 图片标注 + 丢内嵌文字。"""
         m = visual_backend._quote_marker(
             [{"text": "王文生:"}, {"text": "好耶"}], has_content=True)
+        self.assertEqual(m, "[引用 王文生发来的图片] ")
+
+    def test_file_quote_garbled_ext_is_file(self):
+        """真机事故回归（150%）：xlsx 被 OCR 读成 xIsx——文件名文字行在
+        类型图标左侧不相交 → 文件引用，绝不判成图片去点类型图标。"""
+        m = visual_backend._quote_marker(
+            [{"text": "王文生：名单（就服）.xIsx", "x": 116, "w": 242}],
+            has_content=True, content_box=(1055, 1108, 371, 412))
+        self.assertEqual(m, "[引用 王文生：名单（就服）.xIsx] ")
+
+    def test_file_quote_geometry_signal_without_token(self):
+        """扩展名整个读不出来，但冒号后正文行在框外 → 几何信号判文件。"""
+        m = visual_backend._quote_marker(
+            [{"text": "王文生：名单（就服）", "x": 116, "w": 242}],
+            has_content=True, content_box=(1055, 1108, 371, 412))
+        self.assertEqual(m, "[引用 王文生：名单（就服）] ")
+
+    def test_file_quote_colon_eaten_hint_fallback(self):
+        """冒号被 OCR 吃掉、「.」读成「·」：宽松 token（· 归一）兜底判文件。"""
+        m = visual_backend._quote_marker(
+            [{"text": "王文生名单（就服）·xIsx"}],
+            has_content=True, content_box=(1055, 1108, 371, 412))
+        self.assertEqual(m, "[引用 王文生名单（就服）·xIsx] ")
+
+    def test_image_embedded_text_inside_box_is_image(self):
+        """内嵌文字行落在内容物框**里面**（与框相交）→ 不是文件名文字
+        → 图片标注（好耶真机事故回归，几何版）。"""
+        m = visual_backend._quote_marker(
+            [{"text": "王文生:", "x": 116, "w": 80},
+             {"text": "好耶", "x": 380, "w": 30}],
+            has_content=True, content_box=(100, 160, 371, 412))
         self.assertEqual(m, "[引用 王文生发来的图片] ")
 
     def test_no_content_keeps_old_logic(self):

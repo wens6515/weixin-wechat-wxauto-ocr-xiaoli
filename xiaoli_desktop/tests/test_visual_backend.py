@@ -277,6 +277,21 @@ class _FakeRect:
         self.bottom = t + h
 
 
+def _connect_stubbed(b):
+    """测试专用连接：窗口句柄与 DPI 全打桩——绝不碰真实微信窗口、不改全局
+    缩放档位。真机事故：裸 connect 会连上用户开着的微信（find_wechat_window
+    未打桩），enforce 按真实 DPI 把用户窗口改了尺寸，还把档位泄漏给同进程
+    的后续测试（TestRegionDefaults 等整批误判）。"""
+    with mock.patch("wx_backend.visual_backend.find_wechat_window",
+                    return_value=0x1234),             mock.patch("wx_backend.visual_backend.monitor_dpi_scale",
+                       return_value=175),             mock.patch("wx_backend.visual_backend.capture_window",
+                       return_value=_solid((100, 100), (255, 255, 255))),             mock.patch("wx_backend.visual_backend."
+                       "VisualBackend.enforce_window_geometry",
+                       return_value=False):
+        b.connect()
+    return b
+
+
 class TestVisualBackend(unittest.TestCase):
     def setUp(self):
         # 清空注册表
@@ -306,16 +321,19 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.monitor_dpi_scale",
                 return_value=150)
-    def test_connect_wrong_scale_fails_fast(self, _scale, _find):
-        """缩放非 175%：fail-fast 抛 BackendConfigError（重试无意义），
-        消息带实际缩放值与修复路径——这是把「读不到消息」的隐性故障
-        变成显式可操作错误的闸门。"""
+    @mock.patch("wx_backend.visual_backend.capture_window",
+                return_value=_solid((100, 100), (255, 255, 255)))
+    def test_connect_adapts_to_scale(self, _cap, _scale, _find):
+        """缩放非 175%：连接照常成功（判据按档位换算，150% 真机验证），
+        生效档位被写入口径表——不再是 fail-fast 闸门。"""
+        from wx_backend import visual_scale
         b = VisualBackend()
-        with self.assertRaises(BackendConfigError) as cm:
-            b.connect()
-        self.assertIn("150%", str(cm.exception))
-        self.assertIn("175%", str(cm.exception))
-        self.assertIn("缩放与布局", str(cm.exception))
+        try:
+            self.assertTrue(b.connect())
+            self.assertEqual(visual_scale.active_scale(), 150)
+        finally:
+            visual_scale.set_active_scale(visual_scale.CALIB_SCALE)
+            b.close()
 
     @mock.patch("wx_backend.visual_backend.find_wechat_window",
                 return_value=0x1234)
@@ -402,7 +420,7 @@ class TestVisualBackend(unittest.TestCase):
         b._message_region = (0.0, 0.0, 1.0, 1.0)
         b._title_region = (0.0, 0.0, 0.0, 0.05)
         # 只有消息带条目（标题带空）→ 触发 force 重切
-        items = [{"text": "在吗", "x": 40, "y": 120, "w": 60, "h": 20}]
+        items = [{"text": "在吗", "x": 120, "y": 120, "w": 60, "h": 20}]
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
              mock.patch("wx_backend.visual_backend.find_wechat_window",
                         return_value=0x1234), \
@@ -437,7 +455,7 @@ class TestVisualBackend(unittest.TestCase):
         b._title_region = (0.0, 0.0, 0.0, 0.05)
         items = [
             {"text": "庆祝群(5)", "x": 40, "y": 4, "w": 90, "h": 8},
-            {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
+            {"text": "你们好呀", "x": 120, "y": 120, "w": 90, "h": 20},
         ]
         with mock.patch.object(b, "_switch_chat", wraps=lambda chat, force=False: True) as m_switch, \
              mock.patch("wx_backend.visual_backend.find_wechat_window",
@@ -581,7 +599,7 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=True)
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
-                return_value=_solid((200, 200), (255, 255, 255)))
+                return_value=_solid((1300, 1610), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                 return_value={"bg": (255, 255, 255), "other": (240, 240, 240),
                               "self": (53, 210, 141)})
@@ -600,9 +618,9 @@ class TestVisualBackend(unittest.TestCase):
                     # 块间悬浮行（UI 时间戳分隔：不在任何消息块内）→ 剔除
                     {"text": "昨天 18:45", "x": 45, "y": 80, "w": 25, "h": 15},
                     # 对方消息（在对方气泡内 → 读）
-                    {"text": "你好", "x": 2, "y": 110, "w": 30, "h": 20},
+                    {"text": "你好", "x": 120, "y": 110, "w": 30, "h": 20},
                     # 噪音 → 过滤
-                    {"text": "；；", "x": 2, "y": 140, "w": 20, "h": 15},
+                    {"text": "；；", "x": 120, "y": 140, "w": 20, "h": 15},
                 ])
     def test_get_messages_timestamp_split_and_sender(self, _ocr, _tops, _fbb, _dc,
                                                      _cap, _find, _switch):
@@ -624,7 +642,7 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=True)
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
-                return_value=_solid((200, 200), (255, 255, 255)))
+                return_value=_solid((1300, 1610), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                 return_value={"bg": (255, 255, 255), "other": (240, 240, 240),
                               "self": (53, 210, 141)})
@@ -639,7 +657,7 @@ class TestVisualBackend(unittest.TestCase):
                     {"text": "昨天 18:45", "x": 60, "y": 10, "w": 60, "h": 14},
                     # 用户场景：对方回复「晚上 21:30」——时间形状的真消息，
                     # 在气泡内 → 必须读到（历史事故：文本过滤把它当时间戳吞掉）
-                    {"text": "晚上 21:30", "x": 40, "y": 40, "w": 80, "h": 20},
+                    {"text": "晚上 21:30", "x": 120, "y": 40, "w": 80, "h": 20},
                 ])
     def test_get_messages_time_shaped_reply_kept(self, _ocr, _tops, _fbb, _dc,
                                                  _cap, _find, _switch):
@@ -733,9 +751,9 @@ class TestVisualBackend(unittest.TestCase):
                     {"text": "10月5日 18:45", "x": 60, "y": 10, "w": 60, "h": 14},
                     # 群聊发送者名：短文本独立行，紧贴内容上方（y 差 ~53），
                     # 在头像上边界之下的区间内（cy=56 ∈ [40,80]）→ 有效候选
-                    {"text": "哆拉A萝", "x": 50, "y": 50, "w": 40, "h": 12},
+                    {"text": "哆拉A萝", "x": 90, "y": 50, "w": 40, "h": 12},
                     # 消息内容（气泡内）
-                    {"text": "豆包有学生优惠了", "x": 70, "y": 103,
+                    {"text": "豆包有学生优惠了", "x": 90, "y": 103,
                      "w": 75, "h": 12},
                 ])
     def test_get_messages_group_chat_sender_is_author(self, _ocr, _tops, _fbb,
@@ -894,7 +912,7 @@ class TestVisualBackend(unittest.TestCase):
                 return_value=True)
     @mock.patch("wx_backend.visual_backend.find_wechat_window", return_value=0x1234)
     @mock.patch("wx_backend.visual_backend.capture_window",
-                return_value=_solid((200, 200), (255, 255, 255)))
+                return_value=_solid((1300, 1610), (255, 255, 255)))
     @mock.patch("wx_backend.visual_backend.detect_bubble_colors",
                 return_value={"bg": (30, 30, 31), "other": (30, 35, 38),
                               "self": (53, 210, 141)})
@@ -912,7 +930,7 @@ class TestVisualBackend(unittest.TestCase):
     @mock.patch("wx_backend.visual_backend.ocr_image",
                 return_value=[
                     {"text": "18:47", "x": 60, "y": 10, "w": 40, "h": 15},
-                    {"text": "你好", "x": 40, "y": 40, "w": 30, "h": 20},
+                    {"text": "你好", "x": 120, "y": 40, "w": 30, "h": 20},
                 ])
     def test_get_messages_rightside_other_bubble_not_avatar(self, _ocr, _tav,
                                                             _fb, _dc, _cap,
@@ -968,7 +986,7 @@ class TestVisualBackend(unittest.TestCase):
             # bot 卡片文件名（在 bot 卡片块内，不在对方块 [150, ...] 内）
             {"text": "index.html", "x": 90, "y": 35, "w": 40, "h": 20},
             # 对方新消息（锚定对方头像 150）
-            {"text": "帮我改一下", "x": 50, "y": 150, "w": 60, "h": 20},
+            {"text": "帮我改一下", "x": 120, "y": 150, "w": 60, "h": 20},
         ]
         b.connect()
         msgs = b.get_messages("林小满")
@@ -1280,7 +1298,7 @@ class TestVisualBackend(unittest.TestCase):
             {"text": '"摸鱼"', "x": 40, "y": 4, "w": 80, "h": 8},
             {"text": "集团(5)", "x": 130, "y": 4, "w": 60, "h": 8},
             # 消息带（center-y >= 标题区下沿）
-            {"text": "你们好呀", "x": 40, "y": 120, "w": 90, "h": 20},
+            {"text": "你们好呀", "x": 120, "y": 120, "w": 90, "h": 20},
         ]
         with mock.patch.object(b, "_switch_chat", return_value=True), \
              mock.patch("wx_backend.visual_backend.find_wechat_window",
@@ -1846,8 +1864,7 @@ class TestGetMessagesInMedia(unittest.TestCase):
     def _backend(self):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
-        b.connect()
-        return b
+        return _connect_stubbed(b)
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
                 return_value=True)
@@ -1896,7 +1913,7 @@ class TestGetMessagesInMedia(unittest.TestCase):
             # 图片块内文字（头像 100 的块）→ 剔除
             {"text": "我不是", "x": 50, "y": 160, "w": 30, "h": 10},
             # 另一条正常文字消息（锚定头像 250，媒体框在其上方）→ 保留
-            {"text": "这是一条正常的文字消息", "x": 50, "y": 255,
+            {"text": "这是一条正常的文字消息", "x": 120, "y": 255,
              "w": 100, "h": 10},
         ]
         b = self._backend()
@@ -1920,7 +1937,7 @@ class TestGetMessagesInMedia(unittest.TestCase):
                 mock.patch("wx_backend.visual_backend.capture_window",
                            return_value=_solid((400, 300), (255, 255, 255))), \
                 mock.patch("wx_backend.visual_backend.ocr_image",
-                           return_value=[{"text": "单行消息", "x": 20, "y": 30,
+                           return_value=[{"text": "单行消息", "x": 120, "y": 30,
                                           "w": 120, "h": 30}]) as m_ocr, \
                 mock.patch("wx_backend.visual_backend.detect_avatar_tops",
                            side_effect=lambda region, bg, side:
@@ -1952,8 +1969,7 @@ class TestAnalyzeWindowAvatarBucket(unittest.TestCase):
     def _backend(self):
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
-        b.connect()
-        return b
+        return _connect_stubbed(b)
 
     @mock.patch("wx_backend.visual_backend.VisualBackend._switch_chat",
                 return_value=True)
@@ -2030,7 +2046,7 @@ class TestRealFixtureRegion(unittest.TestCase):
         我方超长气泡 sender='self'。"""
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
-        b.connect()
+        _connect_stubbed(b)
         img = Image.open(_REGION_1X)
         with mock.patch.object(b, "_switch_chat", return_value=True), \
                 mock.patch.object(b, "read_title", return_value="林小满"), \
@@ -2051,7 +2067,7 @@ class TestRealFixtureRegion(unittest.TestCase):
         """图片块只产 1 条媒体消息（other_media 恰 1 框）；对方气泡 1 条。"""
         b = VisualBackend()
         b._message_region = (0.0, 0.0, 1.0, 1.0)
-        b.connect()
+        _connect_stubbed(b)
         img = Image.open(_REGION_1X)
         with mock.patch.object(b, "_switch_chat", return_value=True), \
          mock.patch.object(b, "read_title", return_value="林小满"), \

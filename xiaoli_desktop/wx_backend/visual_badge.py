@@ -11,6 +11,7 @@ import logging
 from PIL import Image
 
 from .visual_regions import _normalize_region, _SESSION_REGION_RATIO
+from .visual_scale import area as _area, pxr as _pxr
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +109,7 @@ def _detect_red_clusters(shot: Image.Image, grid: int = 20,
                             and mask[ny, nx] and not seen[ny, nx]):
                         seen[ny, nx] = True
                         stack.append((ny, nx))
-        if _BADGE_AREA_MIN <= n <= _BADGE_AREA_MAX:
+        if _area(_BADGE_AREA_MIN) <= n <= _area(_BADGE_AREA_MAX):
             out.append((sl + minx, st + miny, sl + maxx, st + maxy))
     return sorted(out)
 
@@ -121,7 +122,7 @@ _BADGE_ANCHOR_MAX_DIST = 80
 
 def _pick_block_near_badge(badge_xy: tuple[int, int],
                            blocks: list[dict],
-                           max_dist: int = _BADGE_ANCHOR_MAX_DIST,
+                           max_dist: int | None = None,
                            ) -> dict | None:
     """红圈锚定：取距红圈 (x, y) 二维距离最近的文本块（会话名块）；超阈值 → None。
 
@@ -133,9 +134,11 @@ def _pick_block_near_badge(badge_xy: tuple[int, int],
         带上 x 后两者差一个数量级。
 
     badge_xy 与 blocks 必须同一坐标系（调用方传列表区局部坐标）。
+    max_dist（175% 标定 80px）按档位换算。
     """
     if not blocks:
         return None
+    max_dist = _pxr(_BADGE_ANCHOR_MAX_DIST) if max_dist is None else max_dist
     best = None
     best_d = None
     for it in blocks:

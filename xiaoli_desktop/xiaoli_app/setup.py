@@ -385,10 +385,8 @@ def check_environment(cfg):
             detail += f"；进程检测失败: {e}"
     out["wechat"] = {"ok": wechat_ok, "detail": detail}
 
-    # ---- 显示缩放：视觉判据按 175% 标定（README 顶部硬性要求）。提前在
-    # 首页亮出来，别等初始化失败才知道——缩放错的失败模式是「读不到消息」
-    # 的隐性故障，越早提示越好。微信窗口在时看它所在那块屏（多屏只认
-    # 微信实际所在），不在时看主屏；检测不出（0）按未知中性展示不判坏。
+    # ---- 显示缩放：判据按档位自适应（175% 为标定档，其他档位经口径表
+    # 换算）。卡片显示当前档位让用户对环境有数；检测不出（0）中性展示。
     try:
         from wx_backend.visual_win32 import find_wechat_window as _fww
         from wx_backend.visual_win32 import monitor_dpi_scale
@@ -396,14 +394,11 @@ def check_environment(cfg):
         scale = monitor_dpi_scale(_hwnd if _hwnd else None)
     except Exception:
         scale = 0
-    if scale == 175:
-        out["scale"] = {"ok": True, "detail": "175% ✓（视觉判据按 175% 标定）"}
-    elif scale:
-        out["scale"] = {"ok": False,
-                        "detail": (f"当前 {scale}%，需改为 175%：设置 → 系统 → "
-                                   "屏幕 → 缩放与布局；改完重启小漓")}
+    if scale:
+        out["scale"] = {"ok": True,
+                        "detail": f"{scale}% ✓（判据按档位自适应，175% 为标定档）"}
     else:
-        out["scale"] = {"ok": None, "detail": "未能检测（判据按 175% 标定）"}
+        out["scale"] = {"ok": None, "detail": "未能检测（按标定档 175% 口径工作）"}
 
     # ---- 天枢：只认 CLI（rivet 命令，npm 全局安装 tianshu-tui 提供）----
     # 桌面端检测已移除：小漓整套任务桥都走 CLI（launch_tianshu / resolve_cli_window

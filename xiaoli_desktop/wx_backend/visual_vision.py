@@ -9,12 +9,20 @@ from __future__ import annotations
 
 from PIL import Image
 
+from .visual_scale import area as _area, k as _k, px as _px, pxr as _pxr
+
 # 主题判定阈值：背景中位亮度高于此值 = 浅色主题（真机 深色 ~30 / 浅色 ~250）。
 _LIGHT_THEME_LUM = 128
-# 消息头像高度（物理像素，真机标定 1300x1610 / 175% 缩放 = 63px）。头像尺寸
-# 是 UI 固定元素，**不随窗口尺寸变**——旧实现按"消息区高÷18"估算，窗口被
-# 工作区限制而变矮时期望高跟着缩、真头像超出 1.4 倍上限被整列丢弃。
+# 消息头像高度（175% 标定物理像素 = 63px，逻辑 36px——UI 固定元素不随窗口
+# 尺寸变，但随**缩放档位**线性变，运行时经 _pxr 换算）。头像尺寸是 UI 固定
+# 元素，**不随窗口尺寸变**——旧实现按"消息区高÷18"估算，窗口被工作区限制
+# 而变矮时期望高跟着缩、真头像超出 1.4 倍上限被整列丢弃。
 _AVATAR_H = 63
+# 头像段扫描允许并回的稀疏行缺口。125% 实测：浅色简笔画面像下采样后，图形
+# 中间会掉出强像素 <3 的稀疏行，把一整段劈成 3+2+26 三段、全部卡在高度闸
+# 门外（对方头像全灭 → 消息块无法锚定 → 读 0 条）。头像是一整张连续图形，
+# ≤2 行的缺口应视作同段；真正的段间隙（相邻头像间 ~20 行）远大于此。
+_AVATAR_SEG_GAP = 2
 # 对方气泡「近背景窄带」：颜色距离（三通道绝对差之和）落在 lo~hi 内，再按
 # 明暗方向过滤。**仅用于估算气泡色**（浅色主题的候选掩码）——那里要的是
 # 「像气泡的色块」而不是精确色值，窄带口径比 per-channel 容差更耐渲染噪声。
@@ -65,7 +73,7 @@ def _near_bg_band(arr, bg, lo=8, hi=90, darker=True):
     return m
 
 
-def _dominant_flat_color(arr, mask, max_h: int = _LIGHT_BUBBLE_MAX_H):
+def _dominant_flat_color(arr, mask, max_h: float | None = None):
     """候选掩码里「像气泡的平坦色块」投票取色（浅色主题用）；取不到返回 None。
 
     浅色主题下图片的纯白/浅灰同样落在「近背景」色域里，直接取中位数会被大图
@@ -75,13 +83,14 @@ def _dominant_flat_color(arr, mask, max_h: int = _LIGHT_BUBBLE_MAX_H):
     """
     comps = []
     rw = mask.shape[1]
-    for (t, b, l, r) in _connected_boxes(mask, min_h=8, min_w=30):
+    max_h = _px(_LIGHT_BUBBLE_MAX_H) if max_h is None else max_h
+    for (t, b, l, r) in _connected_boxes(mask, min_h=_pxr(8), min_w=_pxr(30)):
         h, w = b - t, r - l
         if h > max_h or w > rw * 0.9:
             continue
         sub = mask[t:b, l:r]
         n = int(sub.sum())
-        if n < 40:
+        if n < _area(40):
             continue
         col = _median_color(arr[t:b, l:r], sub)
         if col is None:
@@ -131,8 +140,11 @@ def _light_band_mask(arr, bg, w, lo=8, hi=90):
     实测 0.147w）、右缘按滚动条切（0.99w）。
     """
     m = _near_bg_band(arr, bg, lo, hi, darker=True)
-    m[:, :int(w * 0.12)] = False
-    m[:, int(w * 0.99):] = False
+    # 左切头像带（标定 89.6px×k）、右切滚动条（滚动条距右缘固定逻辑 ~4~11px，
+    # ×k；残条远窄于连通域 min_w，成不了框）
+    aw = m.shape[1]
+    m[:, :_pxr(90)] = False
+    m[:, aw - _pxr(12):] = False
     return m
 
 
@@ -154,7 +166,7 @@ def _light_panel_boxes(arr, bg, w, h, mask=None):
     out = []
     for (t, b, l, r) in _connected_boxes(m):
         ph, pw = b - t, r - l
-        if ph >= h * 0.6 or ph > _LIGHT_BUBBLE_MAX_H:
+        if ph >= h * 0.6 or ph > _px(_LIGHT_BUBBLE_MAX_H):
             continue
         if pw > w * _LIGHT_BUBBLE_MAX_W_RATIO:
             continue
@@ -206,9 +218,10 @@ def detect_bubble_colors(img: Image.Image, theme: str | None = None) -> dict:
     if h < 16 or w < 16:
         return {"bg": None, "other": None, "self": None,
                 "theme": theme if theme in ("light", "dark") else "dark"}
+    bd = _pxr(8)
     border = np.concatenate([
-        arr[:8].reshape(-1, 3), arr[-8:].reshape(-1, 3),
-        arr[:, :8].reshape(-1, 3), arr[:, -8:].reshape(-1, 3),
+        arr[:bd].reshape(-1, 3), arr[-bd:].reshape(-1, 3),
+        arr[:, :bd].reshape(-1, 3), arr[:, -bd:].reshape(-1, 3),
     ])
     bg = tuple(int(v) for v in np.median(border, axis=0))
     if theme not in ("light", "dark"):
@@ -216,7 +229,7 @@ def detect_bubble_colors(img: Image.Image, theme: str | None = None) -> dict:
     R, G, B = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
     green = (G - R > 40) & (G - B > 40) & (G > 100)
     self_color = None
-    if int(green.sum()) > 80:
+    if int(green.sum()) > _area(80):
         self_color = tuple(int(v) for v in np.median(arr[green], axis=0))
     # 对方气泡：与背景「接近但不同」的非绿像素。图片内容颜色多样、与背景差异
     # 大（总差常 >100），不进候选；落在窄带里的图片内容（深色主题的深色块、
@@ -231,7 +244,7 @@ def detect_bubble_colors(img: Image.Image, theme: str | None = None) -> dict:
     else:
         cand = _near_bg_band(arr, bg, *_BUBBLE_BAND, darker=False) & ~green
     other_color = None
-    if int(cand.sum()) > 80:
+    if int(cand.sum()) > _area(80):
         other_color = (_dominant_flat_color(arr, cand) if theme == "light"
                        else _median_color(arr, cand))
     return {"bg": bg, "other": other_color, "self": self_color, "theme": theme}
@@ -244,7 +257,7 @@ def _near_color(arr, color, tol):
     return (d[:, :, 0] <= tol) & (d[:, :, 1] <= tol) & (d[:, :, 2] <= tol)
 
 
-def _connected_boxes(mask, min_h=20, min_w=40, x_gap=8, y_gap=6):
+def _connected_boxes(mask, min_h=None, min_w=None, x_gap=None, y_gap=None):
     """把布尔掩码聚合成连通域边界框 [(top, bottom, left, right)]（像素坐标）。
 
     行内切段语义 = 相邻 True 像素列差 >x_gap 切段——一次 np.nonzero 全图
@@ -255,6 +268,10 @@ def _connected_boxes(mask, min_h=20, min_w=40, x_gap=8, y_gap=6):
     （tools/bench_connected_boxes.py）。过滤掉小噪声（气泡至少高 20px、
     宽 40px）。"""
     import numpy as np
+    min_h = _pxr(20) if min_h is None else min_h
+    min_w = _pxr(40) if min_w is None else min_w
+    x_gap = _pxr(8) if x_gap is None else x_gap
+    y_gap = _pxr(6) if y_gap is None else y_gap
     rows, cols = np.nonzero(mask)
     if len(rows) == 0:
         return []
@@ -316,8 +333,8 @@ def find_bubble_boxes(img: Image.Image, colors: dict) -> list[tuple]:
         # (~47,47,48) 仅差 ~11 色阶，落在 tol=12 内被误判为 other，贯穿
         # 整图聚成接近全屏的异常框，把真实对方气泡（如群聊 @ 消息）一起
         # 吞掉后又被 60% 高度过滤丢弃（真机根因：群聊 @ 读不到消息）。
-        # 滚动条固定在消息区最右侧（x/w ≥ 0.99），直接掩掉。
-        mask[:, int(img.width * 0.99):] = False
+        # 滚动条贴消息区右缘（距右固定逻辑距离），直接掩掉。
+        mask[:, img.width - _pxr(12):] = False
         for (t, b, l, r) in _connected_boxes(mask):
             if (b - t) >= img.height * 0.6:
                 continue
@@ -384,11 +401,12 @@ def find_media_boxes(img: Image.Image, colors: dict) -> list[tuple]:
             c = colors.get(key)
             if c is not None:
                 content &= ~_near_color(arr, c, tol)
-    # 左右头像带剔除（detect_avatar_tops 的窄带几何：左 [0.02,0.14]、
-    # 右 [0.84,0.98]，各留余量）——头像误检从「靠尺寸猜」变「结构上不可能」
-    content[:, :int(w * 0.15)] = False
-    content[:, int(w * 0.85):] = False
-    return _connected_boxes(content, min_h=40, min_w=40)
+    # 左右头像带剔除（detect_avatar_tops 的窄带几何，各留余量；头像带是
+    # 距区域左右缘的固定逻辑距离，跨档位 ×k）——头像误检从「靠尺寸猜」
+    # 变「结构上不可能」
+    content[:, :_pxr(112)] = False
+    content[:, w - _pxr(112):] = False
+    return _connected_boxes(content, min_h=_pxr(40), min_w=_pxr(40))
 
 
 def filter_media_boxes(boxes: list[tuple], min_top: int | None = None,
@@ -427,7 +445,7 @@ def _bucket_avatar(top: int, tops: list[int]) -> int | None:
     return hit
 
 
-def _anchor_avatar(top: int, tops: list[int], tol: int = 8) -> int | None:
+def _anchor_avatar(top: int, tops: list[int], tol: int | None = None) -> int | None:
     """消息框归属头像（唯一判据 = 头像，用户定案）。
 
     消息框顶部与头像顶部对齐（真机实测差 0），但渲染取整可能差 1~2px；
@@ -435,7 +453,13 @@ def _anchor_avatar(top: int, tops: list[int], tol: int = 8) -> int | None:
     |top - 头像top| ≤ tol 里最近的头像，超出容差才回退区间归属；仍无归属
     （框顶在所有头像之上）返回 None——调用方按「无归属」丢弃，不做任何
     颜色/中线降级。
+
+    容差下限 10 物理px：这里比较的是框顶与头像**强像素核**顶（核 = 头像
+    图形去掉内边距、再被细线抗锯齿侵蚀），偏差实测 7~9 物理px 且不随档位
+    等比缩小——纯 ×k 容差在 100% 档缩到 5 就兜不住，两张文件卡片互相错
+    认领到对方头像（文件名行被当发送者名吞掉）。
     """
+    tol = max(_pxr(8), 10) if tol is None else tol
     best = None
     for t in tops:
         d = abs(top - t)
@@ -446,8 +470,9 @@ def _anchor_avatar(top: int, tops: list[int], tol: int = 8) -> int | None:
     return _bucket_avatar(top, tops)
 
 
-def _contains(outer: tuple, inner: tuple, pad: int = 2) -> bool:
+def _contains(outer: tuple, inner: tuple, pad: int | None = None) -> bool:
     """inner 框是否落在 outer 框内（外扩 pad 容差）。"""
+    pad = _pxr(2) if pad is None else pad
     ot, ob, ol, orr = outer
     it, ib, il, ir = inner
     return it >= ot - pad and ib <= ob + pad and il >= ol - pad and ir <= orr + pad
@@ -466,6 +491,46 @@ def drop_panel_contents(boxes: list[tuple], panels: list[tuple],
             if not any(_contains(p, (t, b, l, r), pad) for p in panels)]
 
 
+def detect_boundary_x(img: Image.Image) -> int | None:
+    """实测会话|聊天分界列（列表↔聊天空谷扫描，返回窗口物理 x 或 None）。
+
+    会话列宽按逻辑像素固定（175% 标定 310 逻辑 = 543.4 物理），但窗口逻辑
+    宽 < 标定窗口逻辑宽（半屏窗口：200% 档 2560 屏半屏 = 640 逻辑 < 731）
+    时微信会**压缩会话列**——静态锚 543.4×k 偏进聊天区，把对方头像裁出
+    检测带（200% 真机实测：左头像整列漏检、面板跨块错认领）。空谷扫描
+    实测分界：聊天区取样背景 → 逐列非背景占比 → 在窗口左 18%~62% 找第一
+    条宽 8~60 逻辑px 的竖直空谷，谷左沿即分界列。检不出（纯色截图/异常
+    布局）返回 None，调用方回退静态锚——静态锚在「窗口逻辑宽 ≥ 731」的
+    全部档位已被真机验证（100/125/150/175%）。
+    """
+    import numpy as np
+    arr = np.asarray(img.convert("RGB"), dtype=np.int16)
+    h, w = arr.shape[:2]
+    if w < 200 or h < 200:
+        return None
+    probe_bg = tuple(int(v) for v in np.median(
+        arr[int(h * 0.30):int(h * 0.55), int(w * 0.44):int(w * 0.52)]
+        .reshape(-1, 3), axis=0))
+    dist = np.abs(arr - np.array(probe_bg, dtype=np.int16)).sum(axis=2)
+    col_frac = (dist[int(h * 0.16):int(h * 0.78), :] > 15).mean(axis=0)
+    min_gap = max(4, _pxr(8))
+    max_gap = _pxr(60)
+    gaps, s = [], None
+    lo, hi = int(w * 0.18), int(w * 0.62)
+    for x in range(lo, hi):
+        if col_frac[x] < 0.03 and s is None:
+            s = x
+        elif col_frac[x] >= 0.03 and s is not None:
+            if min_gap <= x - s <= max_gap:
+                gaps.append(s)
+            s = None
+    if s is not None and min_gap <= hi - s <= max_gap:
+        gaps.append(s)
+    if not gaps:
+        return None
+    return gaps[0] + 2
+
+
 def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
     """检测消息区左侧/右侧头像的顶部 y 列表（几何判据，无需头像模板）。
 
@@ -479,7 +544,8 @@ def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
 
     在窄带内找「非背景像素连续行段」，高度落在头像高附近、峰值足够的段即头像，
     返回其顶部 y（头像顶部与消息气泡/媒体顶部对齐，真机实测差 0）。高度不足
-    （消息被上下滚动截断、显示不全）或峰值不足（滚动条等噪声）都丢弃。
+    （消息被上下滚动截断、显示不全）或峰值不足（滚动条等噪声）都丢弃。段内
+    允许 ≤_AVATAR_SEG_GAP 行的稀疏缺口（下采样掉点），不把同一头像劈成碎段。
 
     side: "left"（对方头像）| "right"（自己头像）；bg 为 None 时返回空。
     """
@@ -490,35 +556,52 @@ def detect_avatar_tops(img: Image.Image, bg, side: str) -> list[int]:
     rh, rw = arr.shape[:2]
     if rw <= 0 or rh <= 0:
         return []
+    # 头像窄带 = 距区域左/右缘的固定逻辑距离（175% 标定：左带 15~105、
+    # 右带距右 15~120），跨档位 ×k——窗口物理宽度恒为半屏而元素随档位缩放，
+    # 按区域比例取带会在低档位把气泡左缘切进带里（150% 实测）。
     if side == "right":
-        x0, x1 = int(rw * 0.84), int(rw * 0.98)
+        x0, x1 = rw - _pxr(120), rw - _pxr(15)
     else:
-        x0, x1 = int(rw * 0.02), int(rw * 0.14)
+        x0, x1 = _pxr(15), _pxr(105)
     if x1 - x0 <= 0:
         return []
     dist = np.abs(arr - np.array(bg, dtype=np.int16)).sum(axis=2)
     counts = (dist[:, x0:x1] > 70).sum(axis=1)  # 每行非背景像素数
-    expected_h = _AVATAR_H
-    min_h = int(expected_h * 0.7)
+    expected_h = _px(_AVATAR_H)
+    # 高度下限 0.45×期望：头像内简笔画细线的强像素核随档位缩小被抗锯齿
+    # 侵蚀（真机实测：125% 核占头像 73%，100% 只剩 53%——36px 头像核 19 行），
+    # 0.7 闸在 100% 档把真头像整列卡掉。被滚动裁断的半截头像改由显式
+    # 截断保护丢弃（见 _accept）。
+    min_h = int(expected_h * 0.45)
     max_h = int(expected_h * 1.4)
     min_peak = int(expected_h * 0.4)
-    tops = []
-    in_seg = False
-    seg_start = 0
+
+    def _accept(start: int, end: int, out: list) -> None:
+        # 截断保护：贴区域上/下缘的段 = 头像被滚动裁掉一半（消息显示不全），
+        # 丢弃——0.7 高度闸原本兼管此事，闸门放宽后单独接管。
+        if start <= 1 or end >= rh - 1:
+            return
+        if min_h <= end - start <= max_h \
+                and int(counts[start:end].max()) >= min_peak:
+            out.append(start)
+
+    tops: list[int] = []
+    seg_start = -1      # -1 = 不在段内
+    last_strong = -1
+    gap = 0
     for y in range(rh):
-        c = int(counts[y])
-        if c >= 3 and not in_seg:
-            in_seg = True
-            seg_start = y
-        elif c < 3 and in_seg:
-            in_seg = False
-            seg_h = y - seg_start
-            if min_h <= seg_h <= max_h and int(counts[seg_start:y].max()) >= min_peak:
-                tops.append(seg_start)
-    if in_seg:
-        seg_h = rh - seg_start
-        if min_h <= seg_h <= max_h and int(counts[seg_start:rh].max()) >= min_peak:
-            tops.append(seg_start)
+        if int(counts[y]) >= 3:
+            if seg_start < 0:
+                seg_start = y
+            last_strong = y
+            gap = 0
+        elif seg_start >= 0:
+            gap += 1
+            if gap > _AVATAR_SEG_GAP:
+                _accept(seg_start, last_strong + 1, tops)
+                seg_start = -1
+    if seg_start >= 0:
+        _accept(seg_start, last_strong + 1, tops)
     return tops
 
 
@@ -565,9 +648,9 @@ def find_panel_icon(arr, panel: tuple, colors: dict) -> tuple | None:
         mask &= ~_near_color(sub, colors["bg"], 8)
     mask[:, :int(pw * 0.5)] = False
     best = None
-    for (ct, cb, cl, cr) in _connected_boxes(mask, min_h=20, min_w=20):
+    for (ct, cb, cl, cr) in _connected_boxes(mask, min_h=_pxr(20), min_w=_pxr(20)):
         h, w = cb - ct, cr - cl
-        if h < max(_ICON_MIN_H, int(ph * 0.2)) or w < _ICON_MIN_W:
+        if h < max(_pxr(_ICON_MIN_H), int(ph * 0.2)) or w < _pxr(_ICON_MIN_W):
             continue
         if h > int(ph * 0.85) or w > int(pw * 0.5):
             continue
@@ -609,13 +692,13 @@ def detect_quote_line(arr, colors, panel):
     key = theme if theme in ("light", "dark") else "dark"
     base = np.array(_QUOTE_LINE_COLOR[key], dtype=np.int16)
     h = arr.shape[0]
-    lo_off, hi_off = _QUOTE_LINE_TOP_WIN
+    lo_off, hi_off = (_pxr(v) for v in _QUOTE_LINE_TOP_WIN)
     win_top, win_bot = min(b + lo_off, h - 1), min(b + hi_off, h - 1)
     if win_bot <= win_top:
         return None
-    x0 = l + _QUOTE_LINE_X_OFF
+    x0 = l + _pxr(_QUOTE_LINE_X_OFF)
     best = None
-    for x in range(x0 - 3, x0 + 4):
+    for x in range(x0 - _pxr(3), x0 + _pxr(3) + 1):
         if x < 0 or x >= arr.shape[1]:
             continue
         col = arr[:, x]
@@ -635,7 +718,7 @@ def detect_quote_line(arr, colors, panel):
                 gap += 1
                 if gap > 2:
                     break
-        if bottom - start + 1 >= _QUOTE_LINE_MIN_LEN:
+        if bottom - start + 1 >= _px(_QUOTE_LINE_MIN_LEN):
             if best is None or bottom - start > best[1] - best[0]:
                 best = (start, bottom)
     return best
@@ -655,10 +738,10 @@ def find_quote_content_box(arr, colors, panel, quote_span):
     lt, lb = quote_span
     t, b, l, r = panel
     h, w = arr.shape[:2]
-    y0, y1 = max(0, lt - 4), min(h, lb + 4)
-    x0 = l + 16            # 跳过竖线（面板左 +10±3）
-    x1 = min(w, l + 420)   # 引用内容物不会离竖线太远
-    if y1 - y0 < 12 or x1 - x0 < 12:
+    y0, y1 = max(0, lt - _pxr(4)), min(h, lb + _pxr(4))
+    x0 = l + _pxr(16)            # 跳过竖线（面板左 +10±3）
+    x1 = min(w, l + _pxr(420))   # 引用内容物不会离竖线太远
+    if y1 - y0 < _pxr(12) or x1 - x0 < _pxr(12):
         return None
     bg = colors.get("bg") if isinstance(colors, dict) else None
     if bg is None:
@@ -670,10 +753,10 @@ def find_quote_content_box(arr, colors, panel, quote_span):
     # （文字灰字的距离远超 45，仍由尺寸+填充率闸排除）
     mask = dist > (45 if colors.get("theme") == "light" else 90)
     best = None
-    for (ct, cb, cl, cr) in _connected_boxes(mask, min_h=24, min_w=24,
-                                             x_gap=6, y_gap=4):
+    for (ct, cb, cl, cr) in _connected_boxes(mask, min_h=_pxr(24), min_w=_pxr(24),
+                                             x_gap=_pxr(6), y_gap=_pxr(4)):
         bw, bh = cr - cl, cb - ct
-        if bw > 280 or bh > 170:   # 引用内容物量级（缩略图 ~68、图标 ~50）
+        if bw > _px(280) or bh > _px(170):   # 引用内容物量级（缩略图 ~68、图标 ~50）
             continue
         if float(mask[ct:cb, cl:cr].mean()) < 0.45:
             continue
