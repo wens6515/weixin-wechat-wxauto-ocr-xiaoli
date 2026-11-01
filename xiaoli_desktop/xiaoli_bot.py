@@ -16,7 +16,8 @@ import requests as req
 import pyautogui
 from wechat_bot import (WeChatBot, Controller, logger,
                         is_group_chat, _extract_file_name_token,
-                        VISION_MODEL_DEFAULT, strip_reply_prefix)
+                        VISION_MODEL_DEFAULT, strip_reply_prefix,
+                        resolve_under_root)
 from wx_backend.models import MessageType
 from wx_backend.visual_backend import parse_title
 from wechat_bot import _memory_key
@@ -100,6 +101,23 @@ VISION_NEUTRAL_PROMPT = (
     "有人给你发了条消息，照你平时的样子回他。"
 )
 
+# 群聊全接收模式（auto）：本批没有 @，模型自主决定接不接话。要说话必须
+# 调用 send_message 等发送类工具——直接输出的文本由上层丢弃（用户定案：
+# 只有工具调用才算「决定发送」）。提示词必须把这条说死，否则模型会按
+# 普通补全习惯输出一段文字，结果一个字都发不出去。
+VISION_GROUP_TOOL_PROMPT = (
+    "这是群聊，消息不一定都是找你的。想接话就调用 send_message 工具把话"
+    "说出去（通常一条，最多两条，多条请分多次调用）；不想接话就什么都不要"
+    "调用、也不要输出文字——直接输出的文字不会被发送。表情包、语音、图片、"
+    "文件同样只能通过对应工具发出。"
+)
+
+# 群聊全接收模式（hybrid）且本批有 @：@ 必回，文本按普通回复直接发送
+# （不再要求工具）；没 @ 的批次走 VISION_GROUP_TOOL_PROMPT。
+VISION_GROUP_AT_PROMPT = (
+    "这是群聊，这批消息里有找你的，照你平时的样子回他。"
+)
+
 
 # 主动追尾的评估指令（系统把「要不要补」作为一个必答问题递给模型——
 # 二选一输出，不依赖模型自发想起调工具，规避 no_reply 式的低调用率）。
@@ -130,9 +148,9 @@ from xiaoli_app.task_bridge import (
 )
 from xiaoli_app.bot_daemons import (
     ConditionWatcher, MEMORY_COMPRESS_PROMPT, MemoryCompressor,
-    ReminderScheduler, WATCH_EVIDENCE_CHARS, WATCH_JUDGE_PROMPT,
-    WATCH_MAX_FAILS, WATCH_MIN_SLICE_CHARS, parse_compress_json,
-    parse_watch_json,
+    ProactiveScheduler, ReminderScheduler, WATCH_EVIDENCE_CHARS,
+    WATCH_JUDGE_PROMPT, WATCH_MAX_FAILS, WATCH_MIN_SLICE_CHARS,
+    parse_compress_json, parse_watch_json,
 )
 
 # =====================================================================
@@ -189,6 +207,19 @@ class AgentBot(WeChatBot):
         self._followup_pending = []   # [{chat, due_at, scheduled_at}]
         self._followup_last = {}      # chat -> 上次追尾发出时刻
         self._followup_day = {"date": None, "count": 0}
+        # 群聊全接收运行态（内存即可）：
+        # - _group_seen：每个群「已入史消息」的指纹序列（游标）。视觉通道没有
+        #   跨轮消息 id，bot_bottom 在模型沉默时又不会前移——不判重的话屏幕
+        #   上同一批消息会被每一轮重新喂给模型、重复写进历史。
+        # - _chat_is_group：会话 -> 是否群聊（做过的会话才填），主动发起据此
+        #   过滤群聊（比名字启发式准）。
+        self._group_seen = {}
+        self._chat_is_group = {}
+        # 主动发起：调度线程只投「到期的 chat」，判定调用与发送都在主循环
+        # （判定会执行发送类工具，daemon 线程绝不能碰微信窗口）。
+        self._proactive_queue = queue.Queue(maxsize=50)
+        self._proactive_sched = ProactiveScheduler(self, stop_event=stop_event)
+        self._proactive_sched.start()
         # 每日预算：当日告警标记 + 结果缓存（60s 一查——别在 0.5s 轮询里
         # 每轮跑一次 SQL 聚合）
         self._budget_day = {"date": None, "flagged": False}
@@ -950,11 +981,13 @@ class AgentBot(WeChatBot):
             logger.error(
                 f"[触发回复] 未能确认窗口在会话 {chat!r}，放弃本次发送"
                 f"（防发错人）：{str(text or '')[:40]!r}")
-            return
+            return False
         try:
             self._send_parts(chat, text)
         except Exception as e:
             logger.error(f"[触发回复] 发送失败: {e}")
+            return False
+        return True
 
     def _handle_send_voice(self, chat_name, result, user_text):
         """send_voice 工具分支（voice_mode=auto/always）：解析 {text, emotion}
@@ -1157,6 +1190,70 @@ class AgentBot(WeChatBot):
                 f"截止 {exp_s}。达成或到截止系统会把事件回递给你，届时结合"
                 "上下文自然回复。请用你自己的话自然地跟用户确认一下")
 
+    def _exec_send_image(self, chat_id, raw_args):
+        """send_image 工具执行（call_vision_api 工具循环内）：画图端点生成
+        一张图 → 剪贴板粘贴发送。成功/失败一律返回回执文本——模型拿回执
+        后自然续写（告知失败或接着说话），绝不抛异常、绝不把错误码发出去。
+        临时文件发送后即删（dispatch/表情包同款生命周期）。"""
+        from xiaoli_app.image_gen import ImageGenError, generate_image_file
+        try:
+            args = json.loads(raw_args or "{}")
+        except (ValueError, TypeError):
+            return "send_image 参数解析失败"
+        if not isinstance(args, dict):
+            return "send_image 参数解析失败"
+        prompt = str(args.get("prompt") or "").strip()
+        if not prompt:
+            return "send_image 缺少 prompt（一句话画面描述）"
+        endpoint = getattr(self, "image_gen_endpoint", "")
+        model = getattr(self, "image_gen_model", "")
+        if not endpoint or not model:
+            return ("画图端点还没配置（设置页「图片发送」里填画图接口与模型），"
+                    "先告诉用户这个能力还没开")
+        size = str(args.get("size") or "").strip() or "1024x1024"
+        try:
+            path = generate_image_file(
+                endpoint, model, prompt, size,
+                api_key=str(getattr(self, "image_gen_api_key", "") or ""))
+        except ImageGenError as e:
+            logger.warning(f"[发图] {chat_id!r} 生成失败: {e}")
+            return f"图片没画出来（{e}），先用文字回复吧"
+        except Exception as e:
+            logger.warning(f"[发图] {chat_id!r} 生成异常: {e}")
+            return "图片没画出来（画图服务异常），先用文字回复吧"
+        try:
+            if self._send_sticker_file(path):
+                logger.info(f"[发图] 已发送给 {chat_id!r}: {prompt[:40]}")
+                return f"图片已发送（{prompt[:40]}）"
+            return "图生成好了但微信没接住粘贴，发送失败，先用文字说明吧"
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def _exec_send_file(self, chat_id, raw_args):
+        """send_file 工具执行（call_vision_api 工具循环内）：发任务工作目录
+        内的文件。resolve_under_root 把守路径边界（模型只给相对名，越界/
+        绝对路径/不存在一律回执拒绝），发送复用任务回传的剪贴板链路。"""
+        try:
+            args = json.loads(raw_args or "{}")
+        except (ValueError, TypeError):
+            return "send_file 参数解析失败"
+        if not isinstance(args, dict):
+            return "send_file 参数解析失败"
+        name = str(args.get("file") or "").strip()
+        if not name:
+            return "send_file 缺少 file（工作目录内的相对路径）"
+        path = resolve_under_root(self.tasks_dir, name)
+        if path is None:
+            return (f"发不了「{name[:40]}」——send_file 只能发任务工作目录"
+                    f"（{self.tasks_dir}）里的文件，先核对文件名")
+        if self._send_file_clipboard(path, chat_id):
+            logger.info(f"[发文件] 已发送给 {chat_id!r}: {name[:60]}")
+            return f"文件已发送：{os.path.basename(path)}"
+        return "文件发送失败（微信没接住粘贴），先用文字说明吧"
+
     def _handle_text(self, chat_name, sender, content, msg_id=None,
                      multi_sender=False, img_paths=None):
         """文本消息统一处理：vision-exp 单调用判断+回复 → 天枢投递 或 普通聊天。
@@ -1211,6 +1308,10 @@ class AgentBot(WeChatBot):
         # 追尾评估到期消费（主循环节点——发送切会话，窗口互斥纪律同触发器）
         if getattr(self, "_followup_pending", None):
             self._drain_followups()
+        # 主动发起：到期会话的判定调用 + 发送。调度线程只投队列，判定与
+        # 发送都在主循环（send_sticker/send_voice 等工具会碰窗口）。
+        if getattr(self, "_proactive_queue", None) is not None:
+            self._drain_proactive()
         # 任务成果轮询不受 cooldown / 任务暂停限制，必须最先执行
         self._tick_poll_outbox()
         resume, self._task_was_active, self._task_end_time = should_resume_listen(
@@ -1514,6 +1615,149 @@ class AgentBot(WeChatBot):
             return None
         return t
 
+    @staticmethod
+    def _proactive_gap_text(last_ts, now=None):
+        """距上次聊天的文案（分钟 / 小时 / 天，带一位小数）。
+
+        用户定案：超过小时用小时、超过天用天；小时/天保留一位小数
+        （3.4小时），整数不带 .0（3小时、2天）。
+        """
+        mins = max(0.0, ((time.time() if now is None else now)
+                         - float(last_ts)) / 60.0)
+        if mins < 60:
+            return f"{int(mins)}分钟"
+        hours = mins / 60.0
+        if hours < 24:
+            return f"{round(hours, 1):g}小时"
+        return f"{round(hours / 24.0, 1):g}天"
+
+    def _drain_proactive(self):
+        """消费主动发起到期项（主循环节点）：判定调用 + 发送。
+
+        调度线程只投「到期的 chat」；模型判定与发送都在主循环——判定这次
+        调用声明全套正常工具，send_sticker/send_voice 等会直接碰微信窗口，
+        daemon 线程绝不能执行它们。
+
+        判定协议（用户定案）：上下文末尾注入一条 system「距上次聊天 X，
+        可以决定是否给用户发消息；不决定发消息请调用 no_reply 工具」——
+        这条 system 不写记忆。模型调 no_reply = 不发（不写任何历史）；
+        输出文本或调发送类工具 = 发，按实际发送写 assistant 历史。
+        """
+        if self.paused or self._sending_lock:
+            return
+        if not getattr(self, "proactive_enabled", False):
+            return
+        if getattr(self, "proactive_quiet_enabled", False) \
+                and getattr(self, "_proactive_sched", None) is not None \
+                and self._proactive_sched._quiet_now():
+            # 入队后跨进了安静时段：不发起（留给下一个到期点）
+            return
+        if self._proactive_queue.empty():
+            return
+        # 天枢任务进行中/成果回传窗口：窗口被任务占用，不主动插话
+        try:
+            if has_active_tasks(self.tasks_dir):
+                return
+        except Exception:
+            pass
+        if self._budget_exhausted():
+            return
+        try:
+            ev = self._proactive_queue.get_nowait()
+        except queue.Empty:
+            return
+        chat = str(ev.get("chat") or "").strip()
+        if not chat:
+            return
+        hist = self._get_history(chat)
+        if not hist:
+            return
+        last = hist[-1]
+        last_ts = self._chat_msg_time(last)
+        if not last_ts:
+            return
+        now = time.time()
+        if last.get("role") == "user":
+            # 上一条还没回：先走正常回复链路，不在一条旧消息上主动搭话
+            return
+        if now - last_ts < self.proactive_idle_minutes * 60:
+            return
+        gap = self._proactive_gap_text(last_ts, now)
+        tail = (f"距上次聊天 {gap}，可以决定是否给用户发消息；"
+                "不决定发消息请调用 no_reply 工具。")
+        # 群聊全接收模式：主动发起同样守「只有工具能发」的纪律（纯文本丢弃）
+        is_group_chat_flag = (getattr(self, "_chat_is_group", {}) or {}).get(chat)
+        if is_group_chat_flag is None:
+            is_group_chat_flag = is_group_chat(chat)
+        tool_only = bool(
+            is_group_chat_flag
+            and str(getattr(self, "group_reply_mode", "mention"))
+            in ("auto", "hybrid"))
+        try:
+            resp = self.call_vision_api(
+                None, chat_id=chat, system_tail=tail,
+                force_no_reply=True, tool_only=tool_only)
+        except Exception as e:
+            logger.warning(f"[主动] {chat!r} 判定调用异常: {e}")
+            return
+        if not resp:
+            return
+        kind = resp.get("kind")
+        if kind == "tool_call" and resp.get("name") == "no_reply":
+            logger.info(f"[主动] {chat!r} 决定不发（距上次 {gap}）")
+            return
+        if kind == "tool_call" and resp.get("name") == "send_voice":
+            if self._handle_send_voice(chat, resp, None):
+                self._proactive_sched.mark_sent(chat)
+                self._clear_group_cursor(chat)
+            return
+        if kind == "tool_call" and resp.get("name") == "dispatch_task":
+            task_desc = ""
+            try:
+                args = json.loads(resp.get("arguments") or "{}")
+                task_desc = str(args.get("task") or "").strip()
+            except (ValueError, TypeError):
+                task_desc = str(resp.get("arguments") or "").strip()
+            if task_desc:
+                self._add_history(chat, "assistant", "[任务已投递天枢处理]")
+                self._dispatch_and_notify(chat, chat, task_desc)
+                self._proactive_sched.mark_sent(chat)
+                self._clear_group_cursor(chat)
+            return
+        if kind != "text":
+            return
+        actions = resp.get("actions") or []
+        if actions:
+            self._pending_placeholders.pop(chat, None)
+            last_text = ""
+            for a in actions:
+                mark = self._action_history_text(a)
+                if mark:
+                    self._add_history(chat, "assistant", mark)
+                if a.get("type") == "text":
+                    last_text = str(a.get("content") or "")
+            if last_text:
+                self._after_reply_sent(chat, last_text)
+            self._proactive_sched.mark_sent(chat)
+            self._clear_group_cursor(chat)
+            logger.info(f"[主动] {chat!r} 通过工具发送（距上次 {gap}）")
+            return
+        text = strip_reply_prefix(str(resp.get("content") or "").strip())
+        if not text:
+            return
+        if tool_only:
+            # 群聊全接收纪律：没有工具动作 = 不发（纯文本丢弃）
+            logger.info(f"[主动] {chat!r} 群聊全接收模式下未调发送工具，不发")
+            return
+        if not self._send_trigger_reply(text, chat):
+            logger.warning(f"[主动] {chat!r} 发送未确认，放弃本次（不写历史）")
+            return
+        self._add_history(chat, "assistant", text)
+        self._after_reply_sent(chat, text)
+        self._proactive_sched.mark_sent(chat)
+        self._clear_group_cursor(chat)
+        logger.info(f"[主动] -> {chat}: {text[:40]}")
+
     def _after_reply_sent(self, chat, text):
         """模型回复完整发出后的收尾钩子：状态层定量评估（异步小调用）+
         主动追尾登记（到点由主循环评估）。占位/固定文案不经这里。"""
@@ -1543,6 +1787,11 @@ class AgentBot(WeChatBot):
         at_tag = f"@{self.nickname}"
         entry_is_pos = switched and isinstance(entry, tuple)
         chat_name = None if entry_is_pos else entry
+        # 全接收模式需要图片/表情也产出成消息（逐条入史 + 游标判重）；仅@
+        # 与私聊保持只读文字/文件（媒体走专用捕获链路）。这里按配置先要，
+        # 拿到权威 is_group 后再过滤掉非目标会话的媒体消息。
+        include_media_cfg = str(
+            getattr(self, "group_reply_mode", "mention") or "mention") != "mention"
 
         def _window_msgs(win):
             # assume_switched：analyze_window 刚完成切换+读标题（同一处理
@@ -1550,8 +1799,16 @@ class AgentBot(WeChatBot):
             # skip_bot 必须与刚才 analyze_window 用同一个值（win 里带回来）：
             # 它决定「分析区上沿」= 哪条对方头像以下算本轮新消息，值不一致
             # 两次分析的边界就会错位（占位回复剔除失效）。
-            msgs = self.wx.get_messages(chat_name, assume_switched=True,
-                                        skip_bot=win.get("skip_bot", 0))
+            try:
+                msgs = self.wx.get_messages(
+                    chat_name, assume_switched=True,
+                    skip_bot=win.get("skip_bot", 0),
+                    include_media=include_media_cfg)
+            except TypeError:
+                # 测试桩/旧后端没有 include_media 形参：退回旧调用形态
+                msgs = self.wx.get_messages(
+                    chat_name, assume_switched=True,
+                    skip_bot=win.get("skip_bot", 0))
             bot_bottom = win.get("bot_bottom")
             # 阈值 = 分析区上沿（bot 最后回复之后的下一条对方头像上边界，
             # analyze_window 的 bot_bottom）。bot_bottom 为 None = 无 bot
@@ -1618,7 +1875,30 @@ class AgentBot(WeChatBot):
         is_group = getattr(self.wx, "_current_is_group", None)
         if is_group is None:
             is_group = is_group_chat(chat_name)
-        # 群聊 @ 过滤：只有 @小漓 的消息才处理
+        # 群聊标记落表：主动发起据此过滤群聊（名字启发式在群名不含「群」
+        # 时不可靠，这里用标题区解析出的权威值）
+        if not hasattr(self, "_chat_is_group"):
+            self._chat_is_group = {}
+        if chat_name:
+            self._chat_is_group[chat_name] = bool(is_group)
+        group_mode = str(
+            getattr(self, "group_reply_mode", "mention") or "mention")
+        full_group = bool(is_group) and group_mode in ("auto", "hybrid")
+        if not full_group:
+            # include_media 是按配置全局要的（拿权威 is_group 之前就要发
+            # 读取）；非全接收会话把媒体消息剔掉——它们由专用捕获链路处理，
+            # 留在文字候选里会被当成一条「[图片]」文字消息。
+            window_msgs = [
+                m for m in window_msgs
+                if m.type not in (MessageType.IMAGE, MessageType.EMOJI)]
+        if full_group:
+            # 全接收（auto/hybrid）：整批消息（文字/引用/图片/表情/文件）
+            # 一起进模型，逐条入史；发送闸见 _handle_group_batch。
+            return self._handle_group_batch(
+                chat_name,
+                window_msgs[-1].sender if window_msgs else chat_name,
+                win, window_msgs, group_mode, at_tag)
+        # 群聊 @ 过滤（仅 @ 模式）：只有 @小漓 的消息才处理
         if is_group:
             window_msgs = [m for m in window_msgs if at_tag in m.content]
             if not window_msgs:
@@ -1764,6 +2044,376 @@ class AgentBot(WeChatBot):
                     os.unlink(p)
                 except OSError:
                     pass
+
+    # ---------- 群聊全接收（auto / hybrid） ----------
+
+    @staticmethod
+    def _norm_group_text(text):
+        """游标签名用的正文归一化：只折叠空白。
+
+        不做引号/全半角归一——OCR 抖动时宁可判成新消息（重复喂一次），
+        也不要把真两条消息误并成一条。
+        """
+        return re.sub(r"\s+", "", str(text or ""))
+
+    def _group_items(self, chat_name, window_msgs, win):
+        """把本轮消息装配成有序条目（逐条入史 / 判重的最小单位）。
+
+        条目 = {kind, sender, content, sig, msg, block}
+        - kind：text / quote / file / image / emoji
+        - content：写进记忆的文本（媒体是占位符）
+        - sig：游标签名。文字/文件 = (归一化发送者, 归一化正文)；媒体 =
+          (发送者, 块指纹)——块指纹按像素内容算，滚动不改变它。
+        """
+        blocks_by_top = {}
+        for b in (win.get("other_blocks") or []):
+            blocks_by_top.setdefault(b.get("top"), b)
+        items = []
+        for m in window_msgs:
+            blk = blocks_by_top.get(m.y) or {}
+            if m.type == MessageType.IMAGE:
+                kind, content = "image", "[图片]"
+            elif m.type == MessageType.EMOJI:
+                kind, content = "emoji", "[表情]"
+            elif m.type == MessageType.FILE:
+                kind, content = "file", f"[文件: {m.content.strip()}]"
+            else:
+                bkind = str(blk.get("kind") or "").lower()
+                kind = "quote" if (bkind == "quote" or
+                                   str(m.content).startswith("[引用 ")) else "text"
+                content = m.content.strip()
+            sender = (m.sender or chat_name or "").strip()
+            # 小表情的块没有面板/媒体，OCR 有时只读到上方的发送者名——这种
+            # 「内容 == 发送者」的伪文本按表情占位处理，别把名字当成一句话
+            # 记进历史。
+            if kind == "text" and not blk.get("panel") \
+                    and not blk.get("media") \
+                    and self._norm_group_text(content) \
+                    == self._norm_group_text(sender):
+                kind, content = "emoji", "[表情]"
+            if kind in ("image", "emoji"):
+                sig = ("m", self._norm_group_text(sender),
+                       blk.get("fingerprint"))
+            else:
+                sig = ("t", self._norm_group_text(sender),
+                       self._norm_group_text(content))
+            items.append({"kind": kind, "sender": sender, "content": content,
+                          "sig": sig, "msg": m, "block": blk})
+        return items
+
+    def _group_seed_from_history(self, chat_name):
+        """进程重启后用最近历史给游标做种子（防旧消息重复入史）。
+
+        游标只在内存里；重启后 bot_bottom 仍停在「AI 最后一条消息」，屏幕上
+        那些已经入史的旧消息会被当成新消息。这里从该群最近 history 里取出
+        user 条目的「发送者：正文」签名（媒体占位没有块指纹、无法与媒体签名
+        等价，跳过），让最长前缀匹配能把它们剥掉。
+        """
+        hist = self._get_history(chat_name)
+        sigs = []
+        for h in hist[-200:]:
+            if h.get("role") != "user":
+                continue
+            text = str(h.get("content") or "")
+            if "：" in text:
+                sender, body = text.split("：", 1)
+            else:
+                sender, body = "", text
+            if body.startswith(("[图片]", "[表情]", "[文件: ")):
+                continue
+            sigs.append(("t", self._norm_group_text(sender),
+                         self._norm_group_text(body)))
+        if sigs:
+            self._group_seen[chat_name] = sigs[-200:]
+
+    def _group_peek_new(self, chat_name, items):
+        """游标判重（只计算，不写状态）：返回上次入史之后的新增段。
+
+        视觉通道没有跨轮消息 id；模型沉默时 bot_bottom 不前移，屏幕上的
+        同一批消息每轮都会被重新读到。游标 = 已入史条目的签名序列，按
+        「上一轮尾部 == 本轮开头」的最长匹配剥掉已见段。
+
+        匹配段里有指纹缺失的媒体时不剥（指纹判不了同一张图，宁可重复识别）。
+        短文本不做额外保护：若用户真发了两条相同的短消息，两条会同时出现在
+        可见批次里（旧的是前缀、新的是它后面的条目），剥前缀只会留下新的
+        那条；反过来「同一条短消息每轮重喂」会变成沉默期间的无限 API 开销。
+        """
+        if chat_name not in self._group_seen:
+            try:
+                self._group_seed_from_history(chat_name)
+            except Exception as e:
+                logger.debug(f"[群聊] 游标种子失败（按全新批次处理）: {e}")
+        seen = list(self._group_seen.get(chat_name) or [])
+        sigs = [it["sig"] for it in items]
+        best = 0
+        for k in range(min(len(seen), len(sigs)), 0, -1):
+            if seen[-k:] == sigs[:k]:
+                best = k
+                break
+        if best and any(it["kind"] in ("image", "emoji") and it["sig"][2] is None
+                        for it in items[:best]):
+            best = 0
+        return items[best:]
+
+    def _group_commit(self, chat_name, new_items):
+        """把新增段推进游标（调用成功、已写历史之后才提交）。"""
+        if not new_items:
+            return
+        seen = list(self._group_seen.get(chat_name) or [])
+        seen.extend(it["sig"] for it in new_items)
+        if len(seen) > 200:
+            seen = seen[-200:]
+        self._group_seen[chat_name] = seen
+
+    def _clear_group_cursor(self, chat_name):
+        """AI 发出消息后调用：bot_bottom 前移，旧游标作废（防同文误判）。"""
+        self._group_seen.pop(chat_name, None)
+
+    def _mark_session_read(self):
+        """点输入框清红圈（静默/处理完都调一次；失败只记日志）。"""
+        mark_read = getattr(self.wx, "mark_session_read", None)
+        if mark_read is None:
+            return
+        try:
+            mark_read()
+        except Exception as e:
+            logger.warning(f"[已读] 标记已读失败: {e}")
+
+    @staticmethod
+    def _action_history_text(action):
+        """发送动作 → 写进历史的 assistant 文本。"""
+        t = action.get("type")
+        if t == "text":
+            return str(action.get("content") or "")
+        if t == "sticker":
+            return f"[发送了表情包: {action.get('file') or ''}]"
+        if t == "image":
+            return "[发送了图片]"
+        if t == "file":
+            return f"[发送了文件: {action.get('content') or ''}]"
+        return ""
+
+    def _handle_group_batch(self, chat_name, sender, win, window_msgs,
+                            mode, at_tag):
+        """群聊全接收（auto / hybrid）的一轮处理。
+
+        用户定案：
+        - 整批消息逐条入史，群聊行首带发送者名；媒体记占位（[图片]/[表情]/
+          [文件: 名字]），不省略「两次回复之间」的任何一条；
+        - 游标只决定哪几条是新的（不重复喂、不重复记）；
+        - 新媒体照常完整识别（图片点击捕获、表情裁剪），不看有没有 @；
+          新文件没 @ 只记文件名、不提取正文（@ 的文件走既有完整流程）；
+        - auto：纯文本一律不发，只有 send_message / 表情包 / 语音 / 图片 /
+          文件等工具能发；hybrid：本批有 @ 时文本直接发，否则同 auto；
+        - 沉默不写任何 assistant 条目（不要 [已读未回复]）。
+        """
+        items = self._group_items(chat_name, window_msgs, win)
+        new_items = self._group_peek_new(chat_name, items)
+        if not new_items:
+            # 屏幕上只有已处理过的消息（红圈滞留/重复扫描）：清圈回监听
+            self._mark_session_read()
+            return False
+        batch_has_at = any(
+            at_tag in (it["msg"].content or "")
+            for it in new_items if it["kind"] in ("text", "quote", "file"))
+        force_text_send = bool(mode == "hybrid" and batch_has_at)
+        # @ 批次里的文件才取正文（用户定案：非 @ 文件只记文件名，不提取）；
+        # 取到的正文随本次调用给模型看，记忆里仍然只落 [文件: 名字]。
+        file_blocks: list[str] = []
+        file_paths: list[str] = []
+        if batch_has_at:
+            # 先接管之前登记的非 @ 文件：同一发送者先发文件、后 @ 下指令时，
+            # 把当时登记的文件按 @ 指令处理（与私聊 pending_files 同一语义）
+            for s in {it["sender"] for it in new_items
+                      if it["kind"] in ("text", "quote")}:
+                pending = self._pending_files.pop(s, None)
+                if not pending:
+                    continue
+                if pending.get("chat_name") and \
+                        pending["chat_name"] != chat_name:
+                    # 同名发送者在别的会话登记的文件：放回去，不跨会话消费
+                    self._pending_files[s] = pending
+                    continue
+                path = pending.get("file_path")
+                if not path or not os.path.isfile(path) or path in file_paths:
+                    continue
+                file_paths.append(path)
+                try:
+                    body = self._extract_file_text(path)
+                except Exception as e:
+                    logger.warning(f"[群聊] 待处理文件提取失败 {path!r}: {e}")
+                    body = None
+                if body:
+                    file_blocks.append(
+                        f"[文件内容: {os.path.basename(path)}]\n{body[:4000]}")
+            for it in new_items:
+                if it["kind"] != "file":
+                    continue
+                mobj = re.match(r"^\[文件: (.*)\]$", it["content"])
+                clean = (mobj.group(1) if mobj else it["content"]).strip()
+                path = self._find_file_by_display_name(clean)
+                if not path:
+                    time.sleep(3)  # 微信下载落盘有延迟，等一拍再找
+                    path = self._find_file_by_display_name(clean)
+                if not path or path in file_paths:
+                    continue
+                file_paths.append(path)
+                try:
+                    body = self._extract_file_text(path)
+                except Exception as e:
+                    logger.warning(f"[群聊] 文件提取失败 {clean!r}: {e}")
+                    body = None
+                if body:
+                    file_blocks.append(
+                        f"[文件内容: {os.path.basename(path)}]\n{body[:4000]}")
+        else:
+            # 非 @ 文件只登记、不提取正文（用户定案）；之后同一发送者 @ 下
+            # 指令时再按需提取（上面分支消费）。
+            for it in new_items:
+                if it["kind"] != "file":
+                    continue
+                mobj = re.match(r"^\[文件: (.*)\]$", it["content"])
+                clean = (mobj.group(1) if mobj else it["content"]).strip()
+                path = self._find_file_by_display_name(clean)
+                if path:
+                    self._pending_files[it["sender"]] = {
+                        "chat_name": chat_name,
+                        "file_path": path,
+                        "filename": os.path.basename(path),
+                    }
+        img_paths = []
+        resp = None
+        try:
+            # 新媒体按条目顺序捕获：图片点击开查看器复制原图，表情按块裁剪；
+            # 引用图片（「[引用 X发来的图片]」）点缩略图捕获原图。
+            for it in new_items:
+                blk = it["block"] or {}
+                try:
+                    if it["kind"] == "image":
+                        rect = self._box_screen_rect_safe(blk.get("media"))
+                        if rect:
+                            img_paths.extend(self._capture_media_rects([rect]))
+                    elif it["kind"] == "emoji":
+                        img_paths.extend(
+                            self._capture_emoji_images(chat_name, [blk]))
+                    elif it["kind"] == "quote" \
+                            and "发来的图片" in it["content"]:
+                        box = blk.get("quote_media") or blk.get("media")
+                        rect = self._box_screen_rect_safe(box) if box else None
+                        if rect:
+                            img_paths.extend(self._capture_media_rects([rect]))
+                except Exception as e:
+                    logger.warning(f"[群聊] 媒体捕获失败（跳过该条）: {e}")
+            lines = [f"{it['sender']}：{it['content']}" for it in new_items]
+            route = VISION_GROUP_AT_PROMPT if force_text_send \
+                else VISION_GROUP_TOOL_PROMPT
+            text = f"{route}\n\n这批新消息：\n" + "\n".join(lines)
+            if img_paths:
+                text += "\n（图片按上面 [图片] 出现的顺序附在后面）"
+            if file_blocks:
+                text += "\n\n" + "\n\n".join(file_blocks)
+            content = [{"type": "text", "text": text}]
+            for p in img_paths:
+                try:
+                    with open(p, "rb") as f:
+                        img_b64 = base64.b64encode(f.read()).decode()
+                    content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"},
+                    })
+                except OSError as e:
+                    logger.error(f"[群聊] 图片读取失败，忽略该图: {e}")
+            related = self._match_related_memory(
+                chat_name, "\n".join(it["content"] for it in new_items))
+            resp = self.call_vision_api(
+                content, chat_id=chat_name, related_memory=related,
+                tool_only=not force_text_send, collect_actions=True)
+        finally:
+            for p in img_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+        if resp is None:
+            # 调用失败：游标未提交、历史未写 → 下一轮整批重试（8s 退避）
+            return None
+        # 先逐条入史（用户消息），再按模型的发送动作追加 assistant 条目
+        for it in new_items:
+            self._add_history(chat_name, "user",
+                              f"{it['sender']}：{it['content']}")
+        self._group_commit(chat_name, new_items)
+        self._apply_group_result(chat_name, resp, force_text_send,
+                                 attachments=file_paths)
+        # 处理完（发没发都）点一次输入框清红圈，防滞留循环
+        self._mark_session_read()
+        return True
+
+    def _apply_group_result(self, chat_name, resp, force_text_send,
+                            attachments=None):
+        """全接收模式的发送闸：用户消息已入史，这里只处理模型的输出。
+
+        - 有发送动作（send_message/表情包/图片/文件）→ 按顺序写 assistant
+          历史；纯文本按模式丢弃
+        - hybrid 且本批有 @ → 文本直接发（@ 必回）
+        - 其余（text 无动作 / no_reply）→ 沉默：不写任何 assistant 条目
+        """
+        kind = resp.get("kind")
+        actions = resp.get("actions") or []
+        content = strip_reply_prefix(str(resp.get("content") or "").strip())
+        if kind == "tool_call":
+            name = resp.get("name")
+            if name == "no_reply":
+                return
+            if name == "send_voice":
+                if self._handle_send_voice(chat_name, resp, None):
+                    self._clear_group_cursor(chat_name)
+                return
+            if name == "dispatch_task":
+                task_desc = ""
+                try:
+                    args = json.loads(resp.get("arguments") or "{}")
+                    task_desc = str(args.get("task") or "").strip()
+                except (ValueError, TypeError):
+                    task_desc = str(resp.get("arguments") or "").strip()
+                if task_desc:
+                    self._add_history(chat_name, "assistant",
+                                      "[任务已投递天枢处理]")
+                    self._dispatch_and_notify(
+                        chat_name, chat_name, task_desc,
+                        attachment_paths=list(attachments or []) or None)
+                    self._clear_group_cursor(chat_name)
+                return
+            logger.warning(f"[群聊] 未知工具 {name!r}，按沉默处理")
+            return
+        if kind != "text":
+            logger.warning(f"[群聊] 未知响应 kind={kind!r}，按沉默处理")
+            return
+        if actions:
+            # 任何发送动作都是实质回复：占位计数归零（与 _send_text 同语义，
+            # 否则 skip_bot 会一直跳过占位之后的 bot 消息，bot_bottom 错位）
+            self._pending_placeholders.pop(chat_name, None)
+            sent_text = None
+            for a in actions:
+                mark = self._action_history_text(a)
+                if mark:
+                    self._add_history(chat_name, "assistant", mark)
+                if a.get("type") == "text":
+                    sent_text = str(a.get("content") or "")
+            if force_text_send and content and not sent_text:
+                # hybrid @ 批次：模型既发了表情包又说了话，两样都发
+                self._add_history(chat_name, "assistant", content)
+                self._deliver_reply(chat_name, content)
+                sent_text = content
+            if sent_text:
+                self._after_reply_sent(chat_name, sent_text)
+            self._clear_group_cursor(chat_name)
+            return
+        if force_text_send and content:
+            self._add_history(chat_name, "assistant", content)
+            self._deliver_reply(chat_name, content)
+            self._after_reply_sent(chat_name, content)
+            self._clear_group_cursor(chat_name)
+        # auto 且没有任何动作 = 沉默：一个 assistant 条目都不写
 
     def _handle_file_message(self, chat_name, sender, file_text, text_content, extra_attachments=None, multi_sender=False):
         """文件消息处理：按显示名定位（重名取 (N) 最大）→ 处理或回复收到并询问。

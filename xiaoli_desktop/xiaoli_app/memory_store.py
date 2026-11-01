@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 
@@ -60,6 +61,50 @@ def migrate_memory_data(data):
 
 
 # ---------- 深层文件级操作（bot 未运行时 UI 直读/直删走这里，与 bot 方法共用） ----------
+
+def _atomic_write_json(path, data, indent=2):
+    """JSON 原子落盘：tmp 写入 → 旧文件备份 .bak → os.replace 原子替换。
+
+    直接覆盖写在进程崩溃/断电瞬间会留下截断的损坏文件——memory.json 损坏
+    时启动走「空白记忆」分支，近期窗口全量丢失；tmp+replace 消掉该失败
+    模式，.bak 再兜一层「内容合法但数据错误」的极端情况（每次成功写盘前
+    保留上一份好文件）。reminders/persona 的落盘此前已是本模式，三个大
+    文件（memory.json / memory_global.json / config.json）在此统一口径。
+    indent：config.json 历史格式是 4，memory 系是 2——沿用各自口径避免
+    每次保存都产生整文件格式 diff。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+    if os.path.exists(path):
+        try:
+            shutil.copyfile(path, path + ".bak")
+        except OSError:
+            pass  # 备份是尽力而为：主文件的原子替换不受影响
+    os.replace(tmp, path)
+
+
+def _load_json_with_bak(path):
+    """读 JSON，主文件损坏/读取失败时回退上一份备份（.bak）。
+
+    返回解析后的对象；主文件与备份都不可用返回 None（调用方走空白起点）。
+    与 _atomic_write_json 配对：原子写消掉「写一半损坏」，备份把「内容
+    仍坏」时的损失挡成丢最后一轮，而不是丢全部。"""
+    primary_bad = False
+    for p in (path, path + ".bak"):
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if p != path and primary_bad:
+                logger.warning(f"[记忆] {path} 损坏，已从备份 {p} 恢复")
+            return data
+        except Exception as e:
+            logger.error(f"加载 {p} 失败: {e}")
+            if p == path:
+                primary_bad = True
+    return None
+
 
 def _trim_important(items, cap):
     """重要记忆截尾：从最旧开始丢非 pinned 条目直到不超 cap；pinned
@@ -309,25 +354,18 @@ class MemoryStore:
             self.schedule_save()
 
     def load(self, deep_enabled=True):
-        if os.path.exists(self.memory_file):
-            try:
-                with open(self.memory_file, "r", encoding="utf-8") as f:
-                    self.memory_db = migrate_memory_data(json.load(f))
-            except Exception as e:
-                logger.error(f"加载记忆失败: {e}，将使用空白记忆")
-                self.memory_db = {}
+        data = _load_json_with_bak(self.memory_file)
+        self.memory_db = migrate_memory_data(data) if data is not None else {}
         # 全局记忆文件（缺省/坏数据回空白——它独立于 memory_db）
-        try:
-            with open(self._global_path, "r", encoding="utf-8") as f:
-                g = json.load(f)
-            if isinstance(g, dict):
-                self._global = {
-                    "important": [x for x in (g.get("important") or [])
-                                  if isinstance(x, dict)],
-                    "index": [x for x in (g.get("index") or [])
+        g = _load_json_with_bak(self._global_path)
+        if isinstance(g, dict):
+            self._global = {
+                "important": [x for x in (g.get("important") or [])
                               if isinstance(x, dict)],
-                }
-        except (OSError, ValueError):
+                "index": [x for x in (g.get("index") or [])
+                          if isinstance(x, dict)],
+            }
+        else:
             self._global = {"important": [], "index": []}
         # 启动一次性溢出搬运：v1 迁移来的长历史超出 recent 上限的部分
         # 全部归档进深层文件（永不删除）；同时建立深层行数计数
@@ -969,10 +1007,8 @@ class MemoryStore:
 
     def save(self):
         try:
-            with open(self.memory_file, "w", encoding="utf-8") as f:
-                json.dump(self.memory_db, f, ensure_ascii=False, indent=2)
-            with open(self._global_path, "w", encoding="utf-8") as f:
-                json.dump(self._global, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(self.memory_file, self.memory_db)
+            _atomic_write_json(self._global_path, self._global)
         except Exception as e:
             logger.error(f"保存记忆失败: {e}")
 

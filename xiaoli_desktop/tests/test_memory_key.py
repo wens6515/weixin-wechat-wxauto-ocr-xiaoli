@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """memory 键归一化单测：引号与空格全剥、记忆存取同键（含 OCR 丢引号场景）。"""
+import os
+import tempfile
 import threading
 import unittest
 
@@ -25,6 +27,10 @@ class TestMemoryKey(unittest.TestCase):
 
     def test_history_roundtrip_same_chat(self):
         bot = wb.WeChatBot.__new__(wb.WeChatBot)
+        # memory_file 必须指向临时目录：桩不设它时 _mem 惰性建库会拿默认
+        # 相对路径，节流落盘（首存必写）把测试数据打进仓库工作目录
+        # （历史缺陷：仓库 memory.json 被本测试覆写成测试残留，.bak 机制上线后暴露）
+        bot.memory_file = os.path.join(tempfile.mkdtemp(), "memory.json")
         bot.memory_db = {}
         bot.max_history = 100
         bot.memory_keep_recent = 30

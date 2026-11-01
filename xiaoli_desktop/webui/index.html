@@ -261,6 +261,7 @@
               </div>
               <p class="ver-sub" id="verSub">检查更新中…</p>
               <button class="mini-btn wide ghost" id="btnCheckUpdate"><svg class="ic"><use href="#i-refresh"/></svg>检查更新</button>
+              <button class="mini-btn wide" id="btnInstallUpdate" hidden><svg class="ic"><use href="#i-download"/></svg>一键更新</button>
               <button class="mini-btn wide" id="btnGotoRelease" hidden><svg class="ic"><use href="#i-ext"/></svg>前往下载</button>
             </div>
           </div>
@@ -465,6 +466,7 @@
           <div class="log-head">
             <svg class="ic"><use href="#i-file"/></svg><span>bot_run.log</span>
             <span class="log-live"><span class="live-dot"></span>实时增量</span>
+            <button class="mini-btn ghost" id="btnExportDiag"><svg class="ic"><use href="#i-download"/></svg>导出诊断包</button>
             <button class="mini-btn ghost" id="btnPageLogClear"><svg class="ic"><use href="#i-broom"/></svg>清空显示</button>
           </div>
           <div class="log-body tall" id="logPageBody"></div>
@@ -485,8 +487,12 @@
           <button class="anchor" data-anchor="sec-override">按聊天覆盖</button>
           <button class="anchor" data-anchor="sec-remind">定时与监视</button>
           <button class="anchor" data-anchor="sec-followup">主动追尾</button>
+          <button class="anchor" data-anchor="sec-groupmode">群聊接收</button>
+          <button class="anchor" data-anchor="sec-proactive">主动发起</button>
           <button class="anchor" data-anchor="sec-pace">回复节奏</button>
           <button class="anchor" data-anchor="sec-sticker">表情包</button>
+          <button class="anchor" data-anchor="sec-mediasend">图片与文件</button>
+          <button class="anchor" data-anchor="sec-remote">远程面板</button>
         </div>
 
         <!-- 外观主题 -->
@@ -560,16 +566,15 @@
           <div class="form-grid">
             <label class="form-item grow"><span>压缩模型（留空 = 随聊天模型）</span><input id="edCompressModel" type="text" list="modelList" placeholder="留空 = 随聊天模型"></label>
           </div>
-          <div class="editor-actions"><button class="mini-btn" id="btnMemSave">保存长记忆设置</button></div>
         </div>
 
         <!-- 文件目录 -->
         <div class="glass sec-card" id="sec-dirs">
           <div class="card-title"><svg class="ic"><use href="#i-folder"/></svg>文件目录</div>
           <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="edTasks"></code>
-            <button class="mini-btn ghost" id="btnPickTasks">浏览…</button><button class="mini-btn" id="btnSaveTasks">保存</button></div>
+            <button class="mini-btn ghost" id="btnPickTasks">浏览…</button></div>
           <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="edFiles"></code>
-            <button class="mini-btn ghost" id="btnPickFiles">浏览…</button><button class="mini-btn" id="btnSaveFiles">保存</button></div>
+            <button class="mini-btn ghost" id="btnPickFiles">浏览…</button></div>
           <div class="dir-row"><span class="dir-k">天枢工作目录</span><code id="edTianshuWorkdir"></code><span class="dir-note">随任务目录自动跟随</span></div>
           <div class="dir-row"><span class="dir-k">首轮提示词</span><code id="edFirstPrompt"></code>
             <button class="mini-btn ghost" id="btnPickPrompt">选择文件…</button><button class="mini-btn ghost" id="btnClearPrompt">恢复内置</button></div>
@@ -581,7 +586,6 @@
           <div class="form-grid">
             <label class="form-item grow"><span>微信名称（群里 @ 这个称呼认小漓，也是小漓的自称；改完立即生效，不用重启）</span><input id="edNickname" type="text" maxlength="32" placeholder="小漓"></label>
           </div>
-          <div class="editor-actions"><button class="mini-btn" id="btnSaveNickname"><svg class="ic"><use href="#i-check"/></svg>保存名称</button></div>
         </div>
 
         <!-- 任务桥 -->
@@ -604,7 +608,6 @@
           <div class="form-grid">
             <label class="form-item grow"><span>搜索代理（可选，仅影响搜索/抓取）</span><input id="edWebProxy" type="text" placeholder="http://127.0.0.1:7897"></label>
           </div>
-          <div class="editor-actions"><button class="mini-btn" id="btnSaveProxy">保存代理</button></div>
         </div>
 
         <!-- 语音发送 -->
@@ -649,7 +652,6 @@
             </table>
             <div class="editor-actions">
               <button class="mini-btn ghost" id="btnVoiceRefAdd"><svg class="ic"><use href="#i-plus"/></svg>添加情绪参考</button>
-              <button class="mini-btn" id="btnVoiceSave">保存语音设置</button>
             </div>
           </div>
         </div>
@@ -675,7 +677,6 @@
               <option value="follow">跟随全局</option><option value="on">开启</option><option value="off">关闭</option></select></label>
           </div>
           <div class="editor-actions">
-            <button class="mini-btn" id="btnOvrSave">保存该聊天覆盖</button>
             <button class="mini-btn ghost danger" id="btnOvrClear">清除该聊天全部例外</button>
           </div>
         </div>
@@ -727,7 +728,6 @@
                 <label class="form-item"><span>静默判定秒数（智能）</span><input id="spMediaQuietSec" type="number" min="2" max="10" step="1"></label>
               </div>
             </div>
-            <div class="form-btns"><button class="mini-btn" id="btnMediaWaitSave">保存等待设置</button></div>
           </div>
           <div class="feat-row slim">
             <div class="feat-text"><b>每日消费预算</b><small>按内置价目估算今日消费，达到上限当天不再调用模型（红圈仍会清掉、不漏处理），第二天自动恢复。注意是估算不是账单，无价目的模型不计入</small>
@@ -737,7 +737,6 @@
             </div>
             <div class="form-btns" style="align-items:center">
               <label class="switch" style="margin-right:10px"><input type="checkbox" id="cbBudget"><span class="track"></span></label>
-              <button class="mini-btn" id="btnBudgetSave">保存预算</button>
             </div>
           </div>
         </div>
@@ -760,7 +759,50 @@
             <div class="feat-text"><b>仅私聊</b><small>群聊里追尾容易打扰，默认只在私聊启用</small></div>
             <label class="switch"><input type="checkbox" id="cbFuPrivate"><span class="track"></span></label>
           </div>
-          <div class="editor-actions"><button class="mini-btn" id="btnFollowupSave">保存追尾设置</button></div>
+        </div>
+
+        <!-- 群聊接收模式（三态，默认仅 @） -->
+        <div class="glass sec-card" id="sec-groupmode">
+          <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>群聊接收模式
+            <span class="title-hint">只影响群聊；私聊始终照常回复</span></div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>模式</b><small>仅 @：只有 @小漓 的消息才读（默认）。全接收·自主：群里每条新消息都进模型，模型要说话必须调用 send_message 等发送类工具，直接输出的文字不会发送；不想说就保持沉默。全接收·@必回：同样全接收，但本批消息里有 @ 时按普通回复直接发送，没有 @ 时仍必须走工具。全接收下没 @ 的文件只记文件名、不提取正文；图片/表情照常识别。注意：全接收会让群里每条新消息都触发一次带历史的模型请求，费用会上升。</small></div>
+            <div class="seg tri" id="groupModeSeg">
+              <button data-v="mention">仅 @</button><button data-v="auto">全接收·自主</button><button data-v="hybrid">全接收·@必回</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 主动发起对话（默认关） -->
+        <div class="glass sec-card" id="sec-proactive">
+          <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>主动发起对话
+            <span class="title-hint">冷场一段时间后，由模型决定要不要主动找你说句话</span></div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>启用主动发起</b><small>每个候选会话在「间隔下限~上限」分钟内随机取一个时间点，做一次完整的模型请求（带该会话历史与记忆），末尾告诉模型「距上次聊天多久」，由它决定发不发——不发就调用 no_reply。注意：即使模型决定不发，这次请求也会消耗 token；本功能默认关闭，开启后调用量会明显增加。</small></div>
+            <label class="switch"><input type="checkbox" id="cbProactive"><span class="track"></span></label>
+          </div>
+          <div class="form-grid four">
+            <label class="form-item"><span>间隔下限（分钟）</span><input id="spProMin" type="number" min="1" max="1440" step="1"></label>
+            <label class="form-item"><span>间隔上限（分钟）</span><input id="spProMax" type="number" min="1" max="1440" step="1"></label>
+            <label class="form-item"><span>会话空闲才发起（分钟）</span><input id="spProIdle" type="number" min="0" max="1440" step="1"></label>
+            <label class="form-item"><span>两次发送冷却（分钟）</span><input id="spProCooldown" type="number" min="0" max="1440" step="1"></label>
+          </div>
+          <div class="form-grid two">
+            <label class="form-item"><span>候选范围（近 N 天有对话）</span><input id="spProDays" type="number" min="1" max="90" step="1"></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>仅私聊</b><small>群聊不主动插话（推荐开启）</small></div>
+            <label class="switch"><input type="checkbox" id="cbProPrivate"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>安静时段</b><small>开启后这段时间内不发起（支持跨午夜，如 23:00~08:00）</small></div>
+            <div class="form-btns" style="align-items:center">
+              <label class="switch" style="margin-right:10px"><input type="checkbox" id="cbProQuiet"><span class="track"></span></label>
+              <input id="spProQuietStart" type="time" style="width:110px">
+              <span style="margin:0 6px">~</span>
+              <input id="spProQuietEnd" type="time" style="width:110px">
+            </div>
+          </div>
         </div>
 
         <!-- 回复节奏 -->
@@ -781,7 +823,6 @@
             <label class="form-item"><span>抖动下限（秒）</span><input id="spSegJitterMin" type="number" min="0" max="30" step="0.5"></label>
             <label class="form-item"><span>抖动上限（秒）</span><input id="spSegJitterMax" type="number" min="0" max="30" step="0.5"></label>
           </div>
-          <div class="editor-actions"><button class="mini-btn" id="btnSavePace">保存节奏设置</button></div>
         </div>
 
         <!-- 表情包 -->
@@ -803,6 +844,43 @@
               <button class="mini-btn" id="btnStickerPreview">预览注入清单</button>
               <button class="mini-btn" id="btnStickerRetag"><svg class="ic"><use href="#i-spark"/></svg>AI 优化标签</button>
             </div>
+          </div>
+        </div>
+
+        <!-- 图片与文件发送（默认关） -->
+        <div class="glass sec-card" id="sec-mediasend">
+          <div class="card-title"><svg class="ic"><use href="#i-image"/></svg>图片与文件发送
+            <span class="title-hint">AI 获得发图/发文件两个工具；关闭 = 工具不声明，AI 看不到这个能力</span></div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>允许 AI 发图片/文件</b><small>send_image 调下方画图接口生成一张图发送（画图接口化：接你自部署或任一 OpenAI images 兼容服务）；send_file 把任务工作目录里的文件补发给你（目录外的文件发不了，防提示词注入套走隐私文件）</small></div>
+            <label class="switch"><input type="checkbox" id="cbMediaSend"><span class="track"></span></label>
+          </div>
+          <div class="form-grid three">
+            <label class="form-item"><span>画图接口（OpenAI images 兼容）</span><input id="spImageGenEndpoint" type="text" placeholder="http://127.0.0.1:7860/v1/images/generations"></label>
+            <label class="form-item"><span>画图模型</span><input id="spImageGenModel" type="text" placeholder="如 doubao:seed-image / sd-xl"></label>
+            <label class="form-item"><span>画图 API Key（可空）</span><input id="spImageGenKey" type="password" placeholder="自部署服务可留空"></label>
+          </div>
+        </div>
+
+        <!-- 远程面板（默认关） -->
+        <div class="glass sec-card" id="sec-remote">
+          <div class="card-title"><svg class="ic"><use href="#i-ext"/></svg>远程面板
+            <span class="title-hint">手机/平板浏览器打开访问地址：看状态、日志、用量、触发器，暂停/恢复回复</span></div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>开启面板服务</b><small>默认只监听本机（127.0.0.1）；「局域网开放」后才允许同网设备访问。明文 HTTP + 访问令牌，<b>不要做公网映射</b>——出外网请配 Tailscale 之类的组网后照常访问</small></div>
+            <label class="switch"><input type="checkbox" id="cbRemoteEnabled"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>局域网开放</b><small>绑定全部网卡（手机访问需要；关着时只有本机能开面板）</small></div>
+            <label class="switch"><input type="checkbox" id="cbRemoteLan"><span class="track"></span></label>
+          </div>
+          <div class="form-grid three">
+            <label class="form-item"><span>服务端口</span><input id="spRemotePort" type="number" min="1024" max="65535" step="1"></label>
+            <label class="form-item"><span>访问地址（含令牌）</span><input id="spRemoteUrl" type="text" readonly placeholder="开启后生成"></label>
+            <div class="form-item"><span>&nbsp;</span><div class="form-btns">
+              <button class="mini-btn" id="btnRemoteCopy"><svg class="ic"><use href="#i-copy"/></svg>复制链接</button>
+              <button class="mini-btn ghost" id="btnRemoteResetToken">重置令牌</button>
+            </div></div>
           </div>
         </div>
 

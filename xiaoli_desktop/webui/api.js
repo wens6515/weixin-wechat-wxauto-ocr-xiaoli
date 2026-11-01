@@ -1,36 +1,93 @@
 /* 小漓 Web 前端 · 桥封装层。
    pywebview 的 js_api 在页面加载完成后才异步注入——启动时等待桥就绪
    （bridgeReady），等待失败才降级 mock（浏览器开发预览）。
-   mock 模式必须挂醒目横幅：假数据混进真窗口 = 严重误导（历史事故）。 */
+   mock 模式必须挂醒目横幅：假数据混进真窗口 = 严重误导（历史事故）。
+   远程面板模式（REMOTE）：页面经 http(s):// 打开（远程面板服务），方法
+   调用走 POST /api/<名>，推送事件走 SSE /events → window.__push——与
+   pywebview 通道进同一个处理面，页面零分叉。 */
 "use strict";
 
 let IS_REAL = false;   // 由 app.js 启动流程在 bridgeReady 后赋值
 
+/* ---------- 远程面板模式（由远程服务在页面里注入标记） ----------
+   不能用 location.protocol 判断：pywebview 加载本地文件时也会自建随机端口
+   的 HTTP 服务，本地窗口同样是 http:，只看协议会把本地窗口误判成远程
+   （API 全打去 /api/* 拿到 index.html → JSON 解析失败）。只有 remote_server
+   发出的页面带 window.__XL_REMOTE__。 */
+const REMOTE = !!window.__XL_REMOTE__;
+let REMOTE_TOKEN = new URLSearchParams(location.search).get("t")
+  || localStorage.getItem("xl_remote_token") || "";
+let remoteES = null;
+
+function connectRemoteEvents() {
+  /* SSE 订阅（token 变更后重连：旧 EventSource 关掉换新 URL）。断线由
+     浏览器自动重连，无需手动兜底。 */
+  if (remoteES) remoteES.close();
+  remoteES = new EventSource("/events?t=" + encodeURIComponent(REMOTE_TOKEN));
+  remoteES.addEventListener("push", (e) => {
+    try {
+      const m = JSON.parse(e.data);
+      window.__push(m.evt, m.payload || {});
+    } catch (err) { console.error(err); }
+  });
+}
+
+async function remoteCall(name, args) {
+  const resp = await fetch("/api/" + encodeURIComponent(name), {
+    method: "POST",
+    headers: { "Content-Type": "application/json",
+               "X-Auth-Token": REMOTE_TOKEN },
+    body: JSON.stringify({ args }),
+  });
+  if (resp.status === 401) {
+    const t = prompt("请输入远程访问令牌（小漓设置页「远程面板」可查看/重置）");
+    if (t && t.trim()) {
+      REMOTE_TOKEN = t.trim();
+      localStorage.setItem("xl_remote_token", REMOTE_TOKEN);
+      connectRemoteEvents();
+      return remoteCall(name, args);
+    }
+    return { ok: false, error: "未授权：需要访问令牌" };
+  }
+  return resp.json();
+}
+
 /* ---------- 等待 pywebview 桥注入（官方 pywebviewready 事件 + 轮询兜底） ---------- */
-const bridgeReady = new Promise((resolve) => {
-  let settled = false;
-  const check = () => {
-    if (settled) return true;
-    if (window.pywebview && window.pywebview.api &&
-        typeof window.pywebview.api.get_status === "function") {
-      settled = true;
-      IS_REAL = true;
-      resolve(true);
-      return true;
-    }
-    return false;
-  };
-  window.addEventListener("pywebviewready", () => { if (check()) return true; });
-  const t0 = Date.now();
-  const timer = setInterval(() => {
-    if (check() || Date.now() - t0 > 5000) {
-      clearInterval(timer);
-      if (!settled) { settled = true; IS_REAL = false; resolve(false); }
-    }
-  }, 60);
-});
+const bridgeReady = REMOTE
+  ? Promise.resolve(true)   // 远程模式无 pywebview，直连即就绪
+  : new Promise((resolve) => {
+      let settled = false;
+      const check = () => {
+        if (settled) return true;
+        if (window.pywebview && window.pywebview.api &&
+            typeof window.pywebview.api.get_status === "function") {
+          settled = true;
+          IS_REAL = true;
+          resolve(true);
+          return true;
+        }
+        return false;
+      };
+      window.addEventListener("pywebviewready", () => { if (check()) return true; });
+      const t0 = Date.now();
+      const timer = setInterval(() => {
+        if (check() || Date.now() - t0 > 5000) {
+          clearInterval(timer);
+          if (!settled) { settled = true; IS_REAL = false; resolve(false); }
+        }
+      }, 60);
+    });
+
+if (REMOTE) {
+  IS_REAL = true;   // 远程是真后端（不是 mock），横幅逻辑不触发
+  connectRemoteEvents();
+}
 
 function call(name, ...args) {
+  if (REMOTE) {
+    return remoteCall(name, args)
+      .catch((e) => ({ ok: false, error: String(e) }));
+  }
   if (IS_REAL) {
     return Promise.resolve()
       .then(() => window.pywebview.api[name](...args))

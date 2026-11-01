@@ -4,7 +4,7 @@
   <p><b>微信 AI 机器人 · 视觉版</b></p>
   <p><sub>不碰 UIA / CDP / 本地数据库，靠截图 + OCR 走微信 PC 4.x</sub></p>
   <p>
-    <img src="https://img.shields.io/badge/version-3.4.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
+    <img src="https://img.shields.io/badge/version-3.5.0-4FB3FF?style=flat-square&amp;labelColor=0B2540" alt="version">
     <img src="https://img.shields.io/badge/WeChat_PC-4.x-35C48D?style=flat-square&amp;labelColor=0B2540" alt="WeChat PC 4.x">
     <img src="https://img.shields.io/badge/Windows-10+-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=windows&amp;logoColor=white" alt="Windows 10+">
     <img src="https://img.shields.io/badge/Python-3.12-4FB3FF?style=flat-square&amp;labelColor=0B2540&amp;logo=python&amp;logoColor=white" alt="Python 3.12">
@@ -17,6 +17,11 @@
 </div>
 
 <!-- 跨缩放适配自 v3.4.0 起落地；本提示随版本维护 -->
+
+> [!WARNING]
+> **v3.5.0 新增功能较多，尚未完成全量真机测试**：群聊全接收（三种模式）、主动发起对话、远程面板、设置页自动保存等均为本版新增或大改。遇到 bug 请到 [Issues](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/issues) 提交（附日志与复现步骤），并**回退到 v3.4.0** 使用稳定版。
+>
+> 本版包含一次启动优化：修复了远程面板开启时启动卡约 20 秒的问题（GUI 就绪闸），并移除了未使用的 tkinter 依赖。
 
 > [!WARNING]
 > **自 v3.4.0 起，小漓适配各种 DPI 与显示缩放**——不再要求固定的分辨率与缩放比例（此前版本要求 2560×1600 + 175%）。
@@ -43,11 +48,9 @@
 
 小漓是一个运行在 Windows 上的微信 AI 机器人桌面应用：自动回复微信消息（聊天/提问）、识别图片与文件、发送语音，并把复杂任务投递给 AI 代理（天枢 CLI）处理，处理完成后自动把成果文件回传微信。
 
+> **v3.5.0「群聊全接收 · 主动发起 · 远程面板」** · **群聊三模式**：仅 @（默认）/ 全接收·自主 / 全接收·@必回——全接收下每条消息逐条入史（群聊带发送者名，@ 原样保留），模型要说话必须调用 `send_message` 等发送类工具，直接输出的文字不发送；没 @ 的图片/表情照常识别，文件只记文件名不读正文 · **主动发起对话**（默认关，10~20 分钟随机评估）：上下文末尾注入「距上次聊天 X」，模型调 `no_reply` 即不发，不限发送条数，可配安静时段/仅私聊/空闲与冷却 · **远程面板**：手机浏览器经局域网访问控制面板（HTTP + 访问令牌 + SSE 推送），静态资源公开、API/SSE 仍校验令牌 · **设置页自动保存**：15 个保存按钮移除，开关/下拉/分段按钮点击即存，文本框失焦即存 · **图片/文件发送工具**（默认关）：`send_image` 接 OpenAI images 兼容端点、`send_file` 只发任务工作目录内文件 · **一键更新 / 诊断导出 / 记忆与配置原子写 + `.bak`** · **启动优化**：修复远程面板开启时启动卡约 20 秒（GUI 就绪闸），去掉未使用的 tkinter，exe 11.2 MB → 9.5 MB
+>
 > **v3.4.0「任意分辨率与缩放」** · **跨缩放/跨分辨率适配**：全部像素判据改为「逻辑像素 × 缩放」口径（长度 ×k、面积 ×k²）——不再要求 2560×1600 + 175%；窗口恒为工作区右半屏、动态实测会话分界列（窄窗口下微信会压缩会话列）、低档位头像侵蚀与锚定容差修复；真机验证 2560×1600 的 100%~200% 五档与 1920×1080 的 100%/125%；跨缩放首次全量落地，部分组合可能仍有未覆盖 bug，欢迎带「分辨率+缩放+截图」反馈 · **引用判型改按格式规则**（发送人：图标+文件名+类型图标），`.xIsx` 这类 OCR 错字不再误判引用图片
->
-> **v3.3.0「引用识别与小漓状态层」** · **引用消息完整识别**：判型重构（气泡面板 + 引用竖线 + 内容物专用检测）+ `[引用 …]` 标注进模型——引用图片点击缩略图捕获原图随调、引用文件按名定位走文件流程（此前引用正文整行丢失、缩略图被当图裁剪）· **小漓状态层**（默认关）：语气随时段/聊天热度/情绪自然起伏，情绪由回复后的定量小调用更新，新增「状态」页可视化 · **主动追尾**（默认关，延迟/冷却/上限全可设）：回完话偶尔自然补一句 · **媒体等待双模式**：固定 10 秒或纯像素智能静默（说完了立即继续）· **每日消费预算**：估算超限当天停调用次日恢复 · 模型预设与价目更新（deepseek-flash=V4.1 现行价 / kimi-k3.1-pro / 豆包 Seed 2.1）· 日志页与记忆页最新在顶 · 小表情识别剔除头像区 · 回复长度上限默认 40000
->
-> **v3.2.1「初始化失败诊断与显示缩放前置」** · 初始化失败必弹诊断弹窗（失败原因 + 现场检测 + 修复指引 + 一键重试，不再只有一闪而过的 toast）· **显示缩放非 175% 时连接即拦下**并给出设置路径（此前会「连上却读不到消息」地静默瞎跑）· 缩放检测改实时值（启动后改缩放不重启也能读对）· 首页新增「显示缩放」检测卡（成功绿灯/失败红灯）· 环境卡单行排布、任务桥关闭时隐藏天枢两卡
 
 ## 目录
 
@@ -65,9 +68,9 @@
 
 ## 下载安装（桌面版）
 
-**v3.4.0 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 表情包库 + 托盘常驻）：
+**v3.5.0 完整桌面版安装包**（Web 前端界面 + 7 套主题 + 壁纸库 + 表情包库 + 托盘常驻）：
 
-👉 [点击下载 `xiaoli-setup-v3.4.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.4.0/xiaoli-setup-v3.4.0.exe)
+👉 [点击下载 `xiaoli-setup-v3.5.0.exe`](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/download/v3.5.0/xiaoli-setup-v3.5.0.exe)
 
 > 想下载旧版本？前往 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases) 查看 v2.1.0 / v2.0.0 / v1.x 等所有历史版本与更新记录。
 
@@ -83,6 +86,8 @@
 - 🎙️ **语音发送（音源接口化）**：小漓会发微信语音条——不内置语音模型，接你自己部署的 TTS 服务（如 GPT-SoVITS api_v2）；音色档案配参考音频，「通用」必填、其余行是情绪参考（AI 按语境挑）；语音模式三态（关闭 / 模型自主 / 始终语音）；发送走 VB-CABLE 虚拟声卡 + SendInput 触发微信录音 + 胶囊像素检测，环回质检不过、设备切换未确认、合成失败一律回退文本，回复永不丢
 - 💬 **微信自动回复**：监听微信消息，用 LLM（默认 DeepSeek）生成回复；私聊/群聊语境区分，群聊仅响应 `@小漓`；可开启**智能静默**——AI 自己决定要不要回某条消息（对方话没说完、自言自语时保持沉默等下一条，静默也标记已读不漏处理）
 - 🗣️ **拟人化回复**：回复纪律内置在运行时（不随角色卡走）——默认只回一条、最多两条（短叹词独立成行是唯一例外），跟着对方长度走，段间 2 秒节奏，段尾句号自动去掉，禁 emoji 只用颜文字；角色卡只管人设，改动一次对所有卡生效；可选开启**小漓状态层**——语气随时段、聊天热度与近期情绪自然起伏（情绪由每次回复后的定量调用更新，「状态」页可视化），以及**主动追尾**——回完话像真人那样偶尔补一句（延迟/冷却/每日上限可设，对方正在说话自动取消）
+- 👥 **群聊接收三模式**：仅 @（默认，只有 @小漓 的消息才读）/ 全接收·自主（群里每条新消息都进模型，模型要说话必须调用 send_message 等发送类工具，直接输出的文字不会发送）/ 全接收·@必回（全接收，本批有 @ 时按普通回复直接发送）。全接收逐条入史、群聊带发送者名，图片/表情/文件在记忆里记占位；没 @ 的文件只记文件名、不读正文。设置页切换、热生效
+- 🕒 **主动发起对话**（默认关）：每个候选会话在 10~20 分钟随机取一个时间点做一次完整模型请求（带该会话历史与记忆），上下文末尾以 system 注入「距上次聊天 X 分钟/小时/天」，模型调用 no_reply 表示不发，输出文本或调用发送类工具即发出；**即使决定不发也会消耗 token**，设置页可配间隔/空闲/冷却/仅私聊/安静时段，不限制发送条数
 - 🖼️ **图片识别**：收到一张或多张图片，全部图片随文字放进同一次视觉调用识别回复（多图不再只认最新一张）；判定为任务时全部图片随任务投递
 - 📄 **文件消息处理**：定位微信接收目录中的文件并处理（Word/Excel 等提取文字）
 - 📎 **引用消息识别**：对方「引用」一条消息发来时，引用内容完整进模型——文字引用带 `[引用 …]` 标注，引用图片自动点开缩略图捕获原图随文识别，引用文件按名定位走文件流程（深/浅双主题竖线判据 + 内容物专用检测）
@@ -98,6 +103,10 @@
 - 🔍 **联网搜索**：模型自主决定何时联网（搜狗/必应/百度三源并发 + 网页正文抓取，零配置无需任何 key，设置页可选配代理）——人名/机构查询精准命中（如「某高校教师名」直接返回院系教师页），问「今天天气怎么样」会先搜再抓天气页正文读实况数据作答；结果与查询无关时自动换措辞重搜
 - 🌗 **浅色/深色双主题自适应**：启动先识别微信界面是浅色还是深色，气泡色、气泡框、图片/文件判定都走对应的一套像素判据；在微信里切主题自动跟随、不用重启。另有窗口尺寸强制（程序把窗口**大小**钉在**工作区右半屏**；位置自由摆放，仅移出屏幕时拉回可见范围）与最小化哨兵（最小化态视觉通道是盲的，哨兵自动恢复）
 - 🎛️ **功能开关区**：语音发送 / 联网搜索 / 任务桥 / 状态监视 / 智能静默 / 全局记忆 / 共享记忆池等开关，设置页独立控制，保存即热生效（关闭 = 工具不声明，模型看不到就不会调用）
+- 📱 **远程面板**：手机/平板浏览器经局域网访问控制面板（状态、日志、用量、触发器、暂停/恢复回复）；HTTP + 访问令牌 + SSE 推送，方法白名单，敏感操作不可远程调用
+- 🖼️ **图片/文件发送**（默认关）：AI 可调你自己配置的 OpenAI images 兼容端点生成图片发送，或把任务工作目录里的文件补发给你（目录外文件发不了）
+- 💾 **设置自动保存**：设置页不再有「保存」按钮——开关/下拉/分段按钮点击即存，文本框失焦即存，成功最多每 2 秒提示一次「已自动保存」
+- 🔁 **一键更新 / 诊断导出**：首页检查到新版本可直接下载安装包并启动安装；日志页可导出脱敏诊断包（运行信息、脱敏配置、日志尾部、微信窗口截图）
 
 ## 快速上手（桌面版）
 
@@ -195,6 +204,9 @@ xiaoli_desktop/
 │   ├── web_search.py        # 联网搜索（三源并发 + 网页正文抓取，零配置零 key，支持代理）
 │   ├── update_check.py      # GitHub Releases 更新检查（best-effort）
 │   ├── version.py           # 内置版本号常量（更新检查比对）
+│   ├── bot_daemons.py       # 后台线程（定时/状态监视/记忆压缩/主动发起调度）
+│   ├── image_gen.py         # 画图接口客户端（OpenAI images 兼容，send_image 用）
+│   ├── remote_server.py     # 远程面板 HTTP/SSE 服务（令牌 + 方法白名单）
 │   ├── engine.py            # 引擎线程状态机（桌面端宿主用；无 Qt 依赖）
 │   └── setup.py             # 天枢安装/进程检测（GUI 引导部分函数内懒加载 Qt）
 ├── tests/                   # unittest 测试套件（后端 40+ 个测试文件）
@@ -234,6 +246,17 @@ assets/                      # README 展示图（mascot / showcase-voice / show
 | `api_wall_budget` | 45 | 单次调用重试总时长封顶（秒），防止「超时×重试」叠成分钟级等待 |
 | `web_proxy` | 空 | 联网搜索/网页抓取代理（`http://127.0.0.1:7890` 形式，支持 http/https/socks5）；空=直连，只影响搜索与抓取，不影响模型 API |
 | `start_paused` | true | 启动时是否暂停自动回复 |
+| `group_reply_mode` | `mention` | 群聊接收模式：`mention` 仅 @ / `auto` 全接收·自主（只有工具能发） / `hybrid` 全接收·@必回 |
+| `proactive_enabled` | false | 主动发起对话总开关（每会话 10~20 分钟随机评估一次；模型调 no_reply 即不发；评估本身消耗 token） |
+| `proactive_interval_min` / `max` | 10 / 20 | 主动发起的随机间隔（分钟） |
+| `proactive_idle_minutes` / `cooldown_minutes` | 10 / 30 | 会话空闲阈值 / 两次主动发送冷却（分钟） |
+| `proactive_private_only` | true | 主动发起只对私聊生效 |
+| `proactive_quiet_enabled` | false | 主动发起的安静时段开关（时段见 `proactive_quiet_start` / `proactive_quiet_end`） |
+| `media_send_enabled` | false | 图片/文件发送工具总开关（send_image / send_file） |
+| `image_gen_endpoint` / `image_gen_model` | 空 | send_image 的 OpenAI images 兼容端点与模型 |
+| `remote_enabled` | false | 远程面板服务开关（默认只绑 127.0.0.1） |
+| `remote_lan` | false | 远程面板绑定全部网卡（手机访问需开） |
+| `remote_port` | 8765 | 远程面板端口 |
 
 控制台可用命令：`pause` / `resume` / `model [名称]` / `chat-temp <0~2>` / `chat-top-p <0~1>` / `vision-temp <0~2>` / `tianshu-window` / `task-status` / `clear [聊天ID]` / `del <聊天ID> <序号...>` / `memory <聊天ID>` / `status` / `quit` / `help`
 
@@ -252,6 +275,8 @@ assets/                      # README 展示图（mascot / showcase-voice / show
 - **引用消息**：判据 = 气泡面板 + 面板下方左缘竖线的引用区（深/浅双主题真机标定），内容物（缩略图/文件图标）专用检测 24px 起判（通用媒体 40px 闸会漏窄缩略图）；文字引用带 `[引用 …]` 标注入模，引用图片点击缩略图开查看器捕获原图随调，引用文件按显示名定位走文件流程（定位不到自然落回文字，如引用的是小漓自己发的文件）
 - **浅色 / 深色双主题**：像素判据按主题分两套——深色气泡比背景亮（背景 30 / 气泡 47）、浅色气泡比背景暗（背景 250 / 气泡 238），浅色下气泡与背景只差约 12 色阶、图片里的浅灰页底与气泡只差 4，因此浅色一侧用「比背景暗的近背景窄带 ∩ 形状闸 ∩ 实心度闸」把气泡、文件卡片与图片分开（深色一侧仍按气泡色 ± 容差）。程序启动自动识别主题（会话列表区 ∪ 消息区亮度）、运行中随帧跟随，微信里切主题无需重启；识别不出来时按深色判据工作。未读红圈（品牌红）与选中行高亮（深浅两套都是绿）与主题无关，两套外观下同一判据
 - **会话判定**：未读条目按红圈几何切换（点击该行 + 选中像素复验；已选中不点击——微信列表是 toggle，点已选中条目会取消选中）；会话身份与群聊判定统一取自读消息那次联合 OCR 的标题带，位置模式拿不到名字就放弃本轮（宁可漏一条，也不把别处的消息当目标处理）；触发式发送（定时提醒/状态监视）发送前先切会话 + 读标题复验，确认不了则一条都不发
+- **群聊全接收的记忆**：消息按头像锚定的块逐条入史（群聊行首带发送者名，@ 原样保留），媒体落 `[图片]`/`[表情]`/`[文件: 名字]` 占位；模型沉默时 bot_bottom 不前移，靠每会话内存游标（文字用归一化正文、媒体用块内容指纹）剥掉已入史前缀——读到的全部记录、不重复记录；滚动出视口的消息读不到（视觉通道固有限制）。沉默不写任何 assistant 标记
+- **主动发起**：调度线程只算时间、只投队列；判定调用与发送都在主循环（判定会执行发送类工具，daemon 线程绝不碰微信窗口）。末条「距上次聊天 X」是本次调用专属 system、不写记忆；模型调 no_reply 时连历史都不写，发出后只写 assistant 条目
 - **联网搜索**：搜狗/必应/百度三源并发 + 按优先级合并去重 + 网页正文抓取，零配置零 key；搜索引擎跳转链接自动跟随解析到真实目标页；抓取式搜索无 SLA（搜索引擎改版会失效，三源互为冗余 + 模型换措辞重搜兜底）；百度自动化访问高频会触发安全验证页（自动降级由其余源补位）；实时数据不在搜索摘要里，由 web_fetch 抓网页正文读取
 - **长记忆**：近期窗口 30~60 条浮动（保留条数 + 滚动步长均可配，步长 0 = 到量逐条滚动），滚动按阶梯式批量弹出——两次滚动之间注入上下文纯追加，模型前缀缓存全程命中；溢出自动归档进深层存档（memory_deep/，永不删除）；可选记忆压缩——每攒满一批调压缩模型提炼「重要记忆」（常驻上下文，上限防膨胀，注入在历史之后的尾区，压缩提交不打碎前缀缓存）与「关键词索引」（命中自动注入），关键词召回受措辞差异限制，由 recall_memory 工具兜底；压缩默认关闭（有 API 成本），深层归档默认开启
 - **状态监视**：轮询创建时选定的固定网页（自动解析搜索引擎跳转链接到真实目标），本地关键词判定零 API 成本；判定依赖创建时按页面措辞给出的关键词与当前时段切片，页面改版/措辞大改会提前终止或拖到截止（均回递告知）；api 判定模式与触发回递会产生额外 API 调用，功能默认关闭、设置页开启
@@ -260,51 +285,7 @@ assets/                      # README 展示图（mascot / showcase-voice / show
 
 ## 更新记录
 
+- [v3.5.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.5.0.md)（群聊三模式/主动发起/远程面板/设置自动保存/图片文件发送/一键更新与诊断导出/原子写/启动优化）
 - [v3.4.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.4.0.md)（跨缩放/跨分辨率适配：逻辑像素 ×k 口径/窗口恒为工作区右半屏/动态分界列实测/头像侵蚀与锚定容差修复/引用判型改按格式规则）
-- [v3.3.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.3.0.md)（引用消息识别与内容联动/小漓状态层与状态页/主动追尾/媒体等待双模式/每日消费预算/模型预设与价目更新/日志与记忆页最新在顶/小表情剔除头像）
-- [v3.2.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.2.1.md)（初始化失败诊断弹窗/显示缩放 175% 连接前置与实时检测/首页显示缩放检测卡与环境卡排布调整）
-- [v3.2.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.2.0.md)（智能静默：AI 自决是否回复/记忆注入与编辑/全局记忆与共享记忆池/触发器主动调整与自然确认/微信自带小表情识别/红圈固定品牌红判据/表情包动作写入历史/私聊多消息双层嵌套修复）
 
-<details>
-<summary>更早的版本（v1.0.0 – v3.1.6，新→旧）</summary>
-
-- [v3.1.6 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.6.md)（窗口尺寸按系统可用区域收口（任务栏未隐藏也能用）/三区域竖向锚点上沿贴窗口顶·下沿贴输入面板/期望头像高固定 63px/输入框聚焦点距窗口底固定/README 明确要求显示缩放 175%）
-- [v3.1.5 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.5.md)（窗口位置改为只救援不钉死/天枢一键安装改走 npm 并透出失败原因、卡片只认 CLI/配置引导收尾只发 /yes 并关窗/修复绑定角色卡从未生效+导出记忆格式+变更任务目录选项/外观默认值调整与全或无迁移）
-- [v3.1.4 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.4.md)（撤回画面标定与固定窗口大小两项设置/改为程序强制窗口尺寸 1300×1610/微信窗口识别改进程名判据/新增微信名称设置）
-- [v3.1.3 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.3.md)（界面创建的定时触发器带内容回递/触发器增加创建来源（界面·对话）/控制台命令表、展示图与隐私说明修订）
-- [v3.1.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.2.md)（浅色/深色双主题自动识别/浅色判据按结构判据重做/文件卡片在浅色下被判成文字消息的修复）
-- [v3.1.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.1.md)（首启引导新增画面标定/微信窗口只固定大小不再挪位置/任务桥首次开启引导配置天枢 CLI/升级用户一次性标定提示/微信未开保险）
-- [v3.1.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.1.0.md)（工具按开关单独注入/触发器可管理/表情包发送/回复节奏可调/用量折线与主题重启修复）
-- [v3.0.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.0.1.md)（近期记忆阶梯滚动/重要记忆挪尾区提缓存命中/语音通用保存修复+就绪灯+自检试听/文件判据纯视觉/reply_max_tokens 单键化/用量页校准/任务页）
-- [v3.0.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v3.0.0.md)（Web 前端开源/头像锚定归属重构/文件卡片视觉判定/消息文字范围规则/文件名定位下载时间优先）
-- [v2.9.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.2.md)（回复段首时间戳剥除修复/消息归属判定诊断日志）
-- [v2.9.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.1.md)（背景静态化风扇静音/页面切换提速/主题 19 收 7/按聊天三态功能开关/用量上 SQLite/聊天记录导出/触发器可视管理）
-- [v2.9.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.9.0.md)（语音发送·音源接口化/音色档案情绪参考/语音模式三态/环回质检 fail-closed/颜文字乱语修复/功能开关区/粘贴后停顿节奏）
-- [v2.8.3 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.3.md)（回复纪律迁运行时/默认只回一条/长度物理上限/段间 2 秒节奏/句尾句号去掉/收信人视角）
-- [v2.8.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.2.md)（会话切换判定修复/红圈防误报/触发发送防发错人/一次事件一次 OCR/进度回传无节流）
-- [v2.8.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.1.md)（任务桥窗口复用修复/界面日志瘦身/首页与用量页版面调整）
-- [v2.8.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.8.0.md)（OCR 引擎升级提速/天枢 CLI 窗口识别修复/任务进度回传/联网搜索代理）
-- [v2.7.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.7.0.md)（按聊天绑定角色卡/首页更新检查/PDF 直读/文件目录热生效）
-- [v2.6.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.6.2.md)（文件定位重构/回传识别/前端日志双轨/任务桥归档管理）
-- [v2.6.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.6.1.md)（多图一次识别/任务全图投递/模型预设刷新/触发器日志修复）
-- [v2.6.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.6.0.md)（状态监视/触发器统一火线/用量统计升级/搜索跳转桩修复）
-- [v2.5.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.5.0.md)（记忆管理页/长记忆三层/联网搜索三源并发/纯图角色化/缓存命中优化）
-- [v2.4.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.4.0.md)（联网搜索双件套/表情包识别/群聊红圈清零/默认人设内置沉浸要求/memory 即时落盘）
-- [v2.3.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.3.0.md)（快档监听/OCR 两段化/API 韧性/用量统计/定时消息/窗口自动定位/设置页重构）
-- [v2.2.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.2.0.md)（深海小漓默认主题/沉浸要求首条注入/推挤切换动画/对勾修复）
-- [v2.1.4 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.1.4.md)（角色卡人设升级/回复空行拆分发送）
-- [v2.1.3 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.1.3.md)（消息区 OCR 单片修复/切字碎片根治/视觉时间注入/群聊重复点击/清空记忆/回复前缀）
-- [v2.1.2 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.1.2.md)（聊天记忆注入历史+时间戳/vision 预算裁剪）
-- [v2.1.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.1.1.md)（模型配置页修复/角色卡中文名/动画 600ms）
-- [v2.1.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.1.0.md)（单模型化/人设修复/sender 修复）
-- [v2.0.0 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v2.0.0「视觉版」.md)（视觉版发布：OCR 视觉方案迁移）
-- [v1.0.1 完整更新记录](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/更新记录%20-%20v1.0.1.md)（纯文字任务不带附件/DPAPI 加密/命令注册表）
-- [v1.0.0「初漓」先行测试版](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases/tag/v1.0.0)（最早版本，无独立更新记录）
-
-</details>
-
----
-
-<div align="center">
-  <sub>MIT License</sub>
-</div>
+更早版本见 [Releases 页面](https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/releases)。

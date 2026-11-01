@@ -600,6 +600,7 @@ async function checkUpdate(silent) {
   if (r.newer) {
     $("#verSub").textContent = `发现新版本 v${r.latest}（当前 v${r.current}）`;
     $("#btnGotoRelease").hidden = false;
+    $("#btnInstallUpdate").hidden = false;
     lastReleaseUrl = r.url || "";
   } else if (silent) {
     $("#verSub").textContent = `已是最新版本（v${r.current}）`;
@@ -612,6 +613,27 @@ $("#btnCheckUpdate").addEventListener("click", () =>
   withBusy($("#btnCheckUpdate"), () => checkUpdate(false)));
 $("#btnGotoRelease").addEventListener("click", () => {
   if (lastReleaseUrl) API.open_external(lastReleaseUrl);
+});
+/* ---- 一键更新：下载（进度推送）→ 校验 → 拉起安装器 → 自动退出 ---- */
+$("#btnInstallUpdate").addEventListener("click", async () => {
+  const r = await withBusy($("#btnInstallUpdate"),
+    () => API.download_and_install_update());
+  if (!r.ok) { toast(r.error || "无法开始更新", "err"); return; }
+  toast(`v${r.version || ""} 开始下载，完成后自动启动安装器（届时小漓会退出）`,
+    "ok");
+});
+onPush((evt, p) => {
+  if (evt !== "update_progress") return;
+  if (p.stage === "download" && typeof p.pct === "number") {
+    $("#verSub").textContent = `新版本下载中 ${p.pct}%`;
+    return;
+  }
+  if (p.message) {
+    toast(p.message, p.ok === false ? "err" : "ok");
+    if (p.ok === false) {
+      $("#verSub").textContent = "更新失败，可点「前往下载」手动安装";
+    }
+  }
 });
 
 /* ============================================================
@@ -647,6 +669,13 @@ function appendLogLines(lines, cap) {
 }
 $("#btnLogClear").addEventListener("click", () => { $("#logBody").innerHTML = ""; });
 $("#btnPageLogClear").addEventListener("click", () => { $("#logPageBody").innerHTML = ""; });
+/* ---- 导出诊断包（环境快照 + 脱敏配置 + 日志尾部 + 微信窗口截图） ---- */
+$("#btnExportDiag").addEventListener("click", async () => {
+  const r = await withBusy($("#btnExportDiag"), () => API.export_diagnostics());
+  if (!r.ok) { toast(r.error || "导出失败", "err"); return; }
+  toast(`诊断包已导出：${r.path}`, "ok");
+  API.reveal_path(r.path);   // 远程模式该方法被服务端拒绝，仅本地打开文件夹
+});
 function initLogPage() {
   const body = $("#logPageBody");
   if (body.children.length) return;   // 已初始化过：增量推送持续追加
@@ -1552,6 +1581,18 @@ function refreshSettings() {
   $("#spFuCooldown").value = m.followup_cooldown_minutes ?? 120;
   $("#spFuDaily").value = m.followup_daily_max ?? 10;
   $("#cbFuPrivate").checked = m.followup_private_only !== false;
+  $$("#groupModeSeg button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.v === (m.group_reply_mode || "mention")));
+  $("#cbProactive").checked = !!m.proactive_enabled;
+  $("#spProMin").value = m.proactive_interval_min ?? 10;
+  $("#spProMax").value = m.proactive_interval_max ?? 20;
+  $("#spProIdle").value = m.proactive_idle_minutes ?? 10;
+  $("#spProCooldown").value = m.proactive_cooldown_minutes ?? 30;
+  $("#spProDays").value = m.proactive_active_days ?? 7;
+  $("#cbProPrivate").checked = m.proactive_private_only !== false;
+  $("#cbProQuiet").checked = !!m.proactive_quiet_enabled;
+  $("#spProQuietStart").value = m.proactive_quiet_start || "23:00";
+  $("#spProQuietEnd").value = m.proactive_quiet_end || "08:00";
   $("#edWebProxy").value = m.web_proxy || "";
   $("#cbStateWatch").checked = !!m.state_watch_enabled;
   $("#edNickname").value = m.bot_nickname || "小漓";
@@ -1565,6 +1606,16 @@ function refreshSettings() {
   $("#cbSegJitter").checked = !!m.segment_jitter_enabled;
   $("#spSegJitterMin").value = m.segment_jitter_min ?? 1.5;
   $("#spSegJitterMax").value = m.segment_jitter_max ?? 3;
+  $("#cbMediaSend").checked = !!m.media_send_enabled;
+  $("#spImageGenEndpoint").value = m.image_gen_endpoint || "";
+  $("#spImageGenModel").value = m.image_gen_model || "";
+  $("#spImageGenKey").value = m.image_gen_api_key || "";
+  $("#cbRemoteEnabled").checked = !!m.remote_enabled;
+  $("#cbRemoteLan").checked = !!m.remote_lan;
+  $("#spRemotePort").value = m.remote_port ?? 8765;
+  API.remote_info().then((r) => {
+    if (r.ok) $("#spRemoteUrl").value = r.url || "";
+  });
   refreshStickerInfo();
   $$("#fontSeg button").forEach((b) =>
     b.classList.toggle("active", b.dataset.v === (u.font_scale || "medium")));
@@ -1610,7 +1661,7 @@ function onVoiceTestResult(p) {
   }
   updateVoiceReady();
 }
-$("#btnMemSave").addEventListener("click", async () => {
+async function saveLongMemory() {
   const stepRaw = parseInt($("#spRollStep").value, 10);
   const rollStep = Number.isFinite(stepRaw) && stepRaw >= 0 ? stepRaw : 30;
   const r = await API.save_config({
@@ -1622,21 +1673,24 @@ $("#btnMemSave").addEventListener("click", async () => {
     memory_important_max: parseInt($("#spImportantMax").value) || 20,
     memory_compress_model: $("#edCompressModel").value.trim(),
   });
-  toast(r.ok ? "长记忆设置已保存并热生效 ✓" : "保存失败：" + (r.error || ""),
-    r.ok ? "ok" : "err");
-});
+  if (!r.ok) toast("保存失败：" + (r.error || ""), "err");
+  return r;
+}
 async function pickDir(codeSel) {
   const r = await API.pick_folder();
   if (r.canceled || !r.path) return null;
   $(codeSel).textContent = r.path;
   return r.path;
 }
-$("#btnPickTasks").addEventListener("click", () => pickDir("#edTasks"));
-$("#btnSaveTasks").addEventListener("click", async () => {
+$("#btnPickTasks").addEventListener("click", async () => {
+  const p = await pickDir("#edTasks");
+  if (p) await saveTasksDir();
+});
+async function saveTasksDir() {
   const newPath = $("#edTasks").textContent.trim();
   if (!newPath || newPath.startsWith("（")) { toast("请先浏览选择目录", "err"); return; }
   const oldPath = (S.misc || {}).tasks_dir || "";
-  if (newPath === oldPath) { toast("目录未变化", "ok"); return; }
+  if (newPath === oldPath) return { ok: true };
   let removeOld = false;
   if (oldPath) {
     const choice = await selectModal("变更任务工作目录",
@@ -1647,17 +1701,23 @@ $("#btnSaveTasks").addEventListener("click", async () => {
     removeOld = choice === "1";
   }
   const r = await API.set_tasks_dir(newPath, removeOld);
-  if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
+  if (!r.ok) { toast(r.error || "保存失败", "err"); return r; }
   S.misc.tasks_dir = newPath;
   toast(r.removed_old ? "任务目录已变更，旧目录已清空" : "任务目录已变更 ✓", "ok");
+  return r;
+}
+$("#btnPickFiles").addEventListener("click", async () => {
+  const p = await pickDir("#edFiles");
+  if (p) await saveFilesDir();
 });
-$("#btnPickFiles").addEventListener("click", () => pickDir("#edFiles"));
-$("#btnSaveFiles").addEventListener("click", async () => {
+async function saveFilesDir() {
   const p = $("#edFiles").textContent.trim();
   if (!p || p === "（未配置）") { toast("请先浏览选择目录", "err"); return; }
   const r = await API.save_config({ file_storage_path: p });
-  toast(r.ok ? "微信接收目录已保存并热生效 ✓" : "保存失败", r.ok ? "ok" : "err");
-});
+  if (!r.ok) toast("保存失败", "err");
+  else toast("微信接收目录已保存并热生效 ✓", "ok");
+  return r;
+}
 $("#btnPickPrompt").addEventListener("click", async () => {
   const r = await API.pick_file("选择首轮提示词文件",
     ["文本文件 (*.txt;*.md)", "所有文件 (*.*)"]);
@@ -1692,16 +1752,18 @@ $("#cbWebSearch").addEventListener("change", async (e) => {
   toast(r.ok ? (e.target.checked ? "联网搜索已开启" : "联网搜索已关闭") : "保存失败",
     r.ok ? "ok" : "err");
 });
-$("#btnSaveProxy").addEventListener("click", async () => {
+async function saveProxy() {
   const r = await API.save_config({ web_proxy: $("#edWebProxy").value.trim() });
-  toast(r.ok ? "代理已保存并即时生效 ✓" : "保存失败", r.ok ? "ok" : "err");
-});
-$("#btnSaveNickname").addEventListener("click", async () => {
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
+async function saveNickname() {
   const r = await API.set_nickname($("#edNickname").value);
-  if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
+  if (!r.ok) { toast(r.error || "保存失败", "err"); return r; }
   $("#edNickname").value = r.nickname;
   toast(`微信名称已改为「${r.nickname}」，立即生效 ✓（群里 @ 它就能找到小漓）`, "ok");
-});
+  return r;
+}
 $("#cbStateWatch").addEventListener("change", async (e) => {
   const r = await API.save_config({ state_watch_enabled: e.target.checked });
   toast(r.ok ? (e.target.checked ? "状态监视已开启" : "状态监视已关闭") : "保存失败",
@@ -1735,7 +1797,7 @@ $("#mediaWaitSeg").addEventListener("click", (e) => {
   if (!btn) return;
   [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
 });
-$("#btnMediaWaitSave").addEventListener("click", async () => {
+async function saveMediaWait() {
   const num = (id, dft) => {
     const v = parseFloat($(id).value);
     return Number.isFinite(v) && v > 0 ? v : dft;
@@ -1745,36 +1807,129 @@ $("#btnMediaWaitSave").addEventListener("click", async () => {
     media_wait_seconds: num("#spMediaWaitSec", 10),
     media_wait_quiet_seconds: num("#spMediaQuietSec", 5),
   });
-  toast(r.ok ? "媒体等待设置已保存（热生效）" : "保存失败", r.ok ? "ok" : "err");
-});
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
 /* ---- 每日消费预算 ---- */
-$("#btnBudgetSave").addEventListener("click", async () => {
+async function saveBudget() {
   const enabled = $("#cbBudget").checked;
   const v = parseFloat($("#edBudgetLimit").value);
   const limit = Number.isFinite(v) && v > 0 ? v : 10;
   const r = await API.save_config({ daily_cost_limit_enabled: enabled,
                                     daily_cost_limit: limit });
-  toast(r.ok ? (enabled ? `每日预算已设为 ¥${limit}（估算口径，达到即停一天）` : "每日预算已关闭")
-    : "保存失败", r.ok ? "ok" : "err");
+  if (!r.ok) toast("保存失败", "err");
   if (r.ok) loadUsage();
-});
+  return r;
+}
 /* ---- 主动追尾 ---- */
-$("#btnFollowupSave").addEventListener("click", async () => {
+async function saveFollowup() {
   const num = (id, dft) => {
     const v = parseFloat($(id).value);
     return Number.isFinite(v) && v >= 0 ? v : dft;
   };
-  const enabled = $("#cbFollowup").checked;
   const r = await API.save_config({
-    followup_enabled: enabled,
+    followup_enabled: $("#cbFollowup").checked,
     followup_delay_min: num("#spFuDelayMin", 45),
     followup_delay_max: num("#spFuDelayMax", 90),
     followup_cooldown_minutes: num("#spFuCooldown", 120),
     followup_daily_max: Math.round(num("#spFuDaily", 10)),
     followup_private_only: $("#cbFuPrivate").checked,
   });
-  toast(r.ok ? (enabled ? "主动追尾已开启（热生效）" : "主动追尾已关闭") : "保存失败",
-    r.ok ? "ok" : "err");
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
+/* ---- 群聊接收模式（mention / auto / hybrid） ---- */
+$("#groupModeSeg").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-v]");
+  if (!b) return;
+  $$("#groupModeSeg button").forEach((x) =>
+    x.classList.toggle("active", x === b));
+});
+async function saveGroupMode() {
+  const mode = $("#groupModeSeg button.active")?.dataset.v || "mention";
+  const r = await API.save_config({ group_reply_mode: mode });
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
+/* ---- 主动发起对话（默认关，不限发送条数） ---- */
+async function saveProactive() {
+  const num = (id, dft) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) && v >= 0 ? v : dft;
+  };
+  let lo = Math.max(1, Math.round(num("#spProMin", 10)));
+  let hi = Math.max(1, Math.round(num("#spProMax", 20)));
+  if (hi < lo) {
+    [lo, hi] = [hi, lo];
+    $("#spProMin").value = lo;
+    $("#spProMax").value = hi;
+  }
+  const r = await API.save_config({
+    proactive_enabled: $("#cbProactive").checked,
+    proactive_interval_min: lo,
+    proactive_interval_max: hi,
+    proactive_idle_minutes: Math.round(num("#spProIdle", 10)),
+    proactive_cooldown_minutes: Math.round(num("#spProCooldown", 30)),
+    proactive_active_days: Math.max(1, Math.round(num("#spProDays", 7))),
+    proactive_private_only: $("#cbProPrivate").checked,
+    proactive_quiet_enabled: $("#cbProQuiet").checked,
+    proactive_quiet_start: $("#spProQuietStart").value || "23:00",
+    proactive_quiet_end: $("#spProQuietEnd").value || "08:00",
+  });
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
+/* ---- 图片与文件发送（默认关；画图接口化，端点留空 = 无画图能力） ---- */
+async function saveMediaSend() {
+  const r = await API.save_config({
+    media_send_enabled: $("#cbMediaSend").checked,
+    image_gen_endpoint: $("#spImageGenEndpoint").value.trim(),
+    image_gen_model: $("#spImageGenModel").value.trim(),
+    image_gen_api_key: $("#spImageGenKey").value.trim(),
+  });
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
+/* ---- 远程面板（默认关；开关改动即保存，端口用保存按钮） ---- */
+async function applyRemotePanel() {
+  let enabled = $("#cbRemoteEnabled").checked;
+  let lan = $("#cbRemoteLan").checked;
+  // 两个开关联动，避免「服务关着但局域网开放亮着」这种自相矛盾的界面：
+  // 局域网红必须服务在跑，服务关掉则局域网开放一并关。
+  if (lan && !enabled) { enabled = true; $("#cbRemoteEnabled").checked = true; }
+  if (!enabled) { lan = false; $("#cbRemoteLan").checked = false; }
+  const port = Math.min(65535, Math.max(
+    1024, Math.round(parseFloat($("#spRemotePort").value) || 8765)));
+  $("#spRemotePort").value = port;
+  const r = await API.save_config({
+    remote_enabled: enabled, remote_lan: lan, remote_port: port,
+  });
+  if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
+  const info = await API.remote_info();
+  if (info.ok) $("#spRemoteUrl").value = info.url || "";
+  toast(enabled
+    ? (lan ? "远程面板已开启（局域网可访问）"
+           : "远程面板已开启（仅本机；手机访问请开「局域网开放」）")
+    : "远程面板已关闭", "ok");
+}
+$("#cbRemoteEnabled").addEventListener("change", applyRemotePanel);
+$("#cbRemoteLan").addEventListener("change", applyRemotePanel);
+$("#btnRemoteResetToken").addEventListener("click", async () => {
+  const r = await withBusy($("#btnRemoteResetToken"),
+    () => API.remote_reset_token());
+  if (!r.ok) { toast(r.error || "重置失败", "err"); return; }
+  $("#spRemoteUrl").value = r.url || "";
+  toast("令牌已重置，旧链接立即失效", "ok");
+});
+$("#btnRemoteCopy").addEventListener("click", async () => {
+  const url = $("#spRemoteUrl").value;
+  if (!url) { toast("还没生成访问地址：先打开上面的开关", "err"); return; }
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("链接已复制，在手机浏览器打开即可", "ok");
+  } catch (e) {
+    toast("复制失败（框内手动选择复制）", "err");
+  }
 });
 /* ---- 模型管理触发器（三态，点击即存） ---- */
 $("#trigManageSeg").addEventListener("click", async (e) => {
@@ -1908,7 +2063,7 @@ $("#cbSegWait").addEventListener("change", (e) => {
 $("#cbSegJitter").addEventListener("change", (e) => {
   if (e.target.checked) $("#cbSegWait").checked = false;
 });
-$("#btnSavePace").addEventListener("click", async () => {
+async function savePace() {
   const jitter = $("#cbSegJitter").checked;
   const num = (id, dft) => {
     const v = parseFloat($(id).value);
@@ -1921,8 +2076,9 @@ $("#btnSavePace").addEventListener("click", async () => {
     segment_jitter_min: num("#spSegJitterMin", 1.5),
     segment_jitter_max: num("#spSegJitterMax", 3),
   });
-  toast(r.ok ? "回复节奏已保存（热生效）" : "保存失败", r.ok ? "ok" : "err");
-});
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
 /* ---- 语音 ---- */
 $("#voiceSeg").addEventListener("click", (e) => {
   const btn = e.target.closest("button");
@@ -1976,6 +2132,7 @@ function renderVoiceRefs(profile) {
     if (!fixed) tr.querySelector(".row-del").addEventListener("click", () => {
       delete profile.refs[emo];
       renderVoiceRefs(profile);
+      saveVoice();
     });
     tb.appendChild(tr);
   }
@@ -1992,6 +2149,7 @@ $("#btnVoiceNew").addEventListener("click", () => {
   v.voice_profiles.push({ id, name: "新档案", refs: { "通用": { ref_audio_path: "", prompt_text: "" } } });
   v.active_edit_id = id;
   renderVoiceProfiles();
+  saveVoice();
 });
 $("#btnVoiceDel").addEventListener("click", async () => {
   const v = S.voice;
@@ -2001,6 +2159,7 @@ $("#btnVoiceDel").addEventListener("click", async () => {
   v.voice_profiles = v.voice_profiles.filter((p) => p.id !== cur.id);
   if (v.active_voice_profile_id === cur.id) v.active_voice_profile_id = "";
   renderVoiceProfiles();
+  saveVoice();
 });
 $("#cbVoiceActive").addEventListener("change", (e) => {
   const cur = curVoiceProfile();
@@ -2014,8 +2173,9 @@ $("#btnVoiceRefAdd").addEventListener("click", () => {
   while (cur.refs[name]) name = "开心" + (++n);
   cur.refs[name] = { ref_audio_path: "", prompt_text: "" };
   renderVoiceRefs(cur);
+  saveVoice();
 });
-$("#btnVoiceSave").addEventListener("click", async () => {
+async function saveVoice() {
   const v = S.voice;
   const cur = curVoiceProfile();
   if (cur) {
@@ -2050,10 +2210,17 @@ $("#btnVoiceSave").addEventListener("click", async () => {
     voice_profiles: v.voice_profiles || [],
     active_voice_profile_id: v.active_voice_profile_id || "",
   });
-  toast(r.ok ? "语音设置已保存并热生效 ✓" : "保存失败：" + (r.error || ""),
-    r.ok ? "ok" : "err");
-  if (r.ok) renderVoiceProfiles();
-});
+  if (!r.ok) toast("保存失败：" + (r.error || ""), "err");
+  if (r.ok && cur) {
+    // 只更新下拉里的档案名，不整表重渲染——自动保存是失焦触发的，
+    // renderVoiceProfiles 会重建 refs 表格，把用户刚 Tab 进去的输入框
+    // 一起销毁（焦点丢失）。
+    const opt = Array.from($("#cbVoiceProfile").options)
+      .find((o) => o.value === cur.id);
+    if (opt) opt.textContent = cur.name || "未命名档案";
+  }
+  return r;
+}
 /* ---- 按聊天覆盖 ---- */
 async function reloadOvrChats() {
   const sel = $("#cbOvrChat");
@@ -2075,7 +2242,7 @@ function fillOvr() {
 }
 $("#cbOvrChat").addEventListener("change", fillOvr);
 $("#btnOvrRefresh").addEventListener("click", reloadOvrChats);
-$("#btnOvrSave").addEventListener("click", async () => {
+async function saveOverride() {
   const chat = $("#cbOvrChat").value;
   if (!chat) { toast("还没有会话可配置", "err"); return; }
   const patch = {};
@@ -2086,8 +2253,9 @@ $("#btnOvrSave").addEventListener("click", async () => {
   if (Object.keys(patch).length) S.overrides[chat] = patch;
   else delete S.overrides[chat];
   const r = await API.save_config({ chat_feature_overrides: S.overrides });
-  toast(r.ok ? `「${chat}」的功能覆盖已保存并热生效 ✓` : "保存失败", r.ok ? "ok" : "err");
-});
+  if (!r.ok) toast("保存失败", "err");
+  return r;
+}
 $("#btnOvrClear").addEventListener("click", async () => {
   const chat = $("#cbOvrChat").value;
   if (!chat) return;
@@ -2097,6 +2265,81 @@ $("#btnOvrClear").addEventListener("click", async () => {
   if (r.ok) { fillOvr(); toast(`已清除「${chat}」的全部例外（恢复跟随全局）`, "ok"); }
   else toast("保存失败", "err");
 });
+
+/* ============================================================
+   设置页自动保存：保存按钮已移除，字段改动即落盘
+   ============================================================ */
+let _autoSaveToastAt = 0;
+function autoSaveToast() {
+  // 连续改多个字段时只提示一次，避免刷屏
+  const now = Date.now();
+  if (now - _autoSaveToastAt < 2000) return;
+  _autoSaveToastAt = now;
+  toast("已自动保存", "ok");
+}
+function bindAutoSave(rootSel, fn, evt = "change",
+                      childSel = "input, select, textarea") {
+  const root = $(rootSel);
+  if (!root) return;
+  let timer = null;
+  root.addEventListener(evt, (e) => {
+    const hit = evt === "click" ? e.target.closest(childSel)
+                                : e.target.matches(childSel);
+    if (!hit) return;
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      try {
+        const r = await fn();
+        if (r && r.ok) autoSaveToast();
+      } catch (err) {
+        toast("自动保存失败：" + (err?.message || err), "err");
+      }
+    }, 250);
+  });
+}
+bindAutoSave("#sec-memory", saveLongMemory);
+bindAutoSave("#edNickname", saveNickname);
+bindAutoSave("#edWebProxy", saveProxy);
+bindAutoSave("#voiceSeg", saveVoice, "click", "button");
+bindAutoSave("#edVoiceEndpoint", saveVoice);
+bindAutoSave("#spVoiceTimeout", saveVoice);
+bindAutoSave("#spVoiceMax", saveVoice);
+bindAutoSave("#edVoiceName", saveVoice);
+bindAutoSave("#voiceRefsTbody", saveVoice);
+bindAutoSave("#cbVoiceActive", saveVoice);
+bindAutoSave("#ovrCombos", saveOverride, "change", "select");
+bindAutoSave("#mediaWaitSeg", saveMediaWait, "click", "button");
+bindAutoSave("#spMediaWaitSec", saveMediaWait);
+bindAutoSave("#spMediaQuietSec", saveMediaWait);
+bindAutoSave("#cbBudget", saveBudget);
+bindAutoSave("#edBudgetLimit", saveBudget);
+bindAutoSave("#cbFollowup", saveFollowup);
+bindAutoSave("#spFuDelayMin", saveFollowup);
+bindAutoSave("#spFuDelayMax", saveFollowup);
+bindAutoSave("#spFuCooldown", saveFollowup);
+bindAutoSave("#spFuDaily", saveFollowup);
+bindAutoSave("#cbFuPrivate", saveFollowup);
+bindAutoSave("#groupModeSeg", saveGroupMode, "click", "button");
+bindAutoSave("#cbProactive", saveProactive);
+bindAutoSave("#spProMin", saveProactive);
+bindAutoSave("#spProMax", saveProactive);
+bindAutoSave("#spProIdle", saveProactive);
+bindAutoSave("#spProCooldown", saveProactive);
+bindAutoSave("#spProDays", saveProactive);
+bindAutoSave("#cbProPrivate", saveProactive);
+bindAutoSave("#cbProQuiet", saveProactive);
+bindAutoSave("#spProQuietStart", saveProactive);
+bindAutoSave("#spProQuietEnd", saveProactive);
+bindAutoSave("#cbSegWait", savePace);
+bindAutoSave("#spSegWait", savePace);
+bindAutoSave("#cbSegJitter", savePace);
+bindAutoSave("#spSegJitterMin", savePace);
+bindAutoSave("#spSegJitterMax", savePace);
+bindAutoSave("#cbMediaSend", saveMediaSend);
+bindAutoSave("#spImageGenEndpoint", saveMediaSend);
+bindAutoSave("#spImageGenModel", saveMediaSend);
+bindAutoSave("#spImageGenKey", saveMediaSend);
+bindAutoSave("#spRemotePort", applyRemotePanel);
 
 /* ============================================================
    首启引导（工作目录 + 微信名称，一步完成）

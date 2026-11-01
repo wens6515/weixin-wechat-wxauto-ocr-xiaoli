@@ -5,6 +5,7 @@
 - ReminderScheduler  定时触发器扫描：到期条目推入队列
 - ConditionWatcher   状态监视轮询：抓固定网页 → 本地关键词/api 判定 → 事件入队
 - MemoryCompressor   长记忆压缩：深层记忆攒批 → 提炼重要记忆 / 关键词索引
+- ProactiveScheduler 主动发起：按每会话随机区间算到期 → 只投队列（判定/发送在主循环）
 
 从 xiaoli_bot.py 拆出（纯移动，零逻辑改动）；xiaoli_bot 显式 re-import。
 """
@@ -12,11 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import threading
 import time
 
-from wechat_bot import VISION_MODEL_DEFAULT
+from wechat_bot import VISION_MODEL_DEFAULT, is_group_chat
 from xiaoli_app.web_search import web_fetch
 
 logger = logging.getLogger("xiaoli")
@@ -409,3 +411,162 @@ class MemoryCompressor(threading.Thread):
         bot.memory_commit_compression(chat, consumed, important, index)
         logger.info(f"[记忆压缩] {chat} 已压缩 {consumed - indexed} 条"
                     f"（重要 +{len(important)}，索引 +{len(index)}）")
+
+
+class ProactiveScheduler(threading.Thread):
+    """主动发起对话的到期扫描线程（只算时间、只投队列）。
+
+    纪律与其余 daemon 一致：**不调模型、不碰微信窗口**。到期项入队后由
+    主循环 `_drain_proactive` 做判定调用与发送——判定这次调用声明全套正常
+    工具，send_sticker/send_voice 等会直接操作微信窗口，绝不能在本线程执行。
+
+    节奏：每个候选会话在 [proactive_interval_min, proactive_interval_max]
+    分钟里随机取一个时间点（用户定案：10~20 分钟随机）。到期后主循环按
+    idle/cooldown/安静时段/最后一条是否已回复等护栏再判一次。
+
+    候选：记忆里出现过的会话；private_only 时排除群聊；只保留最近
+    proactive_active_days 天内有消息的会话。首次到期时间 = 启动后一个
+    随机区间（启动不立刻打扰）。发送上限不做——用户定案：不限。
+    """
+
+    def __init__(self, bot, stop_event=None, scan_seconds=30.0):
+        super().__init__(name="xiaoli-proactive", daemon=True)
+        self.bot = bot
+        self._stop_evt = stop_event if stop_event is not None else threading.Event()
+        self._scan_seconds = scan_seconds
+        self._lock = threading.Lock()
+        self._next_due = {}
+        self._last_sent = {}
+
+    # ---------- 对外 ----------
+
+    def mark_sent(self, chat):
+        """主循环确认「这次主动消息真的发出去了」后调用（冷却 + 下一轮）。"""
+        now = time.time()
+        with self._lock:
+            self._last_sent[chat] = now
+            self._next_due[chat] = now + self._interval_seconds()
+
+    def next_due(self, chat):
+        with self._lock:
+            return self._next_due.get(chat)
+
+    # ---------- 内部 ----------
+
+    def _interval_seconds(self):
+        lo = max(1.0, float(getattr(self.bot, "proactive_interval_min", 10)))
+        hi = max(lo, float(getattr(self.bot, "proactive_interval_max", 20)))
+        return random.uniform(lo, hi) * 60.0
+
+    @staticmethod
+    def _parse_hm(text):
+        try:
+            h, m = str(text or "").strip().split(":", 1)
+            h, m = int(h), int(m)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h * 60 + m
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    def _quiet_now(self, now=None):
+        """安静时段：默认关；开时支持跨午夜（23:00~08:00）。"""
+        if not getattr(self.bot, "proactive_quiet_enabled", False):
+            return False
+        start = self._parse_hm(getattr(self.bot, "proactive_quiet_start", "23:00"))
+        end = self._parse_hm(getattr(self.bot, "proactive_quiet_end", "08:00"))
+        if start is None or end is None or start == end:
+            return False
+        t = time.localtime(time.time() if now is None else now)
+        cur = t.tm_hour * 60 + t.tm_min
+        if start < end:
+            return start <= cur < end
+        return cur >= start or cur < end
+
+    def _candidates(self, now):
+        """候选会话：记忆里出现过、最近 active_days 天有消息、按需排除群聊。"""
+        bot = self.bot
+        try:
+            mem = bot._mem
+            with mem.lock:
+                chats = list(mem.memory_db.keys())
+        except Exception:
+            return []
+        days = max(1, int(getattr(bot, "proactive_active_days", 7)))
+        private_only = bool(getattr(bot, "proactive_private_only", True))
+        out = []
+        for chat in chats:
+            if private_only:
+                is_group = bot._chat_is_group.get(chat)
+                if is_group is None:
+                    is_group = is_group_chat(chat)
+                if is_group:
+                    continue
+            try:
+                hist = bot._get_history(chat)
+            except Exception:
+                continue
+            if not hist:
+                continue
+            last_ts = bot._chat_msg_time(hist[-1])
+            if not last_ts or now - last_ts > days * 86400:
+                continue
+            out.append((last_ts, chat))
+        # 最近聊过的优先（更容易接得上话）
+        out.sort(key=lambda x: x[0], reverse=True)
+        return [c for _ts, c in out]
+
+    def _scan_once(self, now):
+        bot = self.bot
+        idle_need = max(0.0, float(getattr(bot, "proactive_idle_minutes", 10))) * 60
+        cooldown = max(0.0, float(
+            getattr(bot, "proactive_cooldown_minutes", 30))) * 60
+        for chat in self._candidates(now):
+            with self._lock:
+                due = self._next_due.get(chat)
+                last_sent = self._last_sent.get(chat, 0.0)
+            if due is None:
+                # 启动宽限：第一次到期 = 现在 + 一个随机区间
+                with self._lock:
+                    self._next_due[chat] = now + self._interval_seconds()
+                continue
+            if now < due:
+                continue
+            # 先排下一次，防本轮异常导致每 30s 重试一次
+            with self._lock:
+                self._next_due[chat] = now + self._interval_seconds()
+            if cooldown and last_sent and now - last_sent < cooldown:
+                continue
+            try:
+                hist = bot._get_history(chat)
+            except Exception:
+                continue
+            if not hist:
+                continue
+            last = hist[-1]
+            last_ts = bot._chat_msg_time(last)
+            if not last_ts:
+                continue
+            if last.get("role") == "user":
+                # 上一条还没回：先走正常回复，不在旧消息上主动搭话
+                continue
+            if now - last_ts < idle_need:
+                continue
+            try:
+                bot._proactive_queue.put_nowait({"chat": chat, "due_at": now})
+            except Exception:
+                logger.debug(f"[主动] 队列已满，跳过 {chat!r}")
+            # 每轮最多入队一个：主循环一次只做一次判定调用（会阻塞几秒），
+            # 多会话同时到期也不该在同一轮里堆一长串请求
+            return
+
+    def run(self):
+        while not self._stop_evt.is_set():
+            try:
+                if getattr(self.bot, "proactive_enabled", False) \
+                        and not self.bot.paused \
+                        and not self._quiet_now():
+                    self._scan_once(time.time())
+            except Exception as e:
+                logger.error(f"[主动] 扫描异常: {e}")
+            self._stop_evt.wait(self._scan_seconds)

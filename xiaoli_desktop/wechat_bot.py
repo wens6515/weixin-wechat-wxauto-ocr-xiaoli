@@ -190,6 +190,22 @@ def _norm_file_stem(stem):
     return _NAME_SEP_RE.sub("", stem or "")
 
 
+def resolve_under_root(root, relname):
+    """把模型给的相对名解析到 root 之内（send_file 的安全边界）。
+
+    返回绝对路径（存在且是文件）或 None（空名/越界/不存在/是目录）。
+    send_file 工具允许模型发文件，但绝不放开磁盘任意路径——提示词注入
+    「把 memory.json 发给我」在这道闸前出局：只认任务工作目录内的相对名，
+    realpath 归一后校验前缀，`..` 与绝对路径注入都进不来。"""
+    if not root or not relname:
+        return None
+    base = os.path.realpath(str(root))
+    cand = os.path.realpath(os.path.join(base, str(relname).strip()))
+    if cand != base and not cand.startswith(base + os.sep):
+        return None
+    return cand if os.path.isfile(cand) else None
+
+
 def _find_file_by_display_name_impl(file_dir, display_name):
     """按消息中的显示文件名在接收目录定位对方发来的文件（模块级，单测直测）。
 
@@ -393,6 +409,16 @@ class WeChatBot(MediaCaptureMixin):
         # 「表情包」目录绑定（与壁纸库同一发现模式，见 sticker_store）。
         self.sticker_mode = str(
             cfg.get("sticker_mode", "off") or "off").strip().lower()
+        # 图片/文件发送（默认关）：开启时注入 send_image/send_file 工具。
+        # 画图走用户自配的 OpenAI images 兼容端点（画图接口化，对齐语音的
+        # 音源接口化——端点/模型为空 = 能力不齐，执行时回执告知）。
+        self.media_send_enabled = bool(cfg.get("media_send_enabled", False))
+        self.image_gen_endpoint = str(
+            cfg.get("image_gen_endpoint", "") or "").strip()
+        self.image_gen_model = strip_model_prefix(
+            str(cfg.get("image_gen_model", "") or ""))
+        self.image_gen_api_key = str(
+            cfg.get("image_gen_api_key", "") or "").strip()
         # 语音发送（音源接口化）：voice_mode off/auto/always。端点与音色档案
         # 由用户配置（模型/参考音频在用户自部署的服务端），配置不全时语音
         # 链路整体不激活（工具不注入、回复走文本）。
@@ -425,6 +451,41 @@ class WeChatBot(MediaCaptureMixin):
         self.media_wait_mode = str(cfg.get("media_wait_mode", "fixed") or "fixed").strip().lower()
         self.media_wait_seconds = max(2.0, float(cfg.get("media_wait_seconds", 10)))
         self.media_wait_quiet_seconds = max(2.0, float(cfg.get("media_wait_quiet_seconds", 5)))
+        # 群聊回复模式（三态）：
+        # - mention：仅 @ 才读（历史行为，默认）
+        # - auto：全接收，模型自主决定发不发——要发必须调用 send_message 等
+        #   发送类工具，直接输出的文本一律丢弃（用户定案）
+        # - hybrid：全接收，但本批消息里有 @ 时文本直接发（@ 必回），没有 @
+        #   时与 auto 相同（必须走工具）
+        # 全接收的逐条入史/游标判重/媒体占位见 AgentBot._handle_group_batch。
+        self.group_reply_mode = str(
+            cfg.get("group_reply_mode", "mention") or "mention").strip().lower()
+        if self.group_reply_mode not in ("mention", "auto", "hybrid"):
+            self.group_reply_mode = "mention"
+        # 主动发起对话（默认关）：每会话在 [min,max] 分钟随机取时间点做一次
+        # 判定调用，末尾注入「距上次聊天 X」system（不写记忆），模型调
+        # no_reply 表示不发，否则按正常回复发出。调度线程只算时间，判定与
+        # 发送都在主循环（工具会碰微信窗口，daemon 线程绝不能执行）。
+        self.proactive_enabled = bool(cfg.get("proactive_enabled", False))
+        self.proactive_interval_min = max(
+            1.0, float(cfg.get("proactive_interval_min", 10)))
+        self.proactive_interval_max = max(
+            self.proactive_interval_min,
+            float(cfg.get("proactive_interval_max", 20)))
+        self.proactive_idle_minutes = max(
+            0.0, float(cfg.get("proactive_idle_minutes", 10)))
+        self.proactive_cooldown_minutes = max(
+            0.0, float(cfg.get("proactive_cooldown_minutes", 30)))
+        self.proactive_private_only = bool(
+            cfg.get("proactive_private_only", True))
+        self.proactive_active_days = max(
+            1, int(cfg.get("proactive_active_days", 7)))
+        self.proactive_quiet_enabled = bool(
+            cfg.get("proactive_quiet_enabled", False))
+        self.proactive_quiet_start = str(
+            cfg.get("proactive_quiet_start", "23:00") or "23:00")
+        self.proactive_quiet_end = str(
+            cfg.get("proactive_quiet_end", "08:00") or "08:00")
         # 主动追尾（默认关，全部参数可设）：回复发出后随机延迟一次小评估
         # 调用，模型决定补不补一句；调度/护栏见 AgentBot._followup_*。
         self.followup_enabled = bool(cfg.get("followup_enabled", False))
@@ -809,6 +870,34 @@ class WeChatBot(MediaCaptureMixin):
         logger.info(f"[表情包] 已发送给 {chat_id!r}: {fname}")
         return True, f"表情包已发出：{fname}"
 
+    def _exec_send_message(self, chat_id, raw_args):
+        """send_message 工具执行（群聊全接收模式）：把模型要发的话真的发出去。
+
+        这是「工具发送闸」的落地点：全接收模式下模型直接输出的文本会被
+        丢弃，只有调用本工具（或表情包/语音/图片/文件等发送类工具）才会
+        产生微信消息。发送走 _send_parts（与普通回复同一套拆分/段间节奏），
+        不碰占位计数——占位是任务投递的语义。
+        返回 (ok, tool 回执文本)。
+        """
+        try:
+            args = json.loads(raw_args or "{}")
+        except (ValueError, TypeError):
+            return False, "send_message 参数解析失败"
+        if not isinstance(args, dict):
+            return False, "send_message 参数解析失败"
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return False, "send_message 缺少 text（要发送的消息原文）"
+        try:
+            n = self._send_parts(chat_id, text)
+        except Exception as e:
+            logger.error(f"[群聊发送] {chat_id!r} 失败: {e}")
+            return False, f"发送失败：{e}"
+        if not n:
+            return False, "send_message 内容为空，没有发送"
+        logger.info(f"[群聊发送] 已发送给 {chat_id!r}: {text[:40]}")
+        return True, f"已发送（{n} 段）"
+
     def _describe_sticker(self, image_path):
         """单张表情包视觉打标（设置页全库优化 / 日后懒补共用）。失败抛异常
         由调用方决定。"""
@@ -1167,7 +1256,7 @@ class WeChatBot(MediaCaptureMixin):
                            wall_budget=float(getattr(
                                self, "api_wall_budget", API_WALL_BUDGET_DEFAULT)))
 
-    def _vision_tools(self, chat_id):
+    def _vision_tools(self, chat_id, tool_only=False, force_no_reply=False):
         """call_vision_api 的工具声明集（单一事实源）：每个工具按自己的
         开关单独注入，互不连带——
         - dispatch_task ← 任务桥开关（全局 + per-chat 覆盖）
@@ -1176,8 +1265,14 @@ class WeChatBot(MediaCaptureMixin):
           状态监视开关只在创建时拦 kind=condition，见 _create_condition_watch）
         - web_search / web_fetch ← 联网搜索开关
         - recall_memory ← 深层记忆开关
+        - send_message ← tool_only（群聊全接收模式，且本批没有 @ 强制回复）
+        - no_reply ← no_reply_enabled，或 force_no_reply（主动发起的判定调用）
         _vision_route 选提示词变体时复用本方法——同一套条件，防两处漂移；
         返回空列表时调用方 payload 不带 tools/tool_choice 键。
+
+        tool_only=True：本批消息没有 @，模型要说的话必须经 send_message 发
+        出；同时不声明 no_reply——「什么都不做」本来就是默认，再给一个
+        「不回复」工具只会诱导模型多调一次工具。
         """
         tools = []
         # 任务投递工具：按聊天有效开关声明（全局关 + 单聊强制开 = 该聊天
@@ -1201,7 +1296,8 @@ class WeChatBot(MediaCaptureMixin):
         # 不回复。执行分支在 AgentBot._handle_no_reply（清红圈/记忆/占位）。
         # 描述刻意收窄适用面并要求「犹豫时宁可回复」——该工具滥用表现为
         # 漏回消息，比偶尔复读严重。
-        if getattr(self, "no_reply_enabled", False):
+        if (getattr(self, "no_reply_enabled", False) and not tool_only) \
+                or force_no_reply:
             tools.append({
                 "type": "function",
                 "function": {
@@ -1225,12 +1321,43 @@ class WeChatBot(MediaCaptureMixin):
                                    "required": []},
                 },
             })
+        # 群聊全接收模式（tool_only）的正式发言通道：模型调用它才会真正
+        # 发出微信消息。工具循环内执行（_exec_send_message），回填回执后
+        # 模型可以继续调用（表情包/图片）或直接结束；直接输出的文本由上层
+        # 丢弃——「不调工具 = 不发」是全接收模式的硬语义。
+        # always 语音且 TTS 实际可用时不声明：那条纪律要求所有回复走
+        # send_voice（它本身就是工具）；配置不齐时语音链路会回退文本，
+        # 此时保留 send_message 作为唯一可行通道，免得一个字都发不出去。
+        _voice_ready_profile = self._voice_profile_ready()
+        _voice_always = (_voice_ready_profile is not None
+                         and self.voice_state(chat_id) == "always")
+        if tool_only and not _voice_always:
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "send_message",
+                    "description": "在当前群聊里发一条文字消息。这是本模式下"
+                                   "唯一能把文字发出去的通道：调用它才会真正"
+                                   "发送，直接输出文字不会被发送。想接话就调用"
+                                   "（通常一条，最多两条；多条请分多次调用）；"
+                                   "不想接话就什么都不要调用、不要输出。",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string",
+                                     "description": "要发送的消息原文（口语化、"
+                                                    "简短）"},
+                        },
+                        "required": ["text"],
+                    },
+                },
+            })
         # 语音发送工具（voice_mode=auto/always 且配置齐全时注入；模式取
         # 该聊天有效状态）。auto 下工具决定「何时发语音」；always 下工具
         # 是**强制回复通道**——每条回复都必须经它发出（纪律见
         # ALWAYS_VOICE_RULES system 消息），模型借 emotion 挑情绪。
         # off 或配置不全时不注入。
-        voice_profile = self._voice_profile_ready()
+        voice_profile = _voice_ready_profile
         v_state = self.voice_state(chat_id)
         if voice_profile is not None and v_state in ("auto", "always"):
             tools.append(self._send_voice_tool(voice_profile, v_state))
@@ -1442,6 +1569,52 @@ class WeChatBot(MediaCaptureMixin):
                         },
                     },
                 })
+        # 图片/文件发送工具（开关开启时注入，默认关）：send_image 经画图
+        # 端点生成（端点/模型未配置时执行回执告知，模型自然转告用户）；
+        # send_file 只发任务工作目录内的文件（resolve_under_root 把守，
+        # 提示词注入拿不到磁盘任意路径）。执行都在工具循环内（_exec_send_*，
+        # 回执交模型自然续写——可只发图不说话，也可图/文件+文字一起回）。
+        if getattr(self, "media_send_enabled", False):
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "send_image",
+                    "description": "生成一张图片并发送给对方（适合对方想看图、"
+                                   "画个示意图、创作表情等场景）。prompt 用一句"
+                                   "具体的画面描述（主体/动作/风格说清楚）",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string",
+                                       "description": "画面描述，一句话"},
+                            "size": {"type": "string",
+                                     "description": "画幅，如 1024x1024（默认）"
+                                                    "或 1280x720，按端点支持的填"},
+                        },
+                        "required": ["prompt"],
+                    },
+                },
+            })
+            tools.append({
+                "type": "function",
+                "function": {
+                    "name": "send_file",
+                    "description": "把任务工作目录里的一个文件原样发送给对方"
+                                   "（任务完成后补发成果、或重发某份文件时用）。"
+                                   "file 填工作目录内的相对路径或文件名——"
+                                   "目录之外的文件发不了",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file": {"type": "string",
+                                     "description": "工作目录内的相对路径"
+                                                    "（如 报告.docx 或 "
+                                                    "attachments/xxx.pdf）"},
+                        },
+                        "required": ["file"],
+                    },
+                },
+            })
         # 联网搜索工具（零配置：百度/必应/搜狗并发合并，见 xiaoli_app/web_search）。
         # 有效开关按聊天取（feature_enabled：per-chat 覆盖优先）——关闭时
         # 整体不声明，模型看不到就不会调用。query 描述写明真机校准的措辞
@@ -1560,7 +1733,9 @@ class WeChatBot(MediaCaptureMixin):
             })
         return tools
 
-    def call_vision_api(self, content, chat_id=None, related_memory=None):
+    def call_vision_api(self, content, chat_id=None, related_memory=None,
+                        tool_only=False, force_no_reply=False,
+                        system_tail=None, collect_actions=False):
         """单调用视觉识别（OpenAI 兼容 / chat.completions）。
 
         content：块列表 list[dict]，格式
@@ -1585,8 +1760,18 @@ class WeChatBot(MediaCaptureMixin):
 
         payload 的工具集由 _vision_tools 按开关逐项声明（dispatch_task /
         send_voice / set_reminder / web_search / web_fetch / recall_memory /
-        no_reply / save_global_memory 等；tool_choice=auto；集合为空时
-        payload 不带 tools/tool_choice 键）。
+        no_reply / send_message / save_global_memory 等；tool_choice=auto；
+        集合为空时 payload 不带 tools/tool_choice 键）。
+
+        tool_only/force_no_reply/system_tail（群聊全接收与主动发起）：
+        - tool_only=True：声明 send_message 作为唯一文字发送通道，不声明
+          no_reply（默认沉默）；返回结果带 actions/sent_any，上层据此判断
+          模型是否真的发过东西。
+        - force_no_reply=True：本次调用强制声明 no_reply（主动发起的判定，
+          即使全局 no_reply 开关关闭）。
+        - system_tail：在上下文末尾追加一条 system（主动发起的「距上次聊天
+          X」），只存在于本次调用，不写记忆；content=None 时消息列表以
+          system 结尾，不伪造 user 消息。
         查询/执行型工具（web_search/web_fetch/recall_memory/manage_reminder/
         set_reminder/send_sticker/save_global_memory）在本方法内执行并把结果
         作为 tool 消息回填、继续补全，直到给出最终答复——set_reminder 创建
@@ -1638,9 +1823,12 @@ class WeChatBot(MediaCaptureMixin):
         global_block = self._global_memory_block()
         if global_block:
             messages.append({"role": "system", "content": global_block})
-        _g_related = self._match_global_memory(
-            next((b.get("text") for b in content
-                  if isinstance(b, dict) and b.get("type") == "text"), ""))
+        _g_text = ""
+        if isinstance(content, list):
+            _g_text = next(
+                (b.get("text") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"), "") or ""
+        _g_related = self._match_global_memory(_g_text)
         if _g_related:
             messages.append({"role": "system", "content": _g_related})
         # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
@@ -1675,7 +1863,14 @@ class WeChatBot(MediaCaptureMixin):
         v_state = self.voice_state(chat_id)
         if voice_profile is not None and v_state == "always":
             messages.append({"role": "system", "content": ALWAYS_VOICE_RULES})
-        messages.append({"role": "user", "content": content})
+        # 主动发起判定：尾部 system（距上次聊天 X，可决定是否发消息）——
+        # 只存在于本次调用，绝不写记忆（用户定案：不污染上下文）。
+        if system_tail:
+            messages.append({"role": "system", "content": str(system_tail)})
+        # content=None = 无当前来信（主动发起）：消息列表以 system 结尾，
+        # 不伪造一条假的 user 消息。
+        if content is not None:
+            messages.append({"role": "user", "content": content})
         with self._model_lock:
             # 单模型化：视觉 model 取 chat_model（__init__ 已 strip 前缀），
             # 空则兜底 vision-exp 纯名（防空 model / 带前缀兜底 → API 400）；
@@ -1695,7 +1890,8 @@ class WeChatBot(MediaCaptureMixin):
         # 工具按「每个工具单独注入」语义逐项声明——单一事实源在
         # _vision_tools（任务/语音/闹钟/搜索/记忆检索各看各的开关；
         # _vision_route 选提示词变体时复用同一套条件，防两处漂移）
-        tools = self._vision_tools(chat_id)
+        tools = self._vision_tools(chat_id, tool_only=tool_only,
+                                   force_no_reply=force_no_reply)
         payload = {
             "model": model,
             "messages": messages,
@@ -1710,13 +1906,24 @@ class WeChatBot(MediaCaptureMixin):
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        # 本次调用真正发出去的东西（按发生顺序）：群聊全接收模式据此判定
+        # 「模型到底发没发」并逐条写历史。actions 在 try 之前初始化——异常
+        # 路径也要把它带回上层，否则已发送的消息会被当成失败重发一遍。
+        # sticker_sent/stickers_sent 保留既有语义：纯表情包回复（空文本）
+        # 是预期终态不降级；上层把发过哪些表情包写进历史防连发。
+        actions: list[dict] = []
+        sticker_sent = False
+        stickers_sent: list[str] = []
+
+        def _finish(d):
+            """群聊全接收/主动发起才附带 actions/sent_any（普通私聊返回形态
+            保持不变，既有调用方与测试依赖原字典）。"""
+            if tool_only or force_no_reply or collect_actions:
+                d["actions"] = list(actions)
+                d["sent_any"] = bool(actions)
+            return d
+
         try:
-            # sticker_sent：本次调用里已成功发出过表情包——随后模型不再输出
-            # 文字 = 纯表情包回复（不降级），输出了文字 = 表情包+文字。
-            # stickers_sent 收集文件名：上层把「发过哪些表情包」写进对话
-            # 历史（真机事故：模型连发两次同一张图——它不知道自己发过）。
-            sticker_sent = False
-            stickers_sent: list[str] = []
             for _round in range(VISION_TOOL_ROUNDS):
                 data = self._post_chat_completions(
                     ov.get("ai_api_url") or self.vision_api_url, headers,
@@ -1724,6 +1931,9 @@ class WeChatBot(MediaCaptureMixin):
                     meta={"kind": "vision", "model": model, "messages": messages})
                 choices = data.get("choices", [])
                 if not choices:
+                    if actions:
+                        # 前面轮次已经发过东西：带回动作，绝不降级重发
+                        return _finish({"kind": "text", "content": ""})
                     logger.warning("视觉模型返回无 choices")
                     return None
                 message = choices[0].get("message", {}) or {}
@@ -1732,19 +1942,19 @@ class WeChatBot(MediaCaptureMixin):
                     content = strip_reply_prefix(
                         (message.get("content") or "").strip())
                     if not content:
-                        if sticker_sent:
-                            # 纯表情包回复：图已发出（工具循环内），空文本
-                            # 是预期终态，绝不降级闲聊
-                            return {"kind": "text", "content": "",
-                                    "sticker_sent": True,
-                                    "stickers": stickers_sent}
+                        if sticker_sent or actions:
+                            # 纯动作回复（表情包/全接收模式的 send_message）：
+                            # 已经发出去了，空文本是预期终态，绝不降级闲聊
+                            return _finish({"kind": "text", "content": "",
+                                            "sticker_sent": sticker_sent,
+                                            "stickers": stickers_sent})
                         logger.warning("视觉模型返回空 content")
                         return None
                     if sticker_sent:
-                        return {"kind": "text", "content": content,
-                                "sticker_sent": True,
-                                "stickers": stickers_sent}
-                    return {"kind": "text", "content": content}
+                        return _finish({"kind": "text", "content": content,
+                                        "sticker_sent": True,
+                                        "stickers": stickers_sent})
+                    return _finish({"kind": "text", "content": content})
                 # 任务/语音/静默工具调用优先原样返回（单次语义；发送/投递由
                 # 上层分支处理）；查询型与执行型工具（搜索/抓取/记忆检索/
                 # 触发器管理与创建/表情包/全局记忆写入）回填结果继续循环——
@@ -1756,12 +1966,13 @@ class WeChatBot(MediaCaptureMixin):
                          ("web_search", "web_fetch", "recall_memory",
                           "manage_reminder", "send_sticker",
                           "search_stickers", "set_reminder",
-                          "save_global_memory")]
+                          "save_global_memory", "send_image", "send_file",
+                          "send_message")]
                 if other:
                     fn = other[0].get("function", {}) or {}
-                    return {"kind": "tool_call",
-                            "name": fn.get("name", ""),
-                            "arguments": fn.get("arguments", "")}
+                    return _finish({"kind": "tool_call",
+                                    "name": fn.get("name", ""),
+                                    "arguments": fn.get("arguments", "")})
                 # 回填：assistant(tool_calls) + 每个调用的 tool 结果消息。
                 # 就地 append——payload["messages"] 与本地列表同引用，末轮
                 # 循环耗尽后直接退出（最后一次要求的工具调用不再执行）
@@ -1801,12 +2012,33 @@ class WeChatBot(MediaCaptureMixin):
                         tool_text = self._exec_manage_reminder(chat_id, raw_args)
                         logger.info(
                             f"[触发器管理] {chat_id!r} -> {tool_text[:80]}")
+                    elif name == "send_message":
+                        # 群聊全接收模式的正式发言通道（tool_only 才会声明）。
+                        # 发送在循环内立即发生；成功即记为一次发送动作——
+                        # 上层据此判定「模型发了没有」，并逐条写历史。
+                        raw_args = ((tc or {}).get("function") or {})\
+                            .get("arguments") or "{}"
+                        ok, tool_text = self._exec_send_message(
+                            chat_id, raw_args)
+                        if ok:
+                            try:
+                                _a = json.loads(raw_args or "{}")
+                            except (ValueError, TypeError):
+                                _a = {}
+                            actions.append({
+                                "type": "text",
+                                "content": str((_a or {}).get("text") or ""),
+                            })
+                        logger.info(
+                            f"[群聊发送] {chat_id!r} -> {tool_text[:60]}")
                     elif name == "send_sticker":
                         fname = _tool_arg(tc, "file")
                         ok, tool_text = self._exec_send_sticker(chat_id, fname)
                         if ok:
                             sticker_sent = True
                             stickers_sent.append(str(fname or ""))
+                            actions.append({"type": "sticker",
+                                            "file": str(fname or "")})
                     elif name == "set_reminder":
                         # 创建触发器（执行型）：回执交模型自然确认，固定文案
                         # 已废（用户定案）。实现在 AgentBot._exec_set_reminder。
@@ -1826,6 +2058,33 @@ class WeChatBot(MediaCaptureMixin):
                             _tool_arg(tc, "query"))
                         logger.info(
                             f"[表情包搜索] {tool_text[:60]}")
+                    elif name == "send_image":
+                        raw_args = ((tc or {}).get("function") or {})\
+                            .get("arguments") or "{}"
+                        exec_fn = getattr(self, "_exec_send_image", None)
+                        tool_text = (exec_fn(chat_id, raw_args)
+                                     if exec_fn is not None
+                                     else "发图工具在当前模式不可用")
+                        if str(tool_text).startswith("图片已发送"):
+                            actions.append({"type": "image", "content": ""})
+                        logger.info(f"[发图] {chat_id!r} -> {tool_text[:80]}")
+                    elif name == "send_file":
+                        raw_args = ((tc or {}).get("function") or {})\
+                            .get("arguments") or "{}"
+                        exec_fn = getattr(self, "_exec_send_file", None)
+                        tool_text = (exec_fn(chat_id, raw_args)
+                                     if exec_fn is not None
+                                     else "发文件工具在当前模式不可用")
+                        if str(tool_text).startswith("文件已发送"):
+                            try:
+                                _a = json.loads(raw_args or "{}")
+                            except (ValueError, TypeError):
+                                _a = {}
+                            actions.append({
+                                "type": "file",
+                                "content": str((_a or {}).get("file") or ""),
+                            })
+                        logger.info(f"[发文件] {chat_id!r} -> {tool_text[:80]}")
                     else:  # web_fetch（任务/提醒已在 other 分支返回）
                         url = _tool_arg(tc, "url")
                         if not url:
@@ -1839,10 +2098,18 @@ class WeChatBot(MediaCaptureMixin):
                     messages.append({"role": "tool",
                                      "tool_call_id": tc.get("id") or "",
                                      "content": tool_text})
+            if actions:
+                # 工具循环耗尽但已经发过东西：不能返回 None——上层会把 None
+                # 当失败降级，导致同一条消息再发一遍。
+                logger.warning("[vision] 工具循环达上限，保留已发送动作")
+                return _finish({"kind": "text", "content": ""})
             logger.warning("[vision] web_search 循环达补全次数上限，放弃")
             return None
         except Exception as e:
             logger.error(f"视觉模型调用失败: {e}")
+            if actions:
+                # 同上：已经发出去了就带回动作，绝不回退重发
+                return _finish({"kind": "text", "content": ""})
             return None
 
     def _route_vision_result(self, chat_name, sender, result, img_paths=None):

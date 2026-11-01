@@ -11,7 +11,12 @@ import requests
 
 RELEASES_API = ("https://api.github.com/repos/wens6515/"
                 "weixin-wechat-wxauto-ocr-xiaoli/releases/latest")
+_TAG_API = ("https://api.github.com/repos/wens6515/"
+            "weixin-wechat-wxauto-ocr-xiaoli/releases/tags/")
 TIMEOUT = 10
+# 安装包资产命名（发布流程固定）：xiaoli-setup-vX.Y.Z.exe
+ASSET_PREFIX = "xiaoli-setup-"
+ASSET_SUFFIX = ".exe"
 
 
 def parse_version(text):
@@ -56,3 +61,45 @@ def check_latest_release(timeout=TIMEOUT):
                url=str(data.get("html_url") or "") or None,
                newer=latest > current)
     return out
+
+
+def is_setup_asset(name):
+    """资产名是否为桌面安装包（xiaoli-setup-vX.Y.Z.exe）。"""
+    return str(name or "").startswith(ASSET_PREFIX) \
+        and str(name or "").endswith(ASSET_SUFFIX)
+
+
+def fetch_release_asset(version, timeout=TIMEOUT, proxies=None):
+    """取指定版本的安装包资产 {name, size, url}；找不到/请求失败返回 None。
+
+    一键更新用：release 下的资产可能只有安装包（发布流程固定），但仍按
+    名字过滤而非取第一个——仓库将来挂其他附件（校验和、源码 zip 是自动
+    资产除外）时不至于拿错。proxies 供调用方传 web_proxy 设置（GitHub
+    直连不稳是常态，与 check_latest_release 同一网络现实）。"""
+    tag = str(version or "").strip()
+    if not tag:
+        return None
+    if not tag.startswith("v"):
+        tag = "v" + tag
+    try:
+        resp = requests.get(_TAG_API + tag, timeout=timeout,
+                            proxies=proxies,
+                            headers={"Accept": "application/vnd.github+json"})
+    except requests.exceptions.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    for a in (data.get("assets") or []):
+        if isinstance(a, dict) and is_setup_asset(a.get("name")):
+            try:
+                size = int(a.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            return {"name": str(a.get("name") or ""),
+                    "size": size,
+                    "url": str(a.get("browser_download_url") or "") or None}
+    return None
