@@ -42,6 +42,7 @@ from .card_store import (delete_card as cs_delete_card,
                          list_cards as cs_list_cards,
                          save_card as cs_save_card)
 from .memory_store import MemoryStore, memory_key, render_export_markdown
+from .remote_server import RemoteHub, RemoteServer, lan_ip
 from .reminders_store import RemindersStore
 from .usage_store import UsageStore, hit_ratio
 from .version import APP_VERSION
@@ -177,7 +178,17 @@ _ALLOWED_KEYS = {
     "media_wait_mode", "media_wait_seconds", "media_wait_quiet_seconds",
     "followup_enabled", "followup_delay_min", "followup_delay_max",
     "followup_cooldown_minutes", "followup_daily_max", "followup_private_only",
+    "group_reply_mode",
+    "proactive_enabled", "proactive_interval_min", "proactive_interval_max",
+    "proactive_idle_minutes", "proactive_cooldown_minutes",
+    "proactive_private_only", "proactive_active_days",
+    "proactive_quiet_enabled", "proactive_quiet_start", "proactive_quiet_end",
     "daily_cost_limit_enabled", "daily_cost_limit",
+    "media_send_enabled", "image_gen_endpoint", "image_gen_model",
+    "image_gen_api_key",
+    # remote_token 不进白名单：令牌只经 remote_reset_token 生成/重置，
+    # 不接受前端 patch 直写（明文 token 不混进通用保存路径）
+    "remote_enabled", "remote_lan", "remote_port",
 }
 
 # 写 cfg 后需要同步热写到 bot 属性的键（旧 UI 设置页语义：先落盘再热写）。
@@ -199,7 +210,14 @@ _BOT_HOT_KEYS = {
     "media_wait_mode", "media_wait_seconds", "media_wait_quiet_seconds",
     "followup_enabled", "followup_delay_min", "followup_delay_max",
     "followup_cooldown_minutes", "followup_daily_max", "followup_private_only",
+    "group_reply_mode",
+    "proactive_enabled", "proactive_interval_min", "proactive_interval_max",
+    "proactive_idle_minutes", "proactive_cooldown_minutes",
+    "proactive_private_only", "proactive_active_days",
+    "proactive_quiet_enabled", "proactive_quiet_start", "proactive_quiet_end",
     "daily_cost_limit_enabled", "daily_cost_limit",
+    "media_send_enabled", "image_gen_endpoint", "image_gen_model",
+    "image_gen_api_key",
 }
 
 _TERMINAL_STATES = ("已触发", "已错过", "已达成", "已到期", "已失效")
@@ -302,6 +320,19 @@ class BridgeApi:
         self._img_cache: dict = {}  # (path, kind) -> (mtime, size, dataURI)
         self._stop = threading.Event()
         self._installing = False
+        # GUI 就绪闸：webview.start() 之前窗口还没进入消息循环，此时
+        # evaluate_js 会阻塞到超时（真机：远程面板开启时启动卡 ~20 秒——
+        # sync_remote_server 末尾 push 一条 remote_status 正好撞上）。
+        # 启动前的事件先入队，webview.start(func=on_gui_ready) 后补发。
+        self._gui_ready = False
+        self._pending_pushes: list[tuple[str, dict]] = []
+        self._push_lock = threading.Lock()
+        # 远程面板（remote_server.RemoteServer，sync_remote_server 启停）：
+        # push 事件统一过 hub——本地走 evaluate_js，远程订阅走 SSE
+        self.remote_hub = RemoteHub()
+        self._remote_server: RemoteServer | None = None
+        self._remote_port: int | None = None
+        self._remote_lan: bool | None = None
 
     # ---------- 基础设施 ----------
 
@@ -312,7 +343,22 @@ class BridgeApi:
         self._tray = tray
 
     def push(self, evt: str, payload: dict):
-        """向前端注入事件（窗口未就绪/正在销毁时静默跳过）。"""
+        """向前端注入事件（窗口未就绪/正在销毁时静默跳过）。
+        事件同时进远程 hub（SSE 订阅者）——本地与远程共用同一事件流。
+
+        GUI 还没进入消息循环时只入队不 evaluate_js：pywebview 的窗口在
+        webview.start() 之前 evaluate_js 会阻塞到超时（启动卡 20 秒的根因）。
+        """
+        self.remote_hub.publish(evt, payload or {})
+        with self._push_lock:
+            ready = self._gui_ready
+            if not ready:
+                if len(self._pending_pushes) < 200:
+                    self._pending_pushes.append((evt, dict(payload or {})))
+                return
+        self._push_local(evt, payload)
+
+    def _push_local(self, evt: str, payload: dict):
         win = self._win
         if win is None:
             return
@@ -322,6 +368,16 @@ class BridgeApi:
             win.evaluate_js(js)
         except Exception:
             pass
+
+    def on_gui_ready(self):
+        """webview.start(func=...) 回调：GUI 循环已起，补发启动前的事件。"""
+        logger.info("[启动] GUI 已就绪，前端事件通道打开")
+        with self._push_lock:
+            self._gui_ready = True
+            pending = list(self._pending_pushes)
+            self._pending_pushes.clear()
+        for evt, payload in pending:
+            self._push_local(evt, payload)
 
     def notify(self, title: str, message: str):
         """托盘气泡（托盘不可用时静默）。"""
@@ -339,6 +395,101 @@ class BridgeApi:
 
     def stop(self):
         self._stop.set()
+        self._stop_remote_server()
+
+    # ---------- 远程面板（remote_server；设置页开关，默认关） ----------
+
+    @_safe
+    def remote_info(self) -> dict:
+        """远程面板访问信息：开关/端口/令牌/可直接打开的 URL（手机浏览器）。
+        URL 按绑定口径给地址——只绑 127.0.0.1 时给本机回环（此时手机连不上
+        是预期，提示开「局域网开放」）。"""
+        cfg = self.ctx.cfg
+        enabled = bool(cfg.get("remote_enabled"))
+        lan = bool(cfg.get("remote_lan"))
+        port = int(cfg.get("remote_port") or 8765)
+        token = str(cfg.get("remote_token") or "")
+        running = self._remote_server is not None
+        host = lan_ip() if lan else "127.0.0.1"
+        url = f"http://{host}:{port}/?t={token}" if token else ""
+        return {"ok": True, "enabled": enabled, "lan": lan, "running": running,
+                "port": port, "token": token, "url": url}
+
+    @_safe
+    def remote_reset_token(self) -> dict:
+        """重置远程访问令牌（已分发的旧链接立即失效），返回新的访问信息。"""
+        import secrets
+        self.ctx.cfg["remote_token"] = secrets.token_urlsafe(18)
+        try:
+            config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        except OSError as e:
+            return {"ok": False, "error": f"保存配置失败: {e}"}
+        self.sync_remote_server()
+        return self.remote_info()
+
+    def sync_remote_server(self) -> None:
+        """按当前配置启停/重启远程面板服务（启动时与 save_config 挂钩调用）。
+
+        口径：remote_enabled 开（或 remote_lan 开）→ 服务应运行；端口或绑定
+        口径变了 → 重启；全关 → 停。token 首次开启时自动生成并落盘。服务
+        起停互斥由 _remote_server 单一引用保证（桌面入口线程 + 设置保存线程
+        可能并发进来，全程持 _remote_lock）。"""
+        if not hasattr(self, "_remote_lock"):
+            self._remote_lock = threading.Lock()
+        with self._remote_lock:
+            cfg = self.ctx.cfg
+            want = bool(cfg.get("remote_enabled")) or bool(cfg.get("remote_lan"))
+            lan = bool(cfg.get("remote_lan"))
+            try:
+                port = int(cfg.get("remote_port") or 8765)
+            except (TypeError, ValueError):
+                port = 8765
+                cfg["remote_port"] = port
+            token = str(cfg.get("remote_token") or "")
+            if want and not token:
+                import secrets
+                token = secrets.token_urlsafe(18)
+                cfg["remote_token"] = token
+                try:
+                    config_store.save_config(cfg, self.ctx.cfg_path)
+                except OSError as e:
+                    logger.error(f"[远程] token 落盘失败: {e}")
+            unchanged = (self._remote_server is not None
+                         and self._remote_port == port
+                         and self._remote_lan == lan)
+            if not want:
+                self._stop_remote_server()
+                return
+            if unchanged:
+                return
+            self._stop_remote_server()
+            try:
+                server = RemoteServer(
+                    self, "0.0.0.0" if lan else "127.0.0.1", port, token,
+                    webui_dir())
+                server.start()
+            except OSError as e:
+                self._remote_server = None
+                logger.error(f"[远程] 面板服务启动失败（端口 {port} 占用？）: {e}")
+                self.push("remote_status", {
+                    "ok": False, "message": f"远程面板启动失败（端口 {port} "
+                                            f"被占用？）: {e}"})
+                return
+            self._remote_server = server
+            self._remote_port = port
+            self._remote_lan = lan
+            host = lan_ip() if lan else "127.0.0.1"
+            self.push("remote_status", {
+                "ok": True, "running": True,
+                "message": f"远程面板已开启: http://{host}:{port}/?t={token}"})
+
+    def _stop_remote_server(self) -> None:
+        server = getattr(self, "_remote_server", None)
+        if server is not None:
+            server.stop()
+            self._remote_server = None
+            self._remote_port = None
+            self._remote_lan = None
 
     def _push_loop(self):
         """1s 心跳：引擎状态 + bus 事件 + 日志增量 → 前端 tick 事件。
@@ -559,8 +710,29 @@ class BridgeApi:
             "followup_cooldown_minutes": cfg.get("followup_cooldown_minutes", 120),
             "followup_daily_max": cfg.get("followup_daily_max", 10),
             "followup_private_only": bool(cfg.get("followup_private_only", True)),
+            "group_reply_mode": cfg.get("group_reply_mode", "mention"),
+            "proactive_enabled": bool(cfg.get("proactive_enabled", False)),
+            "proactive_interval_min": cfg.get("proactive_interval_min", 10),
+            "proactive_interval_max": cfg.get("proactive_interval_max", 20),
+            "proactive_idle_minutes": cfg.get("proactive_idle_minutes", 10),
+            "proactive_cooldown_minutes": cfg.get(
+                "proactive_cooldown_minutes", 30),
+            "proactive_private_only": bool(
+                cfg.get("proactive_private_only", True)),
+            "proactive_active_days": cfg.get("proactive_active_days", 7),
+            "proactive_quiet_enabled": bool(
+                cfg.get("proactive_quiet_enabled", False)),
+            "proactive_quiet_start": cfg.get("proactive_quiet_start", "23:00"),
+            "proactive_quiet_end": cfg.get("proactive_quiet_end", "08:00"),
             "daily_cost_limit_enabled": bool(cfg.get("daily_cost_limit_enabled", False)),
             "daily_cost_limit": cfg.get("daily_cost_limit", 10.0),
+            "media_send_enabled": bool(cfg.get("media_send_enabled", False)),
+            "image_gen_endpoint": cfg.get("image_gen_endpoint", ""),
+            "image_gen_model": cfg.get("image_gen_model", ""),
+            "image_gen_api_key": cfg.get("image_gen_api_key", ""),
+            "remote_enabled": bool(cfg.get("remote_enabled", False)),
+            "remote_lan": bool(cfg.get("remote_lan", False)),
+            "remote_port": int(cfg.get("remote_port") or 8765),
             "tianshu_guided": bool(cfg.get("tianshu_guided")),
         }
         voice = {
@@ -613,6 +785,9 @@ class BridgeApi:
             if "chat_feature_overrides" in applied:
                 bot.chat_feature_overrides = patch["chat_feature_overrides"]
                 hot.append("chat_feature_overrides")
+        # 远程面板三键有任一变更 → 按新配置启停/重启服务（token 不经 patch）
+        if {"remote_enabled", "remote_lan", "remote_port"} & set(applied):
+            self.sync_remote_server()
         return {"ok": True, "applied": applied, "bot_hot": hot}
 
     def _apply_nickname_to_card(self, name: str) -> bool:
@@ -1555,10 +1730,195 @@ class BridgeApi:
                          name="xiaoli-install").start()
         return {"ok": True, "started": True}
 
+    # ---------- 诊断导出（日志页「导出诊断包」） ----------
+
+    @staticmethod
+    def _sanitize_cfg_for_export(cfg: dict) -> dict:
+        """导出用脱敏副本：API key 一律 mask_key（providers 与 per-chat
+        绑定投影里的嵌套 key 一并处理），其余配置原样——诊断正需要它们。"""
+        out = dict(cfg or {})
+        for k in ("ai_api_key", "vision_api_key"):
+            if out.get(k):
+                out[k] = config_store.mask_key(str(out[k]))
+        provs = out.get("providers")
+        if isinstance(provs, list):
+            out["providers"] = [
+                dict(p, api_key=config_store.mask_key(str(p.get("api_key") or "")))
+                if isinstance(p, dict) else p for p in provs]
+        params = out.get("chat_card_params")
+        if isinstance(params, dict):
+            out["chat_card_params"] = {
+                k: (dict(v, ai_api_key=config_store.mask_key(
+                    str(v.get("ai_api_key") or "")))
+                    if isinstance(v, dict) else v)
+                for k, v in params.items()}
+        return out
+
+    @_safe
+    def export_diagnostics(self) -> dict:
+        """打包运行诊断（zip）：环境快照 + 脱敏配置 + 运行日志尾部 + 微信
+        窗口截图（best-effort）。落 app_base_dir()/diagnostics/，文件名带
+        时刻（功能时间戳：多次导出不互相覆盖，与日志轮转同一性质）。
+        bot.log 全量（DEBUG 轨，含聊天文本）**不入包**——包内日志与日志页
+        看到的 INFO 轨一致，作 issue 附件刚好；PrintWindow 截图不抢焦点。"""
+        import zipfile
+        base = app_base_dir()
+        outdir = os.path.join(base, "diagnostics")
+        os.makedirs(outdir, exist_ok=True)
+        path = os.path.join(
+            outdir, time.strftime("xiaoli_diag_%Y%m%d_%H%M%S.zip"))
+
+        bot = getattr(self.ctx.engine, "bot", None)
+        wx = getattr(bot, "wx", None)
+        hwnd = getattr(wx, "_hwnd", None)
+        info = {
+            "app_version": APP_VERSION,
+            "python": sys.version,
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "engine_state": getattr(self.ctx.engine, "state", None),
+            "wechat_window_found": hwnd is not None,
+            "wechat_window_rect": None,
+            "dpi_scale": None,
+            "work_area": None,
+            "boundary_x": getattr(wx, "_boundary_x", None),
+            "theme": getattr(wx, "theme", None),
+            "selected_row_color": getattr(wx, "_selected_row_color", None),
+            "config_path": self.ctx.cfg_path,
+        }
+        if hwnd is not None:
+            try:
+                from wx_backend.visual_win32 import (monitor_dpi_scale,
+                                                     monitor_work_area,
+                                                     window_rect)
+                info["wechat_window_rect"] = window_rect(hwnd)
+                info["dpi_scale"] = monitor_dpi_scale(hwnd)
+                info["work_area"] = monitor_work_area(hwnd)
+            except Exception as e:
+                logger.debug(f"[诊断] 窗口信息读取失败: {e}")
+
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("info.json",
+                        json.dumps(info, ensure_ascii=False, indent=2))
+            zf.writestr("config.json",
+                        json.dumps(self._sanitize_cfg_for_export(self.ctx.cfg),
+                                   ensure_ascii=False, indent=2))
+            try:
+                from wechat_bot import RUN_LOG_FILE
+                with open(RUN_LOG_FILE, "r", encoding="utf-8",
+                          errors="replace") as f:
+                    lines = f.readlines()
+                zf.writestr("bot_run_tail.log", "".join(lines[-400:]))
+            except OSError as e:
+                logger.debug(f"[诊断] 运行日志读取失败: {e}")
+            if hwnd is not None:
+                try:
+                    from wx_backend.visual_win32 import capture_window
+                    shot = capture_window(hwnd)
+                    if shot is not None:
+                        buf = io.BytesIO()
+                        shot.convert("RGB").save(buf, format="PNG")
+                        zf.writestr("wechat_window.png", buf.getvalue())
+                except Exception as e:
+                    logger.debug(f"[诊断] 窗口截图失败: {e}")
+        logger.info(f"[诊断] 诊断包已导出: {path}")
+        return {"ok": True, "path": path}
+
+    @_safe
+    def reveal_path(self, path: str) -> dict:
+        """资源管理器打开文件所在目录（导出诊断后的「打开文件夹」；
+        本地语义——远程面板调它会在服务器上开窗口，已排除在白名单外）。"""
+        d = os.path.dirname(str(path or "")) or str(path or "")
+        if os.path.isdir(d):
+            os.startfile(d)  # noqa: 仅 Windows（本应用只在 Windows 跑）
+        return {"ok": True}
+
     @_safe
     def check_update(self) -> dict:
         r = update_check.check_latest_release()
         return {"ok": True, **(r or {})}
+
+    @_safe
+    def download_and_install_update(self) -> dict:
+        """一键更新（首页更新卡）：检查新版本 → 后台下载安装包（带进度
+        推送）→ 校验字节数 → 拉起安装器 → 自动退出本进程。安装器为 per-user
+        免管理员安装，用户按向导点完即升级；引擎/托盘由入口 finally 收尾。
+        下载走 web_proxy 设置（GitHub 直连不稳是常态，与联网搜索同一代理
+        语义）。仅桌面端可用（远程面板不开放——更新会断掉远程连接本身）。"""
+        if getattr(self, "_updating", False):
+            return {"ok": False, "error": "更新已在进行中"}
+        if self._win is None:
+            return {"ok": False, "error": "仅桌面端支持一键更新"}
+        r = update_check.check_latest_release()
+        if not r.get("ok"):
+            return {"ok": False, "error": r.get("error") or "检查更新失败"}
+        if not r.get("newer"):
+            return {"ok": False, "error": f"已是最新版本（v{r.get('current')}）"}
+        self._updating = True
+
+        def worker():
+            try:
+                ver = str(r.get("latest") or "")
+                proxy = str(self.ctx.cfg.get("web_proxy") or "").strip()
+                proxies = {"http": proxy, "https": proxy} if proxy else None
+                asset = update_check.fetch_release_asset(ver, proxies=proxies)
+                if not asset or not asset.get("url"):
+                    self.push("update_progress", {
+                        "ok": False,
+                        "message": f"v{ver} 的安装包资产未找到，请去 Releases 页手动下载"})
+                    return
+                import subprocess
+                import tempfile
+                import requests as _rq
+                dest_dir = os.path.join(tempfile.gettempdir(), "xiaoli_update")
+                os.makedirs(dest_dir, exist_ok=True)
+                dest = os.path.join(dest_dir, asset["name"])
+                self.push("update_progress",
+                          {"stage": "download", "pct": 0})
+                with _rq.get(asset["url"], stream=True, timeout=(15, 300),
+                             proxies=proxies) as resp:
+                    if resp.status_code != 200:
+                        self.push("update_progress", {
+                            "ok": False,
+                            "message": f"下载失败（HTTP {resp.status_code}），"
+                                       "请去 Releases 页手动下载"})
+                        return
+                    total = int(resp.headers.get("Content-Length")
+                                or asset.get("size") or 0)
+                    done = 0
+                    last_pct = -5
+                    with open(dest, "wb") as f:
+                        for chunk in resp.iter_content(256 * 1024):
+                            f.write(chunk)
+                            done += len(chunk)
+                            pct = int(done * 100 / total) if total else 0
+                            if pct >= last_pct + 5:
+                                last_pct = pct
+                                self.push("update_progress",
+                                          {"stage": "download", "pct": pct})
+                if asset.get("size") and os.path.getsize(dest) != asset["size"]:
+                    self.push("update_progress", {
+                        "ok": False,
+                        "message": "下载文件大小与发布不符（可能下载不完整），"
+                                   "已放弃安装，请去 Releases 页手动下载"})
+                    return
+                self.push("update_progress", {
+                    "stage": "launch",
+                    "message": "下载完成，正在启动安装器——请按向导完成安装，"
+                               "小漓即将自动退出"})
+                subprocess.Popen([dest])
+                time.sleep(2.0)  # 给安装器起进程的时间，再退出释放文件占用
+                self.quit_app()
+            except Exception as e:
+                self.push("update_progress", {
+                    "ok": False,
+                    "message": f"更新失败（{type(e).__name__}），请去 "
+                               "Releases 页手动下载"})
+            finally:
+                self._updating = False
+
+        threading.Thread(target=worker, daemon=True,
+                         name="xiaoli-update").start()
+        return {"ok": True, "started": True, "version": r.get("latest")}
 
     @_safe
     def send_first_prompt(self) -> dict:

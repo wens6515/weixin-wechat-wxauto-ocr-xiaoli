@@ -207,6 +207,63 @@ def ocr_image(img: Image.Image, max_w: int = 0) -> list[dict]:
 
 # ---------- 消息块分析（组合层：归属只用头像，用户定案） ----------
 
+def _region_fingerprint(img: Image.Image, box: tuple | None) -> int | None:
+    """块区域感知哈希（dhash 8×8：9×8 灰度后比较水平相邻像素）。
+
+    用途：群聊全接收模式的「已入史游标」判重。视觉通道没有跨轮消息 id
+    （WeChatMessage.id 是批内序号 visual_N），块几何又会随滚动整体位移；
+    只有像素内容在重复截帧之间稳定，所以用内容指纹判断「这张图/表情是不是
+    刚才已经处理过的那条」。
+
+    动画表情逐帧不同 → 指纹会变（判成新消息，宁可重复识别也不漏）。
+    坐标口径与 analyze_blocks 一致（消息区 1x）。
+    """
+    if not box:
+        return None
+    try:
+        t, b, l, r = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))
+        t = max(0, min(t, img.height - 1))
+        b = max(t + 2, min(b, img.height))
+        l = max(0, min(l, img.width - 1))
+        r = max(l + 2, min(r, img.width))
+        crop = img.crop((l, t, r, b)).convert("L").resize((9, 8))
+        px = list(crop.getdata())
+        bits = 0
+        for y in range(8):
+            row = y * 9
+            for x in range(8):
+                bits = (bits << 1) | (1 if px[row + x] > px[row + x + 1] else 0)
+        return bits
+    except Exception:
+        return None
+
+
+def _media_sender(lines: list[dict], media_box: tuple | None,
+                  chat: str | None) -> str:
+    """媒体消息的发送者名：媒体框上方那一行短文本（群聊发送者名的位置）。
+
+    图片内部/下方的文字一律不算——真机图片里的字（'我不是'）不是消息内容，
+    更不是发送者。取不到（私聊本来没有发送者行、OCR 漏读）退回会话名，
+    绝不猜别的会话。
+    """
+    if not lines:
+        return chat or ""
+    top = media_box[0] if media_box else None
+    cands: list[tuple[int, str]] = []
+    for l in lines:
+        cy = l["y"] + l["h"] // 2
+        if top is not None and cy >= top - 2:
+            continue
+        t = (l.get("text") or "").strip()
+        if not t or len(t) > 12 or re.match(r"^[\d:：\s]+$", t):
+            continue
+        cands.append((cy, t))
+    if not cands:
+        return chat or ""
+    cands.sort()
+    return cands[-1][1]
+
+
 def analyze_blocks(img: Image.Image, colors: dict, bot_tops: list[int],
                    other_tops: list[int], skip_bot: int = 0) -> dict:
     """头像锚定的消息块分析（纯像素、无 OCR）：一条消息 = 一个头像。
@@ -298,12 +355,21 @@ def analyze_blocks(img: Image.Image, colors: dict, bot_tops: list[int],
             # 块底沿延伸到引用区底部：引用文字行在面板下方，按旧底沿（面板
             # 底）会被行归位整行丢弃（真机实测：引用文字从未进过模型）。
             bottom = max(bottom, quote[1] + 2)
+        # 内容指纹（仅媒体/空块需要）：图片取媒体框，小表情取块顶一段窄带
+        # （块底会延伸到下一个头像，带上下邻消息，不能整块哈希）。
+        fp_src = None
+        if kind == "image":
+            fp_src = (anchored_media[0] if anchored_media
+                      else (T, bottom, left, right))
+        elif panel is None and quote is None:
+            fp_src = (T, min(bottom, T + _pxr(80)), 0, rw)
         blocks.append({
             "avatar_top": T, "top": min(T, boxes[0][0]) if boxes else T,
             "bottom": bottom, "left": left, "right": right, "kind": kind,
             "panel": panel, "media": (anchored_media[0] if anchored_media else None),
             "icon": (icons.get(panel) if panel is not None else None),
             "quote": quote, "quote_media": quote_media,
+            "fingerprint": _region_fingerprint(img, fp_src),
         })
     return {
         "bot_last_top": last_bot_top,
@@ -1193,7 +1259,8 @@ class VisualBackend:
 
     def get_messages(self, chat: str | None, limit: int | None = None,
                      assume_switched: bool = False,
-                     skip_bot: int = 0) -> list[WeChatMessage]:
+                     skip_bot: int = 0,
+                     include_media: bool = False) -> list[WeChatMessage]:
         """返回会话 chat **本轮对方新消息**（最近 limit 条）。消息区 OCR + 头像锚定合并。
 
         用户定案的分块规则（与 analyze_window 共用 analyze_blocks）：
@@ -1208,6 +1275,11 @@ class VisualBackend:
         sender：私聊 = 会话名；群聊 = 面板（气泡）外、气泡上方的短文本行
         （发送者名）；取不到就退回会话名。skip_bot 与 analyze_window 同源
         （占位回复剔除），必须传同一个值，否则分析区上沿会错位。
+
+        include_media：把图片/小表情也产出为消息（type=IMAGE/EMOJI，content
+        为 `[图片]`/`[表情]`，sender 取媒体框上方的发送者名行）。默认 False
+        ——既有私聊/仅@路径只看文字与文件，媒体走专用捕获链路；群聊全接收
+        模式需要逐条消息入史与游标判重，才打开它。
 
         assume_switched：同一处理事件里 analyze_window 刚完成「切换 + 读
         标题」时置 True——跳过重切与标题重读（省一次点击、两次 OCR，是
@@ -1403,10 +1475,30 @@ class VisualBackend:
         msgs: list[WeChatMessage] = []
         seq = 0
         for bi, blk in enumerate(blocks):
-            lines = by_block.get(bi)
-            if not lines:
-                continue
+            lines = by_block.get(bi) or []
             lines.sort(key=lambda i: (i["y"], i["x"]))
+            if include_media and blk["kind"] == "image":
+                # 图片本体由媒体捕获链路处理，这里只产出占位 + 发送者，供
+                # 群聊全接收逐条入史/判重；图片内部的字仍然丢弃。
+                seq += 1
+                msgs.append(WeChatMessage(
+                    id=f"visual_{seq}", chat=chat or "",
+                    sender=_media_sender(lines, blk.get("media"), chat),
+                    content="[图片]", type=MessageType.IMAGE,
+                    y=blk["top"]))
+                continue
+            if not lines:
+                if include_media and blk["kind"] == "text" \
+                        and blk.get("panel") is None and not blk.get("media"):
+                    # 无面板、无媒体的空块 = 微信自带小表情（❤ 实测 33x28
+                    # 过不了通用媒体 40px 闸，OCR 也读不出字）。全接收模式
+                    # 按消息记占位，否则这批消息在记忆里会整条消失。
+                    seq += 1
+                    msgs.append(WeChatMessage(
+                        id=f"visual_{seq}", chat=chat or "", sender=chat or "",
+                        content="[表情]", type=MessageType.EMOJI,
+                        y=blk["top"]))
+                continue
             if blk["kind"] == "image":
                 # 图片消息：块内 OCR 文字全部丢弃——图片上的字不是消息内容
                 # （真机 '我不是'）。图片本体由媒体捕获路径处理。

@@ -24,7 +24,7 @@ import os
 import re
 import sys
 
-from xiaoli_app.memory_store import memory_key
+from xiaoli_app.memory_store import _atomic_write_json, memory_key
 
 logger = logging.getLogger("xiaoli")
 
@@ -315,10 +315,45 @@ AI_DEFAULTS = {
     "followup_cooldown_minutes": 120,
     "followup_daily_max": 10,
     "followup_private_only": True,
+    # 群聊回复模式（三态，默认仅 @）：mention=只有 @ 才读；auto=全接收，
+    # 模型自主决定发不发（要发必须调 send_message / 表情包 / 语音等工具，
+    # 纯文本一律丢弃）；hybrid=全接收，本批有 @ 时文本直接发（@ 必回），
+    # 没有 @ 时同 auto。
+    "group_reply_mode": "mention",
+    # 主动发起对话（默认关，不限发送条数）：每个候选会话在 [min,max] 分钟
+    # 随机取时间点做一次判定调用，上下文末尾注入「距上次聊天 X」（不写
+    # 记忆），模型调 no_reply = 不发，输出文本/调发送类工具 = 发。
+    # 会产生额外 API 调用，设置页文案必须写明。
+    "proactive_enabled": False,
+    "proactive_interval_min": 10,
+    "proactive_interval_max": 20,
+    "proactive_idle_minutes": 10,
+    "proactive_cooldown_minutes": 30,
+    "proactive_private_only": True,
+    "proactive_active_days": 7,
+    "proactive_quiet_enabled": False,
+    "proactive_quiet_start": "23:00",
+    "proactive_quiet_end": "08:00",
     # 每日消费预算（默认关，按内置价目估算——无价目的调用不计入）：超限
     # 当天不再发起模型调用（红圈仍清掉），跨天自动恢复。
     "daily_cost_limit_enabled": False,
     "daily_cost_limit": 10.0,
+    # 图片/文件发送（默认关）：send_image/send_file 工具的总开关。画图走
+    # 用户自配的 OpenAI images 兼容端点（画图接口化，对齐语音的音源接口化
+    # ——端点/模型为空 = 能力不齐，执行回执告知）；send_file 只发任务工作
+    # 目录内的文件（路径边界独立把守，开关管的是工具声明本身）。
+    "media_send_enabled": False,
+    "image_gen_endpoint": "",
+    "image_gen_model": "",
+    "image_gen_api_key": "",
+    # 远程面板（默认关）：HTTP 服务把控制面板暴露出来。remote_enabled =
+    # 开服务（默认只绑 127.0.0.1）；remote_lan = 绑全部网卡（手机/同网设备
+    # 访问，需与 remote_enabled 同开，不建议做公网映射）；remote_port 服务
+    # 端口；remote_token 访问令牌——首次开启时自动生成（设置页可重置）。
+    "remote_enabled": False,
+    "remote_lan": False,
+    "remote_port": 8765,
+    "remote_token": "",
 }
 
 # 预设主流模型 Provider（OpenAI 兼容，api_key 一律留空由用户填写）。
@@ -670,14 +705,15 @@ def project_config(cfg, card):
 
 
 def save_config(cfg, path="config.json"):
-    """写回 config.json（API key 落盘加密：providers[].api_key + 投影 key 字段）。
+    """写回 config.json（API key 落盘加密：providers[].api_key + 投影 key 字段；
+    原子写 + .bak 备份，与 memory.json 同口径——config 损坏 = 用户重填 key，
+    换机迁移丢卡绑定，代价都不小）。
     内存态 cfg 保持明文（引擎/UI 使用）；加密只发生在落盘副本上。
     chat_card_params 是 load_config_store 的派生投影（事实源 =
     chat_card_bindings + cards/），落盘前剥离避免与卡内容脱同步。"""
     out = dict(cfg)
     out.pop("chat_card_params", None)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(_encrypt_cfg_keys(out), f, ensure_ascii=False, indent=4)
+    _atomic_write_json(path, _encrypt_cfg_keys(out), indent=4)
 
 
 def _project_chat_bindings(cfg, cards_dir):

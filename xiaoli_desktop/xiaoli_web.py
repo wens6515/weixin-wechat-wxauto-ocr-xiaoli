@@ -216,6 +216,8 @@ def main():
     ap.add_argument("--debug", action="store_true",
                     help="打开 WebView2 开发者工具")
     args = ap.parse_args()
+    log = logging.getLogger("xiaoli")
+    log.info("[启动] 控制面板入口")
 
     # 单实例互斥（与 Qt 版共用同一互斥体名；弹窗用系统 MessageBox）
     from xiaoli_bot import acquire_single_instance
@@ -228,6 +230,7 @@ def main():
     ctx = WebContext(os.path.join(base, "config.json"),
                      os.path.join(base, "cards"))
     ctx.cfg = config_store.load_config_store(ctx.cfg_path, ctx.cards_dir)
+    log.info("[启动] 配置加载完成")
     web_search.set_proxy(str(ctx.cfg.get("web_proxy", "") or ""))
 
     # 无壁纸配置 → 内置默认壁纸兜底（对齐旧入口语义）
@@ -252,12 +255,16 @@ def main():
         confirm_close=False)
     bridge.bind_window(win)
     bridge.start_push_loop()
+    # 远程面板：按配置启停（默认关；save_config 里改开关也会同步）
+    bridge.sync_remote_server()
 
     threading.Thread(target=tray.run, daemon=True,
                      name="xiaoli-tray").start()
 
     try:
-        webview.start(debug=bool(args.debug))
+        # func：GUI 循环起来后才允许 evaluate_js；启动前的 push 会先入队
+        # （远程面板启动通知/首轮 tick），避免在 webview.start 之前阻塞。
+        webview.start(debug=bool(args.debug), func=bridge.on_gui_ready)
     finally:
         # 收尾：停推送循环 → 停引擎（5s 超时）→ 停托盘
         bridge.stop()
