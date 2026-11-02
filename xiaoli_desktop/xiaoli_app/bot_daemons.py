@@ -18,7 +18,7 @@ import re
 import threading
 import time
 
-from wechat_bot import VISION_MODEL_DEFAULT, is_group_chat
+from wechat_bot import VISION_MODEL_DEFAULT
 from xiaoli_app.web_search import web_fetch
 
 logger = logging.getLogger("xiaoli")
@@ -484,7 +484,12 @@ class ProactiveScheduler(threading.Thread):
         return cur >= start or cur < end
 
     def _candidates(self, now):
-        """候选会话：记忆里出现过、最近 active_days 天有消息、按需排除群聊。"""
+        """候选会话：记忆里出现过、最近 active_days 天有消息、按需排除群聊。
+
+        群聊标记只认权威缓存 `bot._chat_is_group`（处理会话时从标题区括号
+        人数解析并落盘到 chat_meta.json）。未知 = 本次启动后还没处理过——
+        fail-closed 跳过，不拿「名字里有没有群/集团」的启发式赌（群名
+        「哆菈A夢」会被误判成私聊，导致主动消息发进群）。"""
         bot = self.bot
         try:
             mem = bot._mem
@@ -496,12 +501,12 @@ class ProactiveScheduler(threading.Thread):
         private_only = bool(getattr(bot, "proactive_private_only", True))
         out = []
         for chat in chats:
-            if private_only:
-                is_group = bot._chat_is_group.get(chat)
-                if is_group is None:
-                    is_group = is_group_chat(chat)
-                if is_group:
-                    continue
+            is_group = (getattr(bot, "_chat_is_group", {}) or {}).get(chat)
+            if is_group is None:
+                logger.debug(f"[主动] {chat!r} 群聊标记未知（尚未处理过），跳过")
+                continue
+            if private_only and is_group:
+                continue
             try:
                 hist = bot._get_history(chat)
             except Exception:

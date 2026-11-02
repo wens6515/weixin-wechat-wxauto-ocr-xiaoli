@@ -1309,6 +1309,8 @@ class BridgeApi:
         today, total = s["today"], s["total"]
         cards = {
             "today_calls": today["calls"],
+            "today_ok": today["ok"],
+            "today_fail": today["fail"],
             "today_tokens": today["prompt"] + today["completion"],
             "today_cache": hit_ratio(today),
             "today_cost": est.get("today"),
@@ -1321,19 +1323,22 @@ class BridgeApi:
             rp = s["reply_by_model"].get(model) or {}
             avg = (rp["latency_sum"] / rp["count"] / 1000.0) if rp.get("count") else None
             by_model.append({"model": model, "calls": b["calls"],
+                             "ok": b["ok"],
                              "prompt": b["prompt"], "completion": b["completion"],
                              "fail": b["fail"], "cache": hit_ratio(b),
                              "avg_reply": avg, "est": b.get("est_calls", 0)})
-        # 近 7 天按天按模型调用量（排除端到端耗时记录 kind=reply 与本地
-        # 估算行 src=est——折线图只画实测口径）。天键必须走 _day_key：
-        # SQLite 迁移后 ts 是 epoch 浮点，按字符串切片得到的是秒数前缀，
-        # 永远匹配不上日期键（历史缺陷：折线图七天全零贴底不动）
+        # 近 7 天按天按模型调用量（排除端到端耗时记录 kind=reply、本地
+        # 估算行 src=est 与失败行——折线图只画成功且响应实测的调用）。
+        # 天键必须走 _day_key：SQLite 迁移后 ts 是 epoch 浮点，按字符串
+        # 切片得到的是秒数前缀，永远匹配不上日期键（历史缺陷：折线图
+        # 七天全零贴底不动）
         import datetime
         day_names = [(datetime.date.today() - datetime.timedelta(days=i))
                      .isoformat() for i in range(6, -1, -1)]
         day_model = {d: {} for d in day_names}
         for r in records:
-            if r.get("kind") == "reply" or r.get("src") == "est":
+            if (r.get("kind") == "reply" or r.get("src") in ("est", "fail")
+                    or r.get("ok") is False):
                 continue
             day = store._day_key(r.get("ts") or time.time())
             if day in day_model and r.get("model"):

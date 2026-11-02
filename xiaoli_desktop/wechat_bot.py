@@ -18,6 +18,7 @@ import pyautogui
 pyautogui.FAILSAFE = False
 import tempfile
 from wx_backend import BackendConfigError, create_backend
+from wx_backend.visual_regions import parse_title
 from xiaoli_app.config_store import AI_DEFAULTS, REPLY_STYLE_RULES
 from xiaoli_app.file_text import (_FILE_TOKEN_LOOSE_RE, _FILE_TOKEN_RE,
                                   _extract_file_name_token,
@@ -842,10 +843,71 @@ class WeChatBot(MediaCaptureMixin):
                             + (f"｜{' '.join(it['tags'])}" if it["tags"] else "")
                             for it in hits))
 
+    # ---------- 发送前会话确认（所有异步/工具发送共用） ----------
+
+    @staticmethod
+    def _chat_name_matches(active, target):
+        """当前会话名与目标名是否同一会话（容忍 OCR 差异）。
+
+        口径与 memory 键一致（剥引号变体与空白），并做双向子串兜底——
+        OCR 会漏字（真机「“摸鱼”集团」被读成「摸鱼”」），严格相等会
+        把切换判成失败。
+        """
+        a = _memory_key(active)
+        b = _memory_key(target)
+        if not a or not b:
+            return False
+        return a == b or a.startswith(b) or b.startswith(a)
+
+    def _switch_to_chat(self, chat):
+        """切到目标会话（发送前必须）。visual 后端（当前唯一可用通道）有
+        _switch_chat（点击会话列表）。wxauto4 在微信 4.1.12 结构性失效，
+        不作为可用后端——无切换能力时 fail-closed 返回 False，不假装能切。"""
+        switcher = getattr(self.wx, "_switch_chat", None)
+        if switcher is not None:
+            return bool(switcher(chat))
+        logger.warning(f"[切换] 后端无 _switch_chat 能力，无法切到会话 {chat!r}")
+        return False
+
+    def _ensure_chat_active(self, chat):
+        """确保微信窗口停在 chat 会话；返回是否已确认（可以发送）。
+
+        工具发送（send_message / 表情包 / 图片 / 文件）与异步发送（定时/
+        条件/主动发起）必须走这里：这些发送发生在「窗口停在哪就发到哪」的
+        链路上，若窗口不在目标会话就会发错人。判定顺序：
+
+        1. 已在目标会话 → 直接确认（**不点击**：重复点已选中条目会 toggle
+           取消选中，消息区反而变空）
+        2. 交给后端切换（`_switch_to_chat` → `_switch_chat`：内部先查选中
+           高亮/标题，仍缺坐标时现读列表区 OCR 定位）
+        3. 切完**读标题复验**；标题不是目标即返回 False（调用方 fail-closed）
+        """
+        # 1) 已在目标会话：读标题确认，不点击
+        try:
+            title = self.wx.read_title(foreground=False)
+        except Exception:
+            title = None
+        if title and self._chat_name_matches(parse_title(title)[0], chat):
+            return True
+        # 2) 切换
+        try:
+            self._switch_to_chat(chat)
+        except Exception as e:
+            logger.warning(f"[发送] 切换 {chat!r} 异常: {e}")
+        # 3) 复验：切完标题必须是目标，否则视为没切成功
+        try:
+            title = self.wx.read_title(foreground=True)
+        except Exception as e:
+            logger.warning(f"[发送] 读标题失败，无法验证落点: {e}")
+            return False
+        if not title:
+            return False
+        return self._chat_name_matches(parse_title(title)[0], chat)
+
     def _exec_send_sticker(self, chat_id, fname):
         """send_sticker 工具执行：即时发送（窗口粘贴，实现在
         AgentBot._send_sticker_file）。返回 (ok, tool 回执文本)。fail-closed：
-        未开启/无库/无此图/粘贴失败 → False——贴图是点缀，不回退文本。"""
+        未开启/无库/无此图/粘贴失败/会话未确认 → False——贴图是点缀，不回退文本。"""
         if str(getattr(self, "sticker_mode", "off") or "off") == "off":
             return False, "表情包功能未开启"
         store = self._sticker_store()
@@ -859,6 +921,11 @@ class WeChatBot(MediaCaptureMixin):
         sender = getattr(self, "_send_sticker_file", None)
         if sender is None:
             return False, "当前运行模式不支持发送表情包"
+        # 窗口不一定停在目标会话（主动发起的判定调用、异步工具调用）——
+        # 粘贴发送只会落在当前窗口，发送前必须确认/切换并复验标题。
+        if not self._ensure_chat_active(chat_id):
+            logger.warning(f"[表情包] 未能确认窗口在会话 {chat_id!r}，放弃发送")
+            return False, "没能确认当前会话，表情包没有发送"
         try:
             sent = bool(sender(path))
         except Exception as e:
@@ -888,6 +955,11 @@ class WeChatBot(MediaCaptureMixin):
         text = str(args.get("text") or "").strip()
         if not text:
             return False, "send_message 缺少 text（要发送的消息原文）"
+        # 工具调用发生在模型判定期间，窗口未必在目标会话（主动发起尤其
+        # 明显）——发送前确认/切换并复验标题，确认不了宁可不发。
+        if not self._ensure_chat_active(chat_id):
+            logger.warning(f"[群聊发送] 未能确认窗口在会话 {chat_id!r}，放弃发送")
+            return False, "没能确认当前会话，消息没有发送"
         try:
             n = self._send_parts(chat_id, text)
         except Exception as e:
@@ -1735,7 +1807,7 @@ class WeChatBot(MediaCaptureMixin):
 
     def call_vision_api(self, content, chat_id=None, related_memory=None,
                         tool_only=False, force_no_reply=False,
-                        system_tail=None, collect_actions=False):
+                        collect_actions=False):
         """单调用视觉识别（OpenAI 兼容 / chat.completions）。
 
         content：块列表 list[dict]，格式
@@ -1763,15 +1835,16 @@ class WeChatBot(MediaCaptureMixin):
         no_reply / send_message / save_global_memory 等；tool_choice=auto；
         集合为空时 payload 不带 tools/tool_choice 键）。
 
-        tool_only/force_no_reply/system_tail（群聊全接收与主动发起）：
+        tool_only/force_no_reply（群聊全接收与主动发起）：
         - tool_only=True：声明 send_message 作为唯一文字发送通道，不声明
           no_reply（默认沉默）；返回结果带 actions/sent_any，上层据此判断
           模型是否真的发过东西。
         - force_no_reply=True：本次调用强制声明 no_reply（主动发起的判定，
           即使全局 no_reply 开关关闭）。
-        - system_tail：在上下文末尾追加一条 system（主动发起的「距上次聊天
-          X」），只存在于本次调用，不写记忆；content=None 时消息列表以
-          system 结尾，不伪造 user 消息。
+        主动发起的「距上次聊天 X」作为 content 里的 user 文本传入，只存在于
+        本次调用、不写记忆。注意不能用「末尾追加 system」的旧做法：thinking
+        模型会把它当成续写最后一条 assistant，要求回传 reasoning_content
+        （真机 400）。
         查询/执行型工具（web_search/web_fetch/recall_memory/manage_reminder/
         set_reminder/send_sticker/save_global_memory）在本方法内执行并把结果
         作为 tool 消息回填、继续补全，直到给出最终答复——set_reminder 创建
@@ -1863,12 +1936,9 @@ class WeChatBot(MediaCaptureMixin):
         v_state = self.voice_state(chat_id)
         if voice_profile is not None and v_state == "always":
             messages.append({"role": "system", "content": ALWAYS_VOICE_RULES})
-        # 主动发起判定：尾部 system（距上次聊天 X，可决定是否发消息）——
-        # 只存在于本次调用，绝不写记忆（用户定案：不污染上下文）。
-        if system_tail:
-            messages.append({"role": "system", "content": str(system_tail)})
-        # content=None = 无当前来信（主动发起）：消息列表以 system 结尾，
-        # 不伪造一条假的 user 消息。
+        # content=None = 无当前来信（旧调用形态）：消息列表以 system 结尾。
+        # 主动发起已改为把「距上次聊天 X」作为 user 文本传入——thinking
+        # 模型不接受「以 system 结尾并续写 assistant」的形状。
         if content is not None:
             messages.append({"role": "user", "content": content})
         with self._model_lock:
@@ -1976,9 +2046,17 @@ class WeChatBot(MediaCaptureMixin):
                 # 回填：assistant(tool_calls) + 每个调用的 tool 结果消息。
                 # 就地 append——payload["messages"] 与本地列表同引用，末轮
                 # 循环耗尽后直接退出（最后一次要求的工具调用不再执行）
-                messages.append({"role": "assistant",
+                assistant_msg = {"role": "assistant",
                                  "content": message.get("content") or "",
-                                 "tool_calls": tool_calls})
+                                 "tool_calls": tool_calls}
+                # thinking 模型：同一轮工具循环的 assistant 必须把上一轮
+                # 返回的 reasoning_content 原样带回，否则供应商 400。只在
+                # 响应里确实有该字段时透传——普通模型不受影响；不写记忆，
+                # 不进入后续轮次的历史，纯粹是本次工具往返的协议字段。
+                _rc = message.get("reasoning_content")
+                if isinstance(_rc, str) and _rc:
+                    assistant_msg["reasoning_content"] = _rc
+                messages.append(assistant_msg)
                 for tc in tool_calls:
                     name = _tool_call_name(tc)
                     if name == "web_search":

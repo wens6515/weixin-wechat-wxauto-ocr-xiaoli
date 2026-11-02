@@ -1112,6 +1112,11 @@ async function loadUsage() {
   if (!r.ok) return;
   const c = r.cards;
   $("#uTodayCalls").textContent = c.today_calls ?? "—";
+  const callsSub = $("#uTodayCallsSub");
+  if (callsSub) {
+    callsSub.textContent = (c.today_ok != null && c.today_fail != null)
+      ? `成功 ${c.today_ok} · 失败 ${c.today_fail}` : "全部模型";
+  }
   $("#uTodayCost").textContent = c.today_cost != null ? c.today_cost.toFixed(2) : "—";
   $("#uTodayTokens").textContent = fmtTokens(c.today_tokens);
   $("#uTodayCache").textContent = c.today_cache != null ? (c.today_cache * 100).toFixed(0) + "%" : "—";
@@ -1120,7 +1125,7 @@ async function loadUsage() {
   $("#uFail30").textContent = c.fail_30d ?? "—";
   const tb = $("#modelTbody");
   tb.innerHTML = (r.by_model || []).map((m) => `<tr>
-    <td>${esc(m.model)}</td><td class="baloo">${m.calls}</td>
+    <td>${esc(m.model)}</td><td class="baloo" title="成功 ${m.ok ?? "—"} · 失败 ${m.fail ?? "—"}">${m.calls}</td>
     <td class="baloo">${fmtTokens(m.prompt + m.completion)}${m.est ? ` <span title="${m.est} 条为本地估算（响应未带 usage）">≈</span>` : ""}</td>
     <td class="baloo">${m.cache != null ? (m.cache * 100).toFixed(0) + "%" : "—"}</td>
     <td class="baloo">${m.avg_reply != null ? m.avg_reply.toFixed(1) + "s" : "—"}</td></tr>`).join("")

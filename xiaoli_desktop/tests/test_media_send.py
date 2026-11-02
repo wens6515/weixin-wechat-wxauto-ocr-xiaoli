@@ -51,6 +51,8 @@ def _make_bot(media_send=False, endpoint="", model=""):
     bot.image_gen_api_key = ""
     bot._post_chat_completions = mock.Mock(
         return_value={"choices": [{"message": {"content": "好"}}]})
+    # 发送工具会先确认目标会话；单测无微信窗口，直接放行
+    bot._ensure_chat_active = mock.Mock(return_value=True)
     return bot
 
 
@@ -123,6 +125,7 @@ class TestExecSendImage(unittest.TestCase):
         bot.image_gen_api_key = ""
         bot.tasks_dir = tempfile.mkdtemp()
         bot._send_sticker_file = mock.Mock(return_value=True)
+        bot._ensure_chat_active = mock.Mock(return_value=True)
         return bot
 
     def test_missing_endpoint_receipt(self):
@@ -147,6 +150,21 @@ class TestExecSendImage(unittest.TestCase):
         gen.assert_called_once()
         self.assertFalse(os.path.exists(tmp))   # 发送后临时文件即删
         bot._send_sticker_file.assert_called_once_with(tmp)
+
+    def test_session_not_confirmed_does_not_send(self):
+        """窗口不在目标会话时 fail-closed，绝不贴到当前聊天里。"""
+        bot = self._bot()
+        bot._ensure_chat_active.return_value = False
+        tmp = os.path.join(tempfile.mkdtemp(), "gen.png")
+        with open(tmp, "wb") as f:
+            f.write(PNG_1PX)
+        with mock.patch("xiaoli_app.image_gen.generate_image_file",
+                        return_value=tmp):
+            r = bot._exec_send_image("林小满",
+                                     json.dumps({"prompt": "一只鲸鱼"}))
+        self.assertIn("没有发送", r)
+        bot._send_sticker_file.assert_not_called()
+        self.assertFalse(os.path.exists(tmp))
 
     def test_generation_failure_is_receipt_not_raise(self):
         bot = self._bot()

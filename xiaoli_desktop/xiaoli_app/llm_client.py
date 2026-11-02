@@ -287,12 +287,34 @@ class LlmClient:
         miss_tokens，OpenAI 系用 prompt_tokens_details.cached_tokens 与
         completion_tokens_details.reasoning_tokens——v2.5.0 的消息布局缓存
         优化效果就靠这几列验证。src 标记数据来源：api=响应实测，est=本地
-        估算（可信度分开，不混算）。"""
+        估算（可信度分开，不混算）。
+
+        **失败调用不估算 token 写库**（src=fail）：400/401 等被拒绝的请求
+        没有实际消耗，估算值会被 token/缓存/消费统计当成真实用量（真机：
+        127 次主动发起 400 把当日命中率从 76% 压到 9%、消费从 ¥0.02 估成
+        ¥0.49）。请求体大小只在 DEBUG 日志里留一行排障信息。"""
         store = self.usage_store
         if store is None:
             return
         try:
             meta = dict(meta or {})
+            if not ok:
+                # 失败：只记状态/耗时/模型，不记 token 与缓存
+                try:
+                    est = (_messages_estimate_tokens(meta["messages"])
+                           if meta.get("messages") else None)
+                except Exception:
+                    est = None
+                if est:
+                    logger.debug(
+                        f"[用量] 失败请求未计费（估算 prompt≈{est} tokens, "
+                        f"status={status}）")
+                store.record(kind=meta.get("kind"), model=meta.get("model"),
+                             prompt_tokens=None, completion_tokens=None,
+                             ok=False, status=status, latency_ms=latency_ms,
+                             cache_hit=0, cache_miss=0, reasoning=0,
+                             total_tokens=None, src="fail")
+                return
             usage = (data or {}).get("usage") or {}
             prompt_t = usage.get("prompt_tokens")
             completion_t = usage.get("completion_tokens")

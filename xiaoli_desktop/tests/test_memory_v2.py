@@ -396,6 +396,32 @@ class TestMessageLayout(unittest.TestCase):
                          if m.get("role") == "tool"]
             self.assertIn("准备考研", tool_msgs[0]["content"])   # 检索结果回填
 
+    def test_tool_round_passes_back_reasoning_content(self):
+        """thinking 模型同一轮工具往返必须带回 reasoning_content。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = self._layout_bot(tmp)
+            payloads = []
+
+            def fake_post(url, headers, payload, timeout, label="api", meta=None):
+                payloads.append(payload)
+                if len(payloads) == 1:
+                    return {"choices": [{"message": {
+                        "reasoning_content": "先检索一下记忆",
+                        "tool_calls": [
+                            {"id": "r1", "type": "function",
+                             "function": {"name": "recall_memory",
+                                          "arguments": '{"query": "考研"}'}},
+                        ]}}]}
+                return {"choices": [{"message": {"content": "想起啦"}}]}
+
+            bot._post_chat_completions = fake_post
+            bot.call_vision_api(
+                [{"type": "text", "text": "hi"}], chat_id="小明")
+            assistants = [m for m in payloads[1]["messages"]
+                          if m.get("role") == "assistant"]
+            self.assertEqual(assistants[0].get("reasoning_content"),
+                             "先检索一下记忆")
+
     def test_no_important_or_related_when_absent(self):
         with tempfile.TemporaryDirectory() as tmp:
             bot = self._layout_bot(tmp)

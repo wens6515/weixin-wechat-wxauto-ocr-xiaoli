@@ -91,3 +91,22 @@ class TestTriggerSendSwitchesChat(unittest.TestCase):
         wx = _FakeWx(current="林小满")
         _bot(wx)._send_trigger_reply("第一句\n\n第二句\n", "林小满")
         self.assertEqual([t for _, t in wx.sent], ["第一句", "第二句"])
+
+
+class TestToolSendVerifiesChat(unittest.TestCase):
+    """send_message 也是「窗口停在哪就发到哪」——主动发起的判定调用期间
+    窗口未必在目标会话，发送前必须确认/切换并复验。"""
+
+    def test_send_message_switches_and_sends(self):
+        wx = _FakeWx(current="别人", switch_ok=True)
+        bot = _bot(wx)
+        ok, _ = bot._exec_send_message("林小满", '{"text": "在吗"}')
+        self.assertTrue(ok)
+        self.assertEqual([c for c, _ in wx.sent], ["林小满"])
+
+    def test_send_message_fails_closed_when_chat_not_confirmed(self):
+        wx = _FakeWx(current="别人", switch_ok=False)
+        bot = _bot(wx)
+        ok, _ = bot._exec_send_message("林小满", '{"text": "在吗"}')
+        self.assertFalse(ok)
+        self.assertEqual(wx.sent, [], "确认不了目标会话时绝不能发送")

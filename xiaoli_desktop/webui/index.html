@@ -370,12 +370,12 @@
       <section class="page" data-page="usage">
         <h1 class="page-title">用量统计</h1>
         <div class="sum-grid">
-          <div class="glass sum-card"><span class="sum-k">今日调用</span><span class="sum-v baloo" id="uTodayCalls">—</span><span class="sum-delta">全部模型</span></div>
-          <div class="glass sum-card"><span class="sum-k">今日消费</span><span class="sum-v">¥ <b class="baloo" id="uTodayCost">—</b></span><span class="sum-delta">按内置价目估算</span></div>
+          <div class="glass sum-card"><span class="sum-k">今日调用</span><span class="sum-v baloo" id="uTodayCalls">—</span><span class="sum-delta" id="uTodayCallsSub">全部模型</span></div>
+          <div class="glass sum-card"><span class="sum-k">今日消费</span><span class="sum-v">¥ <b class="baloo" id="uTodayCost">—</b></span><span class="sum-delta">按内置价目估算（失败不计费）</span></div>
           <div class="glass sum-card"><span class="sum-k">今日 tokens</span><span class="sum-v baloo" id="uTodayTokens">—</span><span class="sum-delta">提示 + 补全</span></div>
-          <div class="glass sum-card"><span class="sum-k">缓存命中率</span><span class="sum-v"><b class="baloo" id="uTodayCache">—</b></span><span class="sum-delta up">稳定前缀布局生效</span></div>
+          <div class="glass sum-card"><span class="sum-k">缓存命中率</span><span class="sum-v"><b class="baloo" id="uTodayCache">—</b></span><span class="sum-delta up">仅统计成功调用</span></div>
           <div class="glass sum-card"><span class="sum-k">近 30 天 tokens</span><span class="sum-v baloo" id="uTokens30">—</span><span class="sum-delta" id="uCost30">—</span></div>
-          <div class="glass sum-card"><span class="sum-k">近 30 天失败</span><span class="sum-v baloo" id="uFail30">—</span><span class="sum-delta">429/5xx 自动重试</span></div>
+          <div class="glass sum-card"><span class="sum-k">近 30 天失败</span><span class="sum-v baloo" id="uFail30">—</span><span class="sum-delta">400/401/5xx/网络</span></div>
         </div>
         <!-- 每日预算进度（开关开启且上限>0 时显示） -->
         <div class="glass sec-card" id="budgetCard" hidden>
@@ -766,7 +766,7 @@
           <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>群聊接收模式
             <span class="title-hint">只影响群聊；私聊始终照常回复</span></div>
           <div class="feat-row slim">
-            <div class="feat-text"><b>模式</b><small>仅 @：只有 @小漓 的消息才读（默认）。全接收·自主：群里每条新消息都进模型，模型要说话必须调用 send_message 等发送类工具，直接输出的文字不会发送；不想说就保持沉默。全接收·@必回：同样全接收，但本批消息里有 @ 时按普通回复直接发送，没有 @ 时仍必须走工具。全接收下没 @ 的文件只记文件名、不提取正文；图片/表情照常识别。注意：全接收会让群里每条新消息都触发一次带历史的模型请求，费用会上升。</small></div>
+            <div class="feat-text"><b>模式</b><small>仅 @：只有 @小漓 的消息才读（默认）。全接收·自主：群里每条新消息都进模型，模型要说话必须调用 send_message 等发送类工具，直接输出的文字不会发送；不想说就保持沉默。全接收·@必回：同样全接收，但本批消息里有 @ 时按普通回复直接发送，没有 @ 时仍必须走工具。全接收下没 @ 的文件只记文件名、不提取正文；图片/表情照常识别。注意：全接收按「每个可见新消息批次」触发一次带历史的模型请求（不是每条消息一次），费用会随群活跃度上升；滚动出消息区的消息读不到。</small></div>
             <div class="seg tri" id="groupModeSeg">
               <button data-v="mention">仅 @</button><button data-v="auto">全接收·自主</button><button data-v="hybrid">全接收·@必回</button>
             </div>

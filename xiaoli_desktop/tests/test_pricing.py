@@ -158,6 +158,21 @@ class TestEstimateRecords(unittest.TestCase):
         self.assertEqual(out["priced"], 2)
         self.assertEqual(out["unpriced"], 1)
 
+    def test_failed_records_not_priced(self):
+        """失败调用没有实际 token 消耗，估算值不参与计价（旧行为会把
+        400 的请求体估算当成真消费，还会误触每日预算）。"""
+        rows = [
+            {"ts": PEAK_DS, "model": "deepseek-flash",
+             "prompt_tokens": 1_000_000, "completion_tokens": 0,
+             "cache_hit": 0, "ok": True},
+            {"ts": PEAK_DS, "model": "deepseek-flash",
+             "prompt_tokens": 1_000_000, "completion_tokens": 0,
+             "cache_hit": 0, "ok": False},
+        ]
+        out = pricing.estimate_records(rows, days=30)
+        self.assertAlmostEqual(out["total"], 2.0)
+        self.assertEqual(out["priced"], 1)
+
     def test_all_unpriced_total_is_none(self):
         out = pricing.estimate_records(
             [{"ts": time.time(), "model": "no-price", "prompt_tokens": 10,

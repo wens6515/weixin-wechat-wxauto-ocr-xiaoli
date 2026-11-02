@@ -19,8 +19,6 @@ from wechat_bot import (WeChatBot, Controller, logger,
                         VISION_MODEL_DEFAULT, strip_reply_prefix,
                         resolve_under_root)
 from wx_backend.models import MessageType
-from wx_backend.visual_backend import parse_title
-from wechat_bot import _memory_key
 from xiaoli_app.reminders_store import (RemindersStore, GRACE_SECONDS,
                                         WATCH_INTERVAL_MIN, WATCH_DEFAULT_TTL)
 from xiaoli_app.web_search import web_fetch, resolve_redirect
@@ -198,9 +196,11 @@ class AgentBot(WeChatBot):
         self._pending_files = {}  # chat_name -> {sender} 群聊文件等待用户指令
         # 占位回复计数（_pending_placeholders）由基类 WeChatBot 提供（基类
         # __init__ 初始化；placeholder 发送 +1 / 实质回复归零，按 chat_name 隔离）
-        # 失败退避：处理未产出回复（红圈滞留）的会话 8s 内不重复处理——
-        # 防滞留红圈在 0.5s 快档下每轮都打一遍整条 OCR 管线，把单核打满
+        # 失败退避：处理未产出回复（红圈滞留）的会话先等 8s，连续失败按
+        # 8→16→32→60s 指数退避——防滞留红圈在 0.5s 快档下每轮都打一遍整条
+        # OCR 管线（全接收模式下还会反复打开图片查看器），把单核打满
         self._chat_fail_at = {}
+        self._chat_fail_count = {}
         self._fail_backoff = 8.0
         # 主动追尾运行态（内存即可：冷却/日限跨重启重置可接受，追尾晚一轮
         # 无害）。pending 由主循环消费（发送切会话，窗口互斥纪律同触发器）。
@@ -215,6 +215,14 @@ class AgentBot(WeChatBot):
         #   过滤群聊（比名字启发式准）。
         self._group_seen = {}
         self._chat_is_group = {}
+        # 群聊标记落盘缓存（chat_meta.json，与 memory.json 同目录）：权威值
+        # 来自标题区括号人数，处理会话时更新；重启后主动发起不必等每个群
+        # 先来一条消息才知道它是群。旧版本升级时用记忆历史做一次种子。
+        self._chat_meta_path = os.path.join(
+            os.path.dirname(os.path.abspath(self.memory_file)) or ".",
+            "chat_meta.json")
+        self._load_chat_meta()
+        self._seed_chat_meta()
         # 主动发起：调度线程只投「到期的 chat」，判定调用与发送都在主循环
         # （判定会执行发送类工具，daemon 线程绝不能碰微信窗口）。
         self._proactive_queue = queue.Queue(maxsize=50)
@@ -523,16 +531,6 @@ class AgentBot(WeChatBot):
             logger.error(f"[天枢] 唤起异常: {e}，任务已投递")
         return True
 
-    def _switch_to_chat(self, chat):
-        """切到目标会话（发送前必须）。visual 后端（当前唯一可用通道）有
-        _switch_chat（点击会话列表）。wxauto4 在微信 4.1.12 结构性失效，
-        不作为可用后端——无切换能力时 fail-closed 返回 False，不假装能切。"""
-        switcher = getattr(self.wx, "_switch_chat", None)
-        if switcher is not None:
-            return bool(switcher(chat))
-        logger.warning(f"[切换] 后端无 _switch_chat 能力，无法切到会话 {chat!r}")
-        return False
-
     def _send_file_clipboard(self, fpath, chat):
         """剪贴板 CF_HDROP + Ctrl+V 发送文件（SendFiles UI 自动化失效时的替代方案）。
 
@@ -543,11 +541,11 @@ class AgentBot(WeChatBot):
         if fg is not None:
             fg()
         if chat:
-            try:
-                self._switch_to_chat(chat)
-                time.sleep(0.3)
-            except Exception as e:
-                logger.warning(f"[回传] 切换聊天窗口失败 {chat}: {e}")
+            # 切会话后必须复验标题：粘贴只会落在当前窗口，切失败就发错人。
+            if not self._ensure_chat_active(chat):
+                logger.error(f"[回传] 未能确认窗口在会话 {chat!r}，放弃发送文件")
+                return False
+            time.sleep(0.3)
         # 切会话后再确保微信前台（_switch_chat 内部操作可能改变前台）
         if fg is not None:
             fg()
@@ -916,55 +914,6 @@ class AgentBot(WeChatBot):
             except Exception as e:
                 logger.error(f"[状态监视] 回递失败 {chat}: {e}")
 
-    @staticmethod
-    def _chat_name_matches(active, target):
-        """当前会话名与目标名是否同一会话（容忍 OCR 差异）。
-
-        口径与 memory 键一致（剥引号变体与空白），并做双向子串兜底——
-        OCR 会漏字（真机「“摸鱼”集团」被读成「摸鱼”」），严格相等会
-        把切换判成失败。
-        """
-        a = _memory_key(active)
-        b = _memory_key(target)
-        if not a or not b:
-            return False
-        return a == b or a.startswith(b) or b.startswith(a)
-
-    def _ensure_chat_active(self, chat):
-        """确保微信窗口停在 chat 会话；返回是否已确认（可以发送）。
-
-        触发式发送（定时/条件到点）必须走这里：那一刻窗口停在「最后处理过
-        的会话」上——真机事故：拿快递提醒的意图发给「林小满」，实际落进了
-        「摸鱼集团」。判定顺序：
-
-        1. 已在目标会话 → 直接确认（**不点击**：重复点已选中条目会 toggle
-           取消选中，消息区反而变空）
-        2. 交给后端切换（`_switch_to_chat` → `_switch_chat`：内部先查选中
-           高亮/标题，仍缺坐标时现读列表区 OCR 定位）
-        3. 切完**读标题复验**；标题不是目标即返回 False（调用方 fail-closed）
-        """
-        # 1) 已在目标会话：读标题确认，不点击
-        try:
-            title = self.wx.read_title(foreground=False)
-        except Exception:
-            title = None
-        if title and self._chat_name_matches(parse_title(title)[0], chat):
-            return True
-        # 2) 切换
-        try:
-            self._switch_to_chat(chat)
-        except Exception as e:
-            logger.warning(f"[触发回复] 切换 {chat!r} 异常: {e}")
-        # 3) 复验：切完标题必须是目标，否则视为没切成功
-        try:
-            title = self.wx.read_title(foreground=True)
-        except Exception as e:
-            logger.warning(f"[触发回复] 读标题失败，无法验证落点: {e}")
-            return False
-        if not title:
-            return False
-        return self._chat_name_matches(parse_title(title)[0], chat)
-
     def _send_trigger_reply(self, text, chat):
         """触发器回复直发（旁路 _send_text 的占位归零——定时/条件触发消息
         不得破坏 skip_bot/N[chat] 语义：占位挂起时若被归零，占位会被当成
@@ -1222,6 +1171,10 @@ class AgentBot(WeChatBot):
             logger.warning(f"[发图] {chat_id!r} 生成异常: {e}")
             return "图片没画出来（画图服务异常），先用文字回复吧"
         try:
+            # 与表情包同一纪律：粘贴只会落在当前窗口，先确认/切换目标会话。
+            if not self._ensure_chat_active(chat_id):
+                logger.warning(f"[发图] 未能确认窗口在会话 {chat_id!r}，放弃发送")
+                return "没能确认当前会话，图片没有发送，先用文字说明吧"
             if self._send_sticker_file(path):
                 logger.info(f"[发图] 已发送给 {chat_id!r}: {prompt[:40]}")
                 return f"图片已发送（{prompt[:40]}）"
@@ -1291,6 +1244,12 @@ class AgentBot(WeChatBot):
 
     # ---------- 消息处理（改造） ----------
 
+    def _fail_delay(self, fail_n):
+        """连续失败第 n 次的退避秒数：8 → 16 → 32 → 60 封顶。"""
+        if fail_n <= 0:
+            return float(self._fail_backoff)
+        return min(60.0, float(self._fail_backoff) * (2 ** (fail_n - 1)))
+
     def process_new_messages(self):
         self._flush_memory_if_due()
         if self.paused:
@@ -1339,15 +1298,23 @@ class AgentBot(WeChatBot):
                 switched = False
             if not sessions:
                 return
+            if not hasattr(self, "_chat_fail_count"):
+                self._chat_fail_count = {}
             for entry in sessions:
                 if not entry:
                     continue
-                # 退避键：红圈链路给位置条目（坐标，8s 窗口内稳定），
+                # 退避键：红圈链路给位置条目（坐标，退避窗口内稳定），
                 # 降级路径给会话名。
                 key = f"{entry[0]},{entry[1]}" if switched else entry
-                # 失败退避：上次处理未产出回复（红圈滞留）的条目暂跳过
-                if time.time() - self._chat_fail_at.get(key, 0.0) < self._fail_backoff:
-                    logger.debug(f"[退避] {key} 上次处理失败未满 {self._fail_backoff:.0f}s，跳过")
+                # 失败退避：上次处理未产出回复（红圈滞留）的条目暂跳过；
+                # 连续失败按 8→16→32→60s 指数退避（全接收批次失败时避免
+                # 每 8s 重新捕获媒体/重打 API）。
+                fail_n = self._chat_fail_count.get(key, 0)
+                delay = self._fail_delay(fail_n)
+                waited = time.time() - self._chat_fail_at.get(key, 0.0)
+                if waited < delay:
+                    logger.debug(f"[退避] {key} 连续失败 {fail_n} 次，"
+                                 f"还需 {delay - waited:.0f}s，跳过")
                     continue
                 # 每日预算闸：超限当天不发起模型调用，但点输入框清红圈——
                 # 不清圈会被 8s 退避无限重处理（与静默路径同一纪律）
@@ -1371,10 +1338,17 @@ class AgentBot(WeChatBot):
                     handled = False
                 if handled:
                     self._record_reply_latency(t0)
-                    self._chat_fail_at.pop(key, None)  # 处理成功，解除退避
+                    # 处理成功，解除退避（含连续失败计数）
+                    self._chat_fail_at.pop(key, None)
+                    self._chat_fail_count.pop(key, None)
                     self.last_reply_time = time.time()
                     return  # 每轮只处理一个会话，回复后回到红点监听
                 self._chat_fail_at[key] = time.time()
+                n = self._chat_fail_count.get(key, 0) + 1
+                self._chat_fail_count[key] = n
+                delay = self._fail_delay(n)
+                logger.debug(f"[退避] {key} 处理失败第 {n} 次，"
+                             f"{delay:.0f}s 后重试")
         except Exception as e:
             logger.error(f"Message processing error: {e}\n{traceback.format_exc()}")
 
@@ -1638,12 +1612,18 @@ class AgentBot(WeChatBot):
         调用声明全套正常工具，send_sticker/send_voice 等会直接碰微信窗口，
         daemon 线程绝不能执行它们。
 
-        判定协议（用户定案）：上下文末尾注入一条 system「距上次聊天 X，
-        可以决定是否给用户发消息；不决定发消息请调用 no_reply 工具」——
-        这条 system 不写记忆。模型调 no_reply = 不发（不写任何历史）；
+        判定协议（用户定案）：上下文末尾注入一段 user 文本「sys：距上次
+        聊天 X，可以决定是否给用户发消息；不决定发消息请调用 no_reply
+        工具」——这段文本不写记忆。用 user 而不是 system：当前 thinking
+        模型把「末尾 system」当成续写最后一条 assistant，要求回传
+        reasoning_content（真机 400，主动发起 100% 失败）；换成 user 后
+        就是一次普通的新轮次。模型调 no_reply = 不发（不写任何历史）；
         输出文本或调发送类工具 = 发，按实际发送写 assistant 历史。
+
+        诊断日志全部走 DEBUG（只进 bot.log，不进前端 bot_run.log）。
         """
         if self.paused or self._sending_lock:
+            logger.debug("[主动] 引擎暂停/发送锁，跳过")
             return
         if not getattr(self, "proactive_enabled", False):
             return
@@ -1651,16 +1631,19 @@ class AgentBot(WeChatBot):
                 and getattr(self, "_proactive_sched", None) is not None \
                 and self._proactive_sched._quiet_now():
             # 入队后跨进了安静时段：不发起（留给下一个到期点）
+            logger.debug("[主动] 安静时段，跳过")
             return
         if self._proactive_queue.empty():
             return
         # 天枢任务进行中/成果回传窗口：窗口被任务占用，不主动插话
         try:
             if has_active_tasks(self.tasks_dir):
+                logger.debug("[主动] 天枢任务进行中，跳过")
                 return
         except Exception:
             pass
         if self._budget_exhausted():
+            logger.debug("[主动] 今日预算已满，跳过")
             return
         try:
             ev = self._proactive_queue.get_nowait()
@@ -1671,36 +1654,45 @@ class AgentBot(WeChatBot):
             return
         hist = self._get_history(chat)
         if not hist:
+            logger.debug(f"[主动] {chat!r} 无历史，跳过")
             return
         last = hist[-1]
         last_ts = self._chat_msg_time(last)
         if not last_ts:
+            logger.debug(f"[主动] {chat!r} 最后一条消息时间无效，跳过")
             return
         now = time.time()
         if last.get("role") == "user":
             # 上一条还没回：先走正常回复链路，不在一条旧消息上主动搭话
+            logger.debug(f"[主动] {chat!r} 最后一条是未回复的 user，跳过")
             return
         if now - last_ts < self.proactive_idle_minutes * 60:
+            logger.debug(f"[主动] {chat!r} 空闲不足 "
+                         f"{self.proactive_idle_minutes:g} 分钟，跳过")
             return
-        gap = self._proactive_gap_text(last_ts, now)
-        tail = (f"距上次聊天 {gap}，可以决定是否给用户发消息；"
-                "不决定发消息请调用 no_reply 工具。")
-        # 群聊全接收模式：主动发起同样守「只有工具能发」的纪律（纯文本丢弃）
+        # 群聊标记只信权威缓存（标题区括号人数，处理会话时落盘）。
+        # 未知 = 本次启动后还没处理过——fail-closed，不拿名字启发式赌。
         is_group_chat_flag = (getattr(self, "_chat_is_group", {}) or {}).get(chat)
         if is_group_chat_flag is None:
-            is_group_chat_flag = is_group_chat(chat)
+            logger.debug(f"[主动] {chat!r} 群聊标记未知（尚未处理过），跳过")
+            return
+        gap = self._proactive_gap_text(last_ts, now)
+        tail = (f"sys：距上次聊天 {gap}，可以决定是否给用户发消息；"
+                "不决定发消息请调用 no_reply 工具。")
         tool_only = bool(
             is_group_chat_flag
             and str(getattr(self, "group_reply_mode", "mention"))
             in ("auto", "hybrid"))
+        logger.debug(f"[主动] {chat!r} 到期，距上次 {gap}，开始判定")
         try:
             resp = self.call_vision_api(
-                None, chat_id=chat, system_tail=tail,
+                [{"type": "text", "text": tail}], chat_id=chat,
                 force_no_reply=True, tool_only=tool_only)
         except Exception as e:
-            logger.warning(f"[主动] {chat!r} 判定调用异常: {e}")
+            logger.debug(f"[主动] {chat!r} 判定调用异常: {e}")
             return
         if not resp:
+            logger.debug(f"[主动] {chat!r} 判定调用失败（HTTP/网络），本轮跳过")
             return
         kind = resp.get("kind")
         if kind == "tool_call" and resp.get("name") == "no_reply":
@@ -1710,6 +1702,8 @@ class AgentBot(WeChatBot):
             if self._handle_send_voice(chat, resp, None):
                 self._proactive_sched.mark_sent(chat)
                 self._clear_group_cursor(chat)
+            else:
+                logger.debug(f"[主动] {chat!r} 语音发送未确认，放弃本次")
             return
         if kind == "tool_call" and resp.get("name") == "dispatch_task":
             task_desc = ""
@@ -1723,8 +1717,11 @@ class AgentBot(WeChatBot):
                 self._dispatch_and_notify(chat, chat, task_desc)
                 self._proactive_sched.mark_sent(chat)
                 self._clear_group_cursor(chat)
+            else:
+                logger.debug(f"[主动] {chat!r} 任务投递缺少描述，跳过")
             return
         if kind != "text":
+            logger.debug(f"[主动] {chat!r} 未知响应 kind={kind!r}，跳过")
             return
         actions = resp.get("actions") or []
         if actions:
@@ -1744,13 +1741,14 @@ class AgentBot(WeChatBot):
             return
         text = strip_reply_prefix(str(resp.get("content") or "").strip())
         if not text:
+            logger.debug(f"[主动] {chat!r} 模型未输出文本，跳过")
             return
         if tool_only:
             # 群聊全接收纪律：没有工具动作 = 不发（纯文本丢弃）
             logger.info(f"[主动] {chat!r} 群聊全接收模式下未调发送工具，不发")
             return
         if not self._send_trigger_reply(text, chat):
-            logger.warning(f"[主动] {chat!r} 发送未确认，放弃本次（不写历史）")
+            logger.debug(f"[主动] {chat!r} 发送未确认，放弃本次（不写历史）")
             return
         self._add_history(chat, "assistant", text)
         self._after_reply_sent(chat, text)
@@ -1875,12 +1873,10 @@ class AgentBot(WeChatBot):
         is_group = getattr(self.wx, "_current_is_group", None)
         if is_group is None:
             is_group = is_group_chat(chat_name)
-        # 群聊标记落表：主动发起据此过滤群聊（名字启发式在群名不含「群」
-        # 时不可靠，这里用标题区解析出的权威值）
-        if not hasattr(self, "_chat_is_group"):
-            self._chat_is_group = {}
+        # 群聊标记落表 + 落盘：主动发起据此过滤群聊（名字启发式在群名
+        # 不含「群」时不可靠，这里用标题区解析出的权威值；值变化才写文件）
         if chat_name:
-            self._chat_is_group[chat_name] = bool(is_group)
+            self._set_chat_group(chat_name, is_group)
         group_mode = str(
             getattr(self, "group_reply_mode", "mention") or "mention")
         full_group = bool(is_group) and group_mode in ("auto", "hybrid")
@@ -2044,6 +2040,97 @@ class AgentBot(WeChatBot):
                     os.unlink(p)
                 except OSError:
                     pass
+
+    # ---------- 群聊标记持久化（主动发起候选筛选用） ----------
+
+    def _load_chat_meta(self):
+        """加载 chat_meta.json（会话 -> 是否群聊的权威缓存）。
+
+        文件不存在/损坏时静默跳过；兼容旧格式（值直接是 bool）。只信任
+        bool，其他类型一律忽略——半个坏文件不该把群标记成私聊。
+        """
+        try:
+            with open(self._chat_meta_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        for chat, meta in data.items():
+            flag = meta.get("is_group") if isinstance(meta, dict) else meta
+            if isinstance(flag, bool):
+                self._chat_is_group[str(chat)] = flag
+
+    def _seed_chat_meta(self):
+        """给缺失标记的会话补一次初始种子（仅首次升级/新会话需要）。
+
+        不能直接对未知会话 fail-closed：chat_meta.json 第一次生成时是空的，
+        主动发起会一直等到每个会话先来一条消息。种子规则：
+        - 记忆里的 user 行以「群聊：」开头 → 群聊（普通群聊路径）；
+        - user 行是「发送者：正文」且不带「私聊/群聊」前缀 → 全接收群聊
+          （群聊逐条入史的格式；私聊历史恒带「私聊 - 」前缀）；
+        - 否则退回 is_group_chat 名称启发式。
+        误判成群聊只会让主动发起少一个候选（安全方向）；下一次处理该会话
+        时标题区括号人数会覆盖并落盘。
+        """
+        try:
+            chats = list(self._mem.memory_db.keys())
+        except Exception:
+            return
+        changed = False
+        for chat in chats:
+            if chat in self._chat_is_group:
+                continue
+            flag = is_group_chat(chat)
+            if not flag:
+                try:
+                    for h in self._get_history(chat):
+                        if h.get("role") != "user":
+                            continue
+                        text = str(h.get("content") or "")
+                        if text.startswith("群聊："):
+                            flag = True
+                            break
+                        if (not text.startswith(("私聊", "群聊", "["))
+                                and re.match(r"^[^：\n]{1,20}：", text)):
+                            flag = True
+                            break
+                except Exception:
+                    pass
+            self._chat_is_group[chat] = bool(flag)
+            changed = True
+        if changed:
+            self._save_chat_meta()
+
+    def _save_chat_meta(self):
+        """原子落盘群聊标记（tmp + os.replace；失败只记 DEBUG，不影响运行）。"""
+        if not getattr(self, "_chat_meta_path", ""):
+            return
+        data = {str(chat): {"is_group": bool(flag)}
+                for chat, flag in (self._chat_is_group or {}).items()
+                if isinstance(flag, bool)}
+        tmp = self._chat_meta_path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self._chat_meta_path) or ".",
+                        exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._chat_meta_path)
+        except OSError as e:
+            logger.debug(f"[群聊] 会话元数据保存失败: {e}")
+
+    def _set_chat_group(self, chat, is_group):
+        """写入权威群聊标记；值变化才落盘（避免每条消息都写文件）。"""
+        if not chat:
+            return
+        if not hasattr(self, "_chat_is_group"):
+            self._chat_is_group = {}
+        flag = bool(is_group)
+        if self._chat_is_group.get(chat) is flag:
+            return
+        self._chat_is_group[chat] = flag
+        if hasattr(self, "_chat_meta_path"):
+            self._save_chat_meta()
 
     # ---------- 群聊全接收（auto / hybrid） ----------
 
@@ -2210,9 +2297,10 @@ class AgentBot(WeChatBot):
         items = self._group_items(chat_name, window_msgs, win)
         new_items = self._group_peek_new(chat_name, items)
         if not new_items:
-            # 屏幕上只有已处理过的消息（红圈滞留/重复扫描）：清圈回监听
+            # 屏幕上只有已处理过的消息（红圈滞留/重复扫描）：清圈回监听。
+            # 返回 True = 本轮已处理（无新内容），不要落进失败退避分支。
             self._mark_session_read()
-            return False
+            return True
         batch_has_at = any(
             at_tag in (it["msg"].content or "")
             for it in new_items if it["kind"] in ("text", "quote", "file"))
@@ -2335,7 +2423,11 @@ class AgentBot(WeChatBot):
                 except OSError:
                     pass
         if resp is None:
-            # 调用失败：游标未提交、历史未写 → 下一轮整批重试（8s 退避）
+            # 调用失败：游标未提交、历史未写 → 下一轮整批重试（主循环按
+            # 连续失败次数做 8→16→32→60s 指数退避）。这里保留红圈，
+            # 不清已读，否则这批消息会彻底丢掉。
+            logger.warning(f"[群聊] {chat_name} 判定调用失败，整批 "
+                           f"{len(new_items)} 条未提交，稍后重试")
             return None
         # 先逐条入史（用户消息），再按模型的发送动作追加 assistant 条目
         for it in new_items:

@@ -309,7 +309,8 @@ class TestGroupBatch(unittest.TestCase):
         # 游标已提交：同一批再来不会重复入史、也不会再调模型
         bot.call_vision_api.reset_mock()
         win2 = {"other_blocks": _blocks(), "bot_bottom": 0, "skip_bot": 0}
-        self.assertFalse(bot._handle_group_batch(
+        # 无新内容 = 已处理（清圈），不是失败（不落 8s 退避）
+        self.assertTrue(bot._handle_group_batch(
             "摸鱼集团", "林小满", win2, _window_msgs(), "auto", "@小漓"))
         bot.call_vision_api.assert_not_called()
         self.assertEqual(len(bot._get_history("摸鱼集团")), 4)
@@ -426,6 +427,18 @@ class TestVisualHelpers(unittest.TestCase):
         self.assertNotEqual(_region_fingerprint(a, box),
                             _region_fingerprint(b, box))
         self.assertIsNone(_region_fingerprint(a, None))
+
+
+class TestFailBackoff(unittest.TestCase):
+    def test_exponential_capped(self):
+        bot = AgentBot.__new__(AgentBot)
+        bot._fail_backoff = 8.0
+        self.assertEqual(bot._fail_delay(0), 8.0)
+        self.assertEqual(bot._fail_delay(1), 8.0)
+        self.assertEqual(bot._fail_delay(2), 16.0)
+        self.assertEqual(bot._fail_delay(3), 32.0)
+        self.assertEqual(bot._fail_delay(4), 60.0)
+        self.assertEqual(bot._fail_delay(10), 60.0)
 
 
 if __name__ == "__main__":

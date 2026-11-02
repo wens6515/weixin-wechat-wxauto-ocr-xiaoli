@@ -46,7 +46,8 @@ def _make_bot(**kw):
     bot._handle_send_voice = mock.Mock(return_value=True)
     bot._dispatch_and_notify = mock.Mock()
     bot._pending_placeholders = {}
-    bot._chat_is_group = {}
+    # 群聊标记是候选筛选的唯一依据：小明按私聊（未处理过会 fail-closed）
+    bot._chat_is_group = {"小明": False}
     bot._group_seen = {}
     for k, v in kw.items():
         setattr(bot, k, v)
@@ -107,6 +108,16 @@ class TestScheduler(unittest.TestCase):
         bot._chat_is_group["摸鱼集团"] = True
         sched = ProactiveScheduler(bot)
         sched._next_due["摸鱼集团"] = 0
+        sched._scan_once(time.time())
+        self.assertTrue(bot._proactive_queue.empty())
+
+    def test_unknown_group_flag_skipped(self):
+        """未知群聊标记 fail-closed：不拿名字启发式赌（群名可能不含「群」）。"""
+        bot = self._bot()
+        bot._mem.add("哆菈A夢", "assistant", "在", deep_enabled=False)
+        bot._mem.memory_db["哆菈A夢"]["recent"][-1]["time"] = _ts_ago(3600)
+        sched = ProactiveScheduler(bot)
+        sched._next_due["哆菈A夢"] = 0
         sched._scan_once(time.time())
         self.assertTrue(bot._proactive_queue.empty())
 
@@ -178,15 +189,18 @@ class TestDrainProactive(unittest.TestCase):
         bot._add_history.assert_not_called()
         bot._proactive_sched.mark_sent.assert_not_called()
 
-    def test_tail_system_and_forced_no_reply(self):
+    def test_tail_user_and_forced_no_reply(self):
         bot = self._bot()
         self._run(bot, {"kind": "tool_call", "name": "no_reply",
                         "arguments": "{}"})
         args, kwargs = bot.call_vision_api.call_args
-        self.assertIsNone(args[0])
+        content = args[0]
+        self.assertIsInstance(content, list)
+        text = content[0]["text"]
+        self.assertIn("sys：距上次聊天 1小时", text)
+        self.assertIn("no_reply", text)
         self.assertTrue(kwargs["force_no_reply"])
-        self.assertIn("距上次聊天 1小时", kwargs["system_tail"])
-        self.assertIn("no_reply", kwargs["system_tail"])
+        self.assertNotIn("system_tail", kwargs)
 
     def test_unanswered_last_message_skipped(self):
         bot = self._bot(hist_role="user")
@@ -205,7 +219,7 @@ class TestDrainProactive(unittest.TestCase):
 
 
 class TestProactiveCallShape(unittest.TestCase):
-    def test_no_user_message_and_system_tail_last(self):
+    def test_user_tail_last(self):
         bot = _make_bot()
         bot.memory_file = os.path.join(tempfile.mkdtemp(), "memory.json")
         bot.max_history = 1000
@@ -246,17 +260,65 @@ class TestProactiveCallShape(unittest.TestCase):
         bot._post_chat_completions = mock.Mock(return_value={
             "choices": [{"message": {"content": ""}}]})
         bot.call_vision_api(
-            None, chat_id="小明",
-            system_tail="距上次聊天 3.4小时，可以决定是否给用户发消息；"
-                        "不决定发消息请调用 no_reply 工具。",
-            force_no_reply=True)
+            [{"type": "text",
+              "text": "sys：距上次聊天 3.4小时，可以决定是否给用户发消息；"
+                      "不决定发消息请调用 no_reply 工具。"}],
+            chat_id="小明", force_no_reply=True)
         payload = bot._post_chat_completions.call_args.args[2]
         msgs = payload["messages"]
-        self.assertEqual(msgs[-1]["role"], "system")
-        self.assertIn("距上次聊天 3.4小时", msgs[-1]["content"])
-        self.assertFalse(any(m["role"] == "user" for m in msgs))
+        # thinking 模型要求请求以 user 结尾；末尾 system 会被当成续写
+        # assistant，要求回传 reasoning_content（真机 400）。
+        self.assertEqual(msgs[-1]["role"], "user")
+        self.assertIn("sys：距上次聊天 3.4小时", msgs[-1]["content"][0]["text"])
+        self.assertFalse(any(m["role"] == "system"
+                             and "距上次聊天" in str(m.get("content"))
+                             for m in msgs))
         names = [t["function"]["name"] for t in payload["tools"]]
         self.assertIn("no_reply", names)
+
+
+class TestChatMetaPersistence(unittest.TestCase):
+    def _bot(self, d):
+        bot = AgentBot.__new__(AgentBot)
+        bot.memory_file = os.path.join(d, "memory.json")
+        bot._chat_meta_path = os.path.join(d, "chat_meta.json")
+        bot._chat_is_group = {}
+        return bot
+
+    def test_set_chat_group_persists_and_reloads(self):
+        d = tempfile.mkdtemp()
+        bot = self._bot(d)
+        bot._set_chat_group("摸鱼集团", True)
+        bot._set_chat_group("王美晨", False)
+        self.assertTrue(os.path.isfile(bot._chat_meta_path))
+        other = self._bot(d)
+        other._load_chat_meta()
+        self.assertTrue(other._chat_is_group["摸鱼集团"])
+        self.assertFalse(other._chat_is_group["王美晨"])
+
+    def test_corrupt_file_ignored(self):
+        d = tempfile.mkdtemp()
+        bot = self._bot(d)
+        with open(bot._chat_meta_path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        bot._load_chat_meta()
+        self.assertEqual(bot._chat_is_group, {})
+
+    def test_seed_detects_full_receive_group(self):
+        """全接收群聊历史是「发送者：正文」（无「私聊 - 」前缀）——种子要
+        能从记忆里认出来，不能只靠名字里的「群/集团」。"""
+        d = tempfile.mkdtemp()
+        bot = self._bot(d)
+        mem = mock.Mock()
+        mem.memory_db = {"哆菈A夢": {}, "王美晨": {}}
+        bot.__dict__["_mem_store"] = mem
+        bot._get_history = lambda chat: (
+            [{"role": "user", "content": "哆拉A萝：在吗"}]
+            if chat == "哆菈A夢" else
+            [{"role": "user", "content": "私聊 - 王美晨：在吗"}])
+        bot._seed_chat_meta()
+        self.assertTrue(bot._chat_is_group["哆菈A夢"])
+        self.assertFalse(bot._chat_is_group["王美晨"])
 
 
 if __name__ == "__main__":
