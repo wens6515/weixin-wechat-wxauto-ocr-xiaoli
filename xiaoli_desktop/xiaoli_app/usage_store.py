@@ -210,8 +210,14 @@ class UsageStore:
         是端到端回复耗时记录（非 API 调用），不进调用/token 各桶，单独聚
         合进 reply_by_model（{model: {count, latency_sum}}）。token 缺失
         （记录时无法估算）按 0 计；缓存字段全 0 时 hit_ratio() 返回 None
-        而非 0%。records：旧签名兼容参数（JSONL 时代的外部预读复用），
-        现已忽略——SQL 直接范围查询。"""
+        而非 0%。
+
+        **token / 缓存 / reasoning 只统计成功调用（ok=1）**：被 400 拒绝的
+        请求没有实际消耗 token，旧实现把请求体估算成 prompt + 全量 cache
+        miss 写库，会让命中率和消费严重失真（真机：127 次主动发起 400 把
+        当日命中率从 76% 压到 9%）。calls/fail 仍统计全部尝试；失败次数
+        在 UI 单独展示。records：旧签名兼容参数（JSONL 时代的外部预读
+        复用），现已忽略——SQL 直接范围查询。"""
         del records  # 兼容旧签名；实际数据经 SQL 范围查询
         start = time.time() - days * 86400
         total = _empty_bucket()
@@ -228,14 +234,14 @@ class UsageStore:
                         "COUNT(*) AS calls, "
                         "SUM(CASE WHEN ok THEN 1 ELSE 0 END), "
                         "SUM(CASE WHEN ok THEN 0 ELSE 1 END), "
-                        "COALESCE(SUM(prompt_tokens), 0), "
-                        "COALESCE(SUM(completion_tokens), 0), "
+                        "COALESCE(SUM(CASE WHEN ok THEN prompt_tokens ELSE 0 END), 0), "
+                        "COALESCE(SUM(CASE WHEN ok THEN completion_tokens ELSE 0 END), 0), "
                         "COALESCE(SUM(latency_ms), 0), "
-                        "COALESCE(SUM(cache_hit), 0), "
-                        "COALESCE(SUM(cache_miss), 0), "
-                        "COALESCE(SUM(reasoning), 0), "
-                        "COALESCE(SUM(total_tokens), 0), "
-                        "COALESCE(SUM(CASE WHEN src = 'est' THEN 1 ELSE 0 END), 0) "
+                        "COALESCE(SUM(CASE WHEN ok THEN cache_hit ELSE 0 END), 0), "
+                        "COALESCE(SUM(CASE WHEN ok THEN cache_miss ELSE 0 END), 0), "
+                        "COALESCE(SUM(CASE WHEN ok THEN reasoning ELSE 0 END), 0), "
+                        "COALESCE(SUM(CASE WHEN ok THEN total_tokens ELSE 0 END), 0), "
+                        "COALESCE(SUM(CASE WHEN ok AND src = 'est' THEN 1 ELSE 0 END), 0) "
                         "FROM usage WHERE kind IS NOT 'reply' AND ts >= ? "
                         "GROUP BY m, d",
                         (start,)).fetchall()

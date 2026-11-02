@@ -241,6 +241,12 @@ class TestUsageHook(unittest.TestCase):
         rec = store.records[0]
         self.assertFalse(rec["ok"])
         self.assertEqual(rec["status"], 401)
+        # 失败请求没有实际 token 消耗：不估算、不写缓存，避免污染统计
+        self.assertIsNone(rec["prompt_tokens"])
+        self.assertIsNone(rec["completion_tokens"])
+        self.assertEqual(rec["cache_hit"], 0)
+        self.assertEqual(rec["cache_miss"], 0)
+        self.assertEqual(rec["src"], "fail")
 
     def test_vision_failure_returns_none_and_records(self):
         store = FakeUsageStore()

@@ -56,6 +56,8 @@ def _make_bot(mode="off"):
     bot.active_voice_profile_id = ""
     bot._post_chat_completions = mock.Mock(
         return_value={"choices": [{"message": {"content": "好"}}]})
+    # 发送工具会先确认目标会话；单测无微信窗口，直接放行
+    bot._ensure_chat_active = mock.Mock(return_value=True)
     bot.__dict__.pop("_sticker_store_inst", None)
     return bot
 
@@ -261,6 +263,18 @@ class TestToolExecution(_LibBotTest):
         self.assertTrue(bot._send_sticker_file.called)
         self.assertIn("已发出", receipt)
         self.assertTrue(result["sticker_sent"])
+
+    def test_session_not_confirmed_does_not_send(self):
+        """窗口不在目标会话时 fail-closed，绝不贴到当前聊天里。"""
+        bot = self._bot("catalog")
+        bot._ensure_chat_active.return_value = False
+        bot._send_sticker_file = mock.Mock()
+        result, receipt = _run_tool(bot, "send_sticker",
+                                    {"file": "生气1.png"})
+        self.assertFalse(bot._send_sticker_file.called)
+        self.assertIn("没有发送", receipt)
+        # 工具失败 + 无最终文本 → 整次调用返回 None（上层降级，不伪造回复）
+        self.assertIsNone(result)
 
     def test_sticker_then_empty_text_is_pure_sticker(self):
         """发送成功 + 模型不再输出文字 = 纯表情包回复（不降级）。"""

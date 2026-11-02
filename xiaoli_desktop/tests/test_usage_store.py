@@ -115,6 +115,27 @@ class TestUsageStore(unittest.TestCase):
         self.assertIsNone(hit_ratio(s2["by_model"]["old"]))
         self.assertIsNone(hit_ratio({"calls": 1, "cache_hit": 0, "cache_miss": 0}))
 
+    def test_failed_rows_excluded_from_tokens_and_cache(self):
+        """失败调用的估算 token 不得进入 token/缓存口径（真机：127 次 400
+        把当日命中率从 76% 压到 9%）。calls/fail 仍统计尝试次数。"""
+        from xiaoli_app.usage_store import hit_ratio
+        self.store.record(kind="vision", model="m1", prompt_tokens=1000,
+                          completion_tokens=50, ok=True, cache_hit=800,
+                          cache_miss=200, src="api")
+        self.store.record(kind="vision", model="m1", prompt_tokens=3000,
+                          completion_tokens=None, ok=False, status=400,
+                          cache_hit=0, cache_miss=3000, src="fail")
+        s = self.store.summary(days=1)
+        b = s["total"]
+        self.assertEqual(b["calls"], 2)
+        self.assertEqual(b["ok"], 1)
+        self.assertEqual(b["fail"], 1)
+        self.assertEqual(b["prompt"], 1000)
+        self.assertEqual(b["cache_hit"], 800)
+        self.assertEqual(b["cache_miss"], 200)
+        self.assertAlmostEqual(hit_ratio(b), 0.8)
+        self.assertEqual(s["by_model"]["m1"]["prompt"], 1000)
+
     def test_reply_records_separate_from_calls(self):
         """kind=reply 是端到端回复耗时记录：不计入调用/token 各桶，单独聚
         合进 reply_by_model 供「平均回复耗时」列。"""

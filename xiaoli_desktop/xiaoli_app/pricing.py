@@ -171,6 +171,9 @@ def estimate_records(records, days=30, overrides=None):
     """用量记录列表 → 估算消费汇总 {total, today, by_day, priced, unpriced}。
 
     records：usage.jsonl 行（UsageStore._load 的输出，含 ts 供分档）。
+    失败调用（ok=False）直接跳过：400/401 等被拒绝的请求没有实际 token
+    消耗，旧记录里为排障估算的 prompt_tokens 不能拿来计价（真机：127 次
+    主动发起 400 把当日消费从 ¥0.02 估成 ¥0.49，还会误触每日预算闸）。
     total 为 None 表示窗口内全部调用都没有价目（unpriced=条数）；部分有
     价目时只累加有价目的部分，unpriced 计条数供 UI 提示「N 条无价目未计入」。"""
     start = time.time() - days * 86400
@@ -179,6 +182,8 @@ def estimate_records(records, days=30, overrides=None):
     unpriced = 0
     by_day = {}
     for r in records or []:
+        if r.get("ok") is False:
+            continue
         ts = r.get("ts")
         if not isinstance(ts, (int, float)) or ts < start:
             continue
