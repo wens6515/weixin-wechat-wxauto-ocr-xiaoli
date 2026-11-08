@@ -177,6 +177,13 @@
               </div>
             </div>
 
+            <!-- 配置未完成提示（缺 Key / 文件目录 / 新手引导） -->
+            <div class="glass setup-banner" id="setupBanner" hidden>
+              <svg class="ic"><use href="#i-spark"/></svg>
+              <span id="setupBannerText"></span>
+              <button class="mini-btn" id="setupBannerGo">去配置</button>
+            </div>
+
             <!-- 主控卡 -->
             <div class="glass master-card">
               <div class="master-left">
@@ -475,7 +482,13 @@
 
       <!-- ================= 设置页 ================= -->
       <section class="page" data-page="settings">
-        <h1 class="page-title">设置</h1>
+        <div class="page-title-row">
+          <h1 class="page-title">设置</h1>
+          <div class="page-title-actions">
+            <button class="mini-btn ghost" id="btnOnboarding"><svg class="ic"><use href="#i-spark"/></svg>新手引导</button>
+            <button class="mini-btn ghost" id="btnOpenDocs"><svg class="ic"><use href="#i-ext"/></svg>使用文档</button>
+          </div>
+        </div>
         <div class="anchor-row" id="anchorRow">
           <button class="anchor active" data-anchor="sec-appearance">外观主题</button>
           <button class="anchor" data-anchor="sec-identity">小漓身份</button>
@@ -486,6 +499,7 @@
           <button class="anchor" data-anchor="sec-voice">语音发送</button>
           <button class="anchor" data-anchor="sec-override">按聊天覆盖</button>
           <button class="anchor" data-anchor="sec-remind">定时与监视</button>
+          <button class="anchor" data-anchor="sec-behavior">对话行为</button>
           <button class="anchor" data-anchor="sec-followup">主动追尾</button>
           <button class="anchor" data-anchor="sec-groupmode">群聊接收</button>
           <button class="anchor" data-anchor="sec-proactive">主动发起</button>
@@ -1009,15 +1023,76 @@
   </div>
 
   <!-- 首启引导（工作目录 + 微信名称，一步完成） -->
-  <div class="modal glass" id="modalFirstRun" hidden>
-    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>欢迎使用小漓</b></div>
-    <p class="confirm-text">首次使用请确认三个工作目录，并填写小漓在微信里的名称（群里 @ 这个称呼认小漓）。</p>
-    <p class="confirm-text" style="font-size:.85em;opacity:.8">建议同时到电脑版微信的 <b>设置 → 通用</b> 里开启「语音自动转文字」——开启后小漓才能读懂对方发来的语音消息。</p>
-    <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="frTasks"></code><button class="mini-btn ghost" id="frPickTasks">浏览…</button></div>
-    <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="frFiles"></code><button class="mini-btn ghost" id="frPickFiles">浏览…</button></div>
-    <div class="dir-row"><span class="dir-k">记忆存储位置</span><code id="frMemory"></code></div>
-    <label class="form-item block" style="margin-top:12px"><span>微信名称（小漓在群里认这个称呼）</span><input id="frNickname" type="text" maxlength="32"></label>
-    <div class="editor-actions"><button class="mini-btn" id="frSave"><svg class="ic"><use href="#i-check"/></svg>完成，开始使用</button></div>
+  <!-- 新手引导（首启 / 设置页重跑） -->
+  <div class="modal glass onb" id="modalOnboarding" hidden>
+    <div class="modal-head"><img class="tb-logo" src="assets/mascot.png" alt=""><b>欢迎使用小漓</b>
+      <button class="win-btn modal-close" data-close><svg class="ic"><use href="#i-x"/></svg></button>
+    </div>
+    <div class="onb-progress" id="onbProgress">
+      <span class="onb-dot active" data-step="1">1 环境</span>
+      <span class="onb-dot" data-step="2">2 模型</span>
+      <span class="onb-dot" data-step="3">3 身份</span>
+      <span class="onb-dot" data-step="4">4 文件</span>
+      <span class="onb-dot" data-step="5">5 完成</span>
+    </div>
+
+    <div class="onb-step" data-step="1">
+      <p class="confirm-text">小漓靠截图 + OCR 读微信，不修改微信数据。开始前请确认：微信 PC 4.x 已登录，且运行时不要最小化微信窗口。</p>
+      <div class="onb-status" id="onbEnvRows"></div>
+      <p class="onb-tip">建议在电脑版微信「设置 → 通用」开启「语音自动转文字」——开启后小漓才能读懂对方发来的语音。任务桥默认关闭，任务目录与天枢配置不在这里；开启任务桥后会单独引导。</p>
+      <div class="editor-actions"><button class="mini-btn ghost" id="onbEnvRetry"><svg class="ic"><use href="#i-refresh"/></svg>重新检查</button></div>
+    </div>
+
+    <div class="onb-step" data-step="2" hidden>
+      <p class="confirm-text">接入模型。API Key 只保存在本机（DPAPI 加密），不会上传到小漓之外的地方。</p>
+      <div class="form-grid">
+        <label class="form-item"><span>服务商</span><select id="onbProv"></select></label>
+        <label class="form-item"><span>Base URL</span><input id="onbBase" type="text" placeholder="https://api.deepseek.com/v1/chat/completions"></label>
+      </div>
+      <div class="form-grid">
+        <label class="form-item"><span>API Key</span><input id="onbKey" type="password" placeholder="留空 = 保持已保存的 Key"></label>
+        <label class="form-item"><span>对话模型</span><input id="onbModel" type="text" list="onbModelList" placeholder="deepseek:deepseek-flash"><datalist id="onbModelList"></datalist></label>
+      </div>
+      <div class="editor-actions">
+        <button class="mini-btn ghost" id="onbTest"><svg class="ic"><use href="#i-refresh"/></svg>测试连接</button>
+        <span class="test-result" id="onbTestResult"></span>
+      </div>
+      <p class="onb-tip">测试连接只读取模型列表，不消耗 token。也可以先跳过；未配置 Key 时小漓无法回复，首页会持续提示。</p>
+    </div>
+
+    <div class="onb-step" data-step="3" hidden>
+      <p class="confirm-text">小漓在微信里的身份。群里 @ 这个称呼认她；角色卡决定她是谁、怎么说话。</p>
+      <div class="form-grid">
+        <label class="form-item"><span>微信名称</span><input id="onbNickname" type="text" maxlength="32" placeholder="小漓"></label>
+        <label class="form-item"><span>角色卡</span><select id="onbCard"></select></label>
+      </div>
+      <p class="onb-tip">先用默认「小漓」就可以；之后随时到「角色卡」页编辑人设、温度或导入新卡。</p>
+    </div>
+
+    <div class="onb-step" data-step="4" hidden>
+      <p class="confirm-text">微信文件接收目录（可选）。对方发来的文件会在这个目录里按文件名查找；不配置也能正常聊天，只是收文件功能不可用。</p>
+      <div class="dir-row"><span class="dir-k">微信接收目录</span><code id="onbFiles"></code>
+        <button class="mini-btn ghost" id="onbPickFiles">浏览…</button></div>
+      <p class="onb-tip">在电脑版微信「设置 → 文件管理」里可以看到实际目录；换过存储位置的用户请手动选择。任务工作目录不在这里配置。</p>
+    </div>
+
+    <div class="onb-step" data-step="5" hidden>
+      <p class="confirm-text">准备就绪。下面是当前检查结果：</p>
+      <div class="onb-status" id="onbSummary"></div>
+      <p class="onb-tip" id="onbEngineHint">运行期间请勿最小化微信窗口；小漓会把微信窗口大小固定在工作区右半屏。</p>
+      <div class="editor-actions">
+        <button class="mini-btn ghost" id="onbDocs"><svg class="ic"><use href="#i-ext"/></svg>查看使用文档</button>
+        <button class="mini-btn" id="onbStart"><svg class="ic"><use href="#i-play"/></svg>初始化并开始监听</button>
+        <button class="mini-btn ghost" id="onbLater">只初始化，稍后开始</button>
+      </div>
+    </div>
+
+    <div class="modal-actions onb-actions">
+      <button class="mini-btn ghost" id="onbSkip">跳过引导</button>
+      <span class="onb-spacer"></span>
+      <button class="mini-btn ghost" id="onbBack" hidden>上一步</button>
+      <button class="mini-btn" id="onbNext">下一步</button>
+    </div>
   </div>
 
   <!-- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） -->

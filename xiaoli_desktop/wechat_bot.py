@@ -464,7 +464,7 @@ class WeChatBot(MediaCaptureMixin):
         if self.group_reply_mode not in ("mention", "auto", "hybrid"):
             self.group_reply_mode = "mention"
         # 主动发起对话（默认关）：每会话在 [min,max] 分钟随机取时间点做一次
-        # 判定调用，末尾注入「距上次聊天 X」system（不写记忆），模型调
+        # 判定调用，末尾注入「距上次聊天 X」user 文本（不写记忆），模型调
         # no_reply 表示不发，否则按正常回复发出。调度线程只算时间，判定与
         # 发送都在主循环（工具会碰微信窗口，daemon 线程绝不能执行）。
         self.proactive_enabled = bool(cfg.get("proactive_enabled", False))

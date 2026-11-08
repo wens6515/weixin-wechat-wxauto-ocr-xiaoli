@@ -21,7 +21,7 @@ const S = {
   ui: null, misc: null, voice: null, overrides: {},
   providers: [], cards: [], activeCardId: "", editingCardId: "",
   memChat: "", memMode: "overview", deepOffset: 0, deepQuery: "", memRows: [],
-  trigRows: [], engineState: "loading", lastTrend: null,
+  trigRows: [], engineState: "loading", lastTrend: null, docsUrl: "",
 };
 
 /* ============================================================
@@ -2347,34 +2347,364 @@ bindAutoSave("#spImageGenKey", saveMediaSend);
 bindAutoSave("#spRemotePort", applyRemotePanel);
 
 /* ============================================================
-   首启引导（工作目录 + 微信名称，一步完成）
+   新手引导（首启 / 设置页重跑）
+   五步：环境 → 模型 → 身份/角色卡 → 微信文件目录（可选）→ 完成
+   任务工作目录不在这里：任务桥默认关，开启任务桥后走天枢配置引导。
    ============================================================ */
-async function showFirstRun() {
-  const r = await API.first_run_defaults();
-  if (!r.ok) return;
-  $("#frTasks").textContent = r.tasks_dir || "";
-  $("#frFiles").textContent = r.file_storage_path || "";
-  $("#frMemory").textContent = r.memory_file || "memory.json";
-  $("#frNickname").value = r.bot_nickname || "小漓";
-  openModal("modalFirstRun");
+const DEFAULT_DOCS_URL =
+  "https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/blob/main/docs/使用文档/README.md";
+const ONB = { step: 1, status: null, providers: [], provIndex: 0,
+              cards: [], defaults: {}, finishing: false };
+
+async function openDocs() {
+  const url = S.docsUrl || DEFAULT_DOCS_URL;
+  // 远程面板是手机浏览器，直接新开页；本地 pywebview 走系统浏览器
+  if (window.__XL_REMOTE__) { window.open(url, "_blank"); return; }
+  const r = await API.open_external(url);
+  if (!r || !r.ok) {
+    toast("打开使用文档失败，可手动访问 GitHub 仓库 docs/使用文档", "err");
+  }
 }
-$("#frPickTasks").addEventListener("click", () => pickDir("#frTasks"));
-$("#frPickFiles").addEventListener("click", () => pickDir("#frFiles"));
-$("#frSave").addEventListener("click", async () => {
+
+function onbRow(label, ok, detail, kind) {
+  const cls = kind || (ok === true ? "ok" : ok === false ? "bad" : "warn");
+  return `<div class="onb-status-row ${cls}"><span class="dot"></span>` +
+    `<span><b>${esc(label)}</b> · ${esc(detail || "")}</span></div>`;
+}
+
+function renderOnbEnv(status) {
+  const st = status || {};
+  const w = st.wechat || {};
+  const scale = st.scale || {};
+  const noWindow = !!w.ok && w.window_found === false;
+  const wOk = !!w.ok && !w.minimized && !noWindow;
+  const wd = w.minimized
+    ? "微信窗口已最小化——运行前请恢复窗口（最小化时视觉通道是盲的）"
+    : (noWindow
+        ? "微信进程在运行，但没有找到主窗口——请打开微信主窗口"
+        : (w.detail || "未检测到微信窗口"));
+  $("#onbEnvRows").innerHTML = [
+    onbRow("微信 PC 版", wOk, wd, wOk ? undefined : (w.ok ? "warn" : "bad")),
+    onbRow("显示缩放", scale.ok === true, scale.detail || "未检测到",
+      scale.ok === true ? "ok" : "warn"),
+  ].join("");
+}
+
+function renderOnbSummary() {
+  const st = ONB.status || {};
+  const w = st.wechat || {};
+  const api = st.api || {};
+  const card = st.card || {};
+  const files = st.files_dir || {};
+  const noWindow = !!w.ok && w.window_found === false;
+  const wOk = !!w.ok && !w.minimized && !noWindow;
+  const wd = w.minimized ? "微信窗口已最小化"
+    : (noWindow ? "微信进程在运行，但没有找到主窗口"
+      : (w.detail || "未检测到微信窗口"));
+  $("#onbSummary").innerHTML = [
+    onbRow("微信", wOk, wd, wOk ? undefined : (w.ok ? "warn" : "bad")),
+    onbRow("模型", !!api.ok, api.detail || "未配置", api.ok ? "ok" : "bad"),
+    onbRow("角色卡", !!card.ok, card.name || "未找到角色卡",
+      card.ok ? "ok" : "bad"),
+    onbRow("微信接收目录", !!files.ok,
+      files.ok ? files.detail : "未配置（可选，收文件功能不可用）",
+      files.ok ? "ok" : "warn"),
+  ].join("");
+  const eng = st.engine || {};
+  $("#onbEngineHint").textContent = eng.state === "running"
+    ? "引擎已在运行；如需暂停，回首页点主按钮。"
+    : "运行期间请勿最小化微信窗口；小漓会把微信窗口大小固定在工作区右半屏。";
+}
+
+async function refreshOnbStatus() {
+  const st = await API.onboarding_status();
+  if (st && st.ok) {
+    ONB.status = st;
+    S.docsUrl = st.docs_url || S.docsUrl;
+  }
+  return ONB.status;
+}
+
+function fillOnbProvider() {
+  const p = ONB.providers[ONB.provIndex] || {};
+  $("#onbBase").value = p.base_url || "";
+  $("#onbKey").value = "";
+  $("#onbKey").placeholder = p.api_key ? "已保存，留空保持不变" : "sk-...";
+  const models = p.models || [];
+  $("#onbModelList").innerHTML = models.map(
+    (m) => `<option value="${esc(m)}"></option>`).join("");
+  const card = (ONB.cards || []).find((c) => c.id === S.activeCardId);
+  $("#onbModel").value =
+    (card && card.chat_provider === p.id && card.chat_model) ||
+    models[0] || "";
+}
+
+function mergeOnbProviders(existing) {
+  // 新手引导要展示全部预设，而不是只展示 config 里已经落盘的那一个
+  // （全新 config 往往只迁移出 DeepSeek，用户会以为没有别家可选）。
+  const byId = new Map((existing || []).filter((p) => p && p.id)
+    .map((p) => [String(p.id), p]));
+  const out = [];
+  for (const preset of PRESETS) {
+    const cur = byId.get(preset.id);
+    if (cur) {
+      out.push({
+        ...preset, ...cur,
+        models: (cur.models && cur.models.length) ? cur.models : [...preset.models],
+      });
+      byId.delete(preset.id);
+    } else {
+      out.push({ ...preset, api_key: "", models: [...preset.models] });
+    }
+  }
+  // 用户自建的 Provider（id 不在预设里）排在后面，保留原配置
+  for (const p of byId.values()) out.push(p);
+  return out;
+}
+
+async function showOnboarding() {
+  const st = await API.onboarding_status();
+  if (!st || !st.ok) {
+    toast((st && st.error) || "读取配置状态失败", "err");
+    return;
+  }
+  ONB.status = st;
+  S.docsUrl = st.docs_url || S.docsUrl || DEFAULT_DOCS_URL;
+  const [pr, cr, fd] = await Promise.all([
+    API.get_providers(), API.list_cards(), API.first_run_defaults(),
+  ]);
+  const existing = (pr && pr.ok && pr.providers) ? pr.providers : [];
+  ONB.providers = JSON.parse(JSON.stringify(mergeOnbProviders(existing)));
+  ONB.cards = (cr && cr.ok && cr.cards) ? cr.cards : [];
+  ONB.defaults = (fd && fd.ok) ? fd : {};
+  if (cr && cr.ok && cr.active_id) S.activeCardId = cr.active_id;
+  const activeProv = (ONB.cards.find((c) => c.id === S.activeCardId) || {}).chat_provider;
+  ONB.provIndex = Math.max(0, ONB.providers.findIndex((p) =>
+    p.id === activeProv || (activeProv ? false : !!p.api_key)));
+  if (activeProv && ONB.providers[ONB.provIndex]?.id !== activeProv) {
+    const hit = ONB.providers.findIndex((p) => p.id === activeProv);
+    if (hit >= 0) ONB.provIndex = hit;
+  }
+  $("#onbProv").innerHTML = ONB.providers.map((p, i) =>
+    `<option value="${i}">${esc(p.name || p.id || ("Provider " + (i + 1)))}</option>`).join("");
+  $("#onbProv").value = String(ONB.provIndex);
+  fillOnbProvider();
+  $("#onbNickname").value = st.card?.nickname || "小漓";
+  $("#onbCard").innerHTML = ONB.cards.length
+    ? ONB.cards.map((c) =>
+        `<option value="${esc(c.id)}">${esc(c.name || c.id)}</option>`).join("")
+    : `<option value="">（默认角色卡）</option>`;
+  $("#onbCard").value = (cr && cr.active_id) || S.activeCardId || "";
+  $("#onbFiles").textContent = (ONB.defaults.file_storage_path || "（未配置，可稍后设置）");
+  $("#onbTestResult").textContent = "";
+  renderOnbEnv(st);
+  onbStep(1);
+  openModal("modalOnboarding");
+}
+
+function onbStep(n) {
+  ONB.step = Math.max(1, Math.min(5, n));
+  $$(".onb-step").forEach((el) => {
+    el.hidden = Number(el.dataset.step) !== ONB.step;
+  });
+  $$(".onb-dot").forEach((el) => {
+    const k = Number(el.dataset.step);
+    el.classList.toggle("active", k === ONB.step);
+    el.classList.toggle("done", k < ONB.step);
+  });
+  $("#onbBack").hidden = ONB.step === 1;
+  $("#onbNext").hidden = ONB.step === 5;
+  if (ONB.step === 5) refreshOnbStatus().then(renderOnbSummary);
+}
+
+async function saveOnbModel() {
+  const p = ONB.providers[ONB.provIndex];
+  if (!p) { toast("没有可用的模型服务商", "err"); return false; }
+  const base = $("#onbBase").value.trim();
+  const key = $("#onbKey").value.trim();
+  const model = $("#onbModel").value.trim() || (p.models || [])[0] || "";
+  if (!base) { toast("请填写 Base URL", "err"); return false; }
+  if (!key && !p.api_key) {
+    toast("还没有填 API Key——可以先继续，稍后到「模型」页补；小漓暂时无法回复", "warn");
+  }
+  const list = ONB.providers.map((x, i) => {
+    if (i !== ONB.provIndex) return x;
+    const models = [...(x.models || [])];
+    if (model && !models.includes(model)) models.push(model);
+    return { ...x, base_url: base, api_key: key || x.api_key || "", models };
+  });
+  const r = await API.save_providers(list, p.id, model || null);
+  if (!r || !r.ok) { toast((r && r.error) || "保存模型配置失败", "err"); return false; }
+  ONB.providers = r.providers || list;
+  S.providers = ONB.providers;
+  return true;
+}
+
+async function saveOnbIdentity() {
+  const nick = $("#onbNickname").value.trim();
+  if (!nick) { toast("微信名称不能为空", "err"); return false; }
+  // 先切卡再写昵称：set_nickname 写的是「当前活跃卡」，顺序反了会把
+  // 昵称写到旧卡上，新卡仍是原来的称呼。
+  const cid = $("#onbCard").value;
+  if (cid && cid !== S.activeCardId) {
+    const ar = await API.activate_card(cid);
+    if (ar && ar.ok) {
+      S.activeCardId = cid;
+    } else {
+      toast((ar && ar.error) || "切换角色卡失败（稍后可在角色卡页重试）", "warn");
+    }
+  }
+  const r = await API.set_nickname(nick);
+  if (!r || !r.ok) { toast((r && r.error) || "保存微信名称失败", "err"); return false; }
+  return true;
+}
+
+async function saveOnbFiles() {
+  const raw = $("#onbFiles").textContent.trim();
+  const files = raw.startsWith("（") ? "" : raw;
+  const d = ONB.defaults || {};
   const r = await API.save_first_run(
-    $("#frTasks").textContent.trim(),
-    $("#frFiles").textContent.trim(),
-    $("#frMemory").textContent.trim(),
-    $("#frNickname").value.trim());
-  if (!r.ok) { toast(r.error || "保存失败", "err"); return; }
-  await finishFirstRun("欢迎，配置已就绪 ✓ 到「模型」页填入 API Key 即可开始");
-});
-async function finishFirstRun(msg) {
-  closeModal();
-  toast(msg || "欢迎，配置已就绪 ✓ 到「模型」页填入 API Key 即可开始", "ok");
-  const cfg = await API.get_config();
-  if (cfg.ok) { S.ui = cfg.ui; S.misc = cfg.misc; refreshSettings(); }
+    d.tasks_dir || "", files, d.memory_file || "memory.json",
+    $("#onbNickname").value.trim() || "小漓");
+  if (!r || !r.ok) { toast((r && r.error) || "保存文件目录失败", "err"); return false; }
+  if (S.misc) S.misc.file_storage_path = files;
+  return true;
 }
+
+async function startEngineFromOnboarding() {
+  if (S.engineState === "running") { toast("引擎已在运行", "ok"); return; }
+  if (S.engineState === "idle" || S.engineState === "error") {
+    const r = await API.engine_action("initialize");
+    if (!r || !r.ok) { toast((r && r.error) || "初始化请求失败", "err"); return; }
+    toast("正在初始化引擎，请稍候…", "");
+    for (let i = 0; i < 120; i++) {
+      await new Promise((res) => setTimeout(res, 500));
+      const st = await API.get_status();
+      if (!st || !st.ok) continue;
+      if (st.state === "initialized") {
+        const sr = await API.engine_action("start");
+        toast(sr && sr.ok ? "已开始监听微信消息 ✓" : "初始化完成，请回首页点「启动 bot」",
+          sr && sr.ok ? "ok" : "warn");
+        return;
+      }
+      if (st.state === "running") { toast("已开始监听微信消息 ✓", "ok"); return; }
+      if (st.state === "error") {
+        const d = await API.engine_error_detail();
+        toast("初始化失败：" + ((d && d.error) || st.error || "请查看首页提示"), "err");
+        return;
+      }
+    }
+    toast("初始化超时，请回首页点主按钮重试", "warn");
+    return;
+  }
+  const r = await API.engine_action("start");
+  toast(r && r.ok ? "已开始监听微信消息 ✓" : "启动失败，请回首页重试",
+    r && r.ok ? "ok" : "err");
+}
+
+async function finishOnboarding(start) {
+  if (ONB.finishing) return;
+  ONB.finishing = true;
+  try {
+    const r = await API.onboarding_complete();
+    if (!r || !r.ok) { toast((r && r.error) || "保存引导状态失败", "err"); return; }
+    closeModal();
+    toast("配置完成，欢迎使用小漓 ✓", "ok");
+    const cfg = await API.get_config();
+    if (cfg && cfg.ok) {
+      S.ui = cfg.ui; S.misc = cfg.misc; S.voice = cfg.voice;
+      S.docsUrl = cfg.docs_url || S.docsUrl;
+      if (S.misc) S.misc.bot_nickname = $("#onbNickname").value.trim() || S.misc.bot_nickname;
+      refreshSettings();
+    }
+    await refreshSetupBanner();
+    if (start) await startEngineFromOnboarding();
+  } finally {
+    ONB.finishing = false;
+  }
+}
+
+async function refreshSetupBanner() {
+  const st = await API.onboarding_status();
+  if (!st || !st.ok) { $("#setupBanner").hidden = true; return; }
+  S.docsUrl = st.docs_url || S.docsUrl;
+  const msgs = [];
+  let kind = "settings";
+  if (!st.onboarding_done) { msgs.push("新手引导还没完成"); kind = "onboarding"; }
+  if (st.api && !st.api.ok) {
+    msgs.push("模型未配置，小漓无法回复");
+    if (kind !== "onboarding") kind = "models";
+  }
+  // 文件接收目录是可选项：不在首页常驻提示（首启完成页/设置页已说明），
+  // 避免不用文件功能的用户被长期打扰。
+  const banner = $("#setupBanner");
+  if (!msgs.length) { banner.hidden = true; return; }
+  $("#setupBannerText").textContent = msgs.join(" · ");
+  banner.dataset.kind = kind;
+  banner.hidden = false;
+}
+
+$("#onbProv").addEventListener("change", () => {
+  ONB.provIndex = Number($("#onbProv").value) || 0;
+  fillOnbProvider();
+});
+$("#onbEnvRetry").addEventListener("click", async () => {
+  await refreshOnbStatus();
+  renderOnbEnv(ONB.status);
+});
+$("#onbPickFiles").addEventListener("click", async () => {
+  const p = await pickDir("#onbFiles");
+  if (p) toast("微信接收目录已选择，点「下一步」保存", "ok");
+});
+$("#onbTest").addEventListener("click", async () => {
+  const p = ONB.providers[ONB.provIndex] || {};
+  const key = $("#onbKey").value.trim() || p.api_key || "";
+  const el = $("#onbTestResult");
+  if (!key) { el.textContent = "请先填写 API Key"; el.className = "test-result bad"; return; }
+  el.textContent = "测试中…"; el.className = "test-result";
+  const r = await API.test_provider($("#onbBase").value.trim(), key);
+  if (!r || !r.ok) {
+    el.textContent = "连接失败：" + ((r && r.error) || "未知错误");
+    el.className = "test-result bad";
+    return;
+  }
+  const models = r.models || [];
+  $("#onbModelList").innerHTML = models.map(
+    (m) => `<option value="${esc(m)}"></option>`).join("");
+  if (!$("#onbModel").value.trim() && models.length) $("#onbModel").value = models[0];
+  el.textContent = `连接成功（${r.total || models.length} 个模型）`;
+  el.className = "test-result ok";
+});
+$("#onbBack").addEventListener("click", () => onbStep(ONB.step - 1));
+$("#onbNext").addEventListener("click", async () => {
+  const btn = $("#onbNext");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    const s = ONB.step;
+    if (s === 2 && !(await saveOnbModel())) return;
+    if (s === 3 && !(await saveOnbIdentity())) return;
+    if (s === 4 && !(await saveOnbFiles())) return;
+    if (s < 5) onbStep(s + 1);
+  } finally {
+    btn.disabled = false;
+  }
+});
+$("#onbDocs").addEventListener("click", openDocs);
+$("#onbStart").addEventListener("click", () => finishOnboarding(true));
+$("#onbLater").addEventListener("click", () => finishOnboarding(false));
+$("#onbSkip").addEventListener("click", () => finishOnboarding(false));
+$("#btnOpenDocs").addEventListener("click", openDocs);
+$("#btnOnboarding").addEventListener("click", async () => {
+  const r = await API.onboarding_reset();
+  if (!r || !r.ok) { toast((r && r.error) || "重置引导失败", "err"); return; }
+  await showOnboarding();
+});
+$("#setupBannerGo").addEventListener("click", () => {
+  const kind = $("#setupBanner").dataset.kind;
+  if (kind === "onboarding") showOnboarding();
+  else goPage(kind === "models" ? "models" : "settings");
+});
 
 /* ---------- 天枢配置引导（任务桥首次开启 / 设置页手动重跑） ---------- */
 async function openTianshuGuide() {
@@ -2529,6 +2859,7 @@ requestAnimationFrame(() =>
   S.misc = cfg.misc;
   S.voice = cfg.voice;
   S.overrides = cfg.overrides || {};
+  S.docsUrl = cfg.docs_url || DEFAULT_DOCS_URL;
   applyStartupAppearance();
   applyFollowSystem();
   const st = await API.get_status();
@@ -2547,5 +2878,6 @@ requestAnimationFrame(() =>
     // 保险：微信没开/没登录完成时主动提醒（环境卡的红点太静默）
     toast("没检测到微信窗口——请先打开并登录电脑端微信，小漓才能开始工作", "warn");
   }
-  if (cfg.first_run_needed) showFirstRun();
+  if (!cfg.onboarding_done) showOnboarding();
+  else refreshSetupBanner();
 })();

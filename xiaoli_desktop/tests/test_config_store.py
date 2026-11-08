@@ -698,6 +698,33 @@ class TestSecretEncryption(unittest.TestCase):
             self.assertIn(config_store._DPAPI_PREFIX, raw,
                           "DPAPI 可用时必须加密落盘")
 
+    def test_image_gen_key_encrypted_at_rest(self):
+        """画图 API Key 与聊天 Key 同口径：落盘加密、读回明文。"""
+        cfg = {"image_gen_api_key": "img-plain-42"}
+        config_store.save_config(cfg, self.cfg_path)
+        with open(self.cfg_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        self.assertNotIn("img-plain-42", raw, "落盘文件不得包含明文画图 key")
+        if config_store._DPAPI_OK:
+            self.assertIn(config_store._DPAPI_PREFIX, raw)
+        cfg1 = config_store.load_config_store(self.cfg_path, self.cards_dir)
+        self.assertEqual(cfg1["image_gen_api_key"], "img-plain-42")
+
+    def test_backup_also_encrypted(self):
+        """升级时旧明文 key 会被复制进 .bak；备份也要迁成密文。"""
+        if not config_store._DPAPI_OK:
+            self.skipTest("无 DPAPI 环境")
+        cfg = {"ai_api_key": "sk-backup-42",
+               "image_gen_api_key": "img-backup-42",
+               "providers": [{"id": "p1", "base_url": "http://x",
+                              "api_key": "sk-backup-42", "models": []}]}
+        self._write_plain(cfg)
+        config_store.save_config(cfg, self.cfg_path)
+        with open(self.cfg_path + ".bak", "r", encoding="utf-8") as f:
+            bak = f.read()
+        self.assertNotIn("sk-backup-42", bak)
+        self.assertNotIn("img-backup-42", bak)
+
     def test_roundtrip_key_preserved(self):
         """load（解密）→ save（加密）→ load（解密）：key 一致。"""
         cfg = {

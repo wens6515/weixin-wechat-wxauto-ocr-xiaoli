@@ -53,6 +53,17 @@ logger = logging.getLogger("xiaoli")
 # 避免 import 环（wechat_bot 反向引用 xiaoli_app.*）。
 _MODEL_TIP = "strip_model_prefix / models_endpoint 延迟导入自 wechat_bot"
 
+# 使用文档入口（首启完成页 / 设置页顶部共用，只维护这一处）。
+# 指向仓库 docs 目录的索引页；文档改名时同步这里与 README 入口。
+DOCS_URL = ("https://github.com/wens6515/weixin-wechat-wxauto-ocr-xiaoli/"
+            "blob/main/docs/使用文档/README.md")
+
+
+def _proxies_from_cfg(cfg: dict) -> dict | None:
+    """web_proxy → requests 的 proxies 字典（空 = 直连）。"""
+    p = str((cfg or {}).get("web_proxy") or "").strip()
+    return {"http": p, "https": p} if p else None
+
 
 # ---------- 路径与壁纸库（自 ui 包摘出的无 Qt 版本） ----------
 
@@ -747,6 +758,8 @@ class BridgeApi:
                 "overrides": cfg.get("chat_feature_overrides", {}),
                 "active_card_id": cfg.get("active_card_id", ""),
                 "first_run_needed": _first_run_needed(self.ctx.cfg_path, cfg),
+                "onboarding_done": bool(cfg.get("onboarding_done", True)),
+                "docs_url": DOCS_URL,
                 "cfg_path": self.ctx.cfg_path}
 
     @_safe
@@ -1738,13 +1751,23 @@ class BridgeApi:
     # ---------- 诊断导出（日志页「导出诊断包」） ----------
 
     @staticmethod
+    def _mask_proxy_credentials(url: str) -> str:
+        """代理 URL 的 user:pass@ 打码（保留 host/port，排障仍能看出代理地址）。"""
+        return re.sub(r"(?<=://)[^/@\s]+@", "***@", str(url or ""))
+
+    @staticmethod
     def _sanitize_cfg_for_export(cfg: dict) -> dict:
-        """导出用脱敏副本：API key 一律 mask_key（providers 与 per-chat
-        绑定投影里的嵌套 key 一并处理），其余配置原样——诊断正需要它们。"""
+        """导出用脱敏副本：API key/令牌一律 mask_key（providers 与 per-chat
+        绑定投影里的嵌套 key 一并处理），代理 URL 里的账号密码也打码；
+        其余配置原样——诊断正需要它们。"""
         out = dict(cfg or {})
-        for k in ("ai_api_key", "vision_api_key"):
+        for k in ("ai_api_key", "vision_api_key", "image_gen_api_key",
+                  "remote_token"):
             if out.get(k):
                 out[k] = config_store.mask_key(str(out[k]))
+        if out.get("web_proxy"):
+            out["web_proxy"] = BridgeApi._mask_proxy_credentials(
+                out["web_proxy"])
         provs = out.get("providers")
         if isinstance(provs, list):
             out["providers"] = [
@@ -1839,7 +1862,8 @@ class BridgeApi:
 
     @_safe
     def check_update(self) -> dict:
-        r = update_check.check_latest_release()
+        r = update_check.check_latest_release(
+            proxies=_proxies_from_cfg(self.ctx.cfg))
         return {"ok": True, **(r or {})}
 
     @_safe
@@ -1853,7 +1877,8 @@ class BridgeApi:
             return {"ok": False, "error": "更新已在进行中"}
         if self._win is None:
             return {"ok": False, "error": "仅桌面端支持一键更新"}
-        r = update_check.check_latest_release()
+        proxies = _proxies_from_cfg(self.ctx.cfg)
+        r = update_check.check_latest_release(proxies=proxies)
         if not r.get("ok"):
             return {"ok": False, "error": r.get("error") or "检查更新失败"}
         if not r.get("newer"):
@@ -1863,8 +1888,6 @@ class BridgeApi:
         def worker():
             try:
                 ver = str(r.get("latest") or "")
-                proxy = str(self.ctx.cfg.get("web_proxy") or "").strip()
-                proxies = {"http": proxy, "https": proxy} if proxy else None
                 asset = update_check.fetch_release_asset(ver, proxies=proxies)
                 if not asset or not asset.get("url"):
                     self.push("update_progress", {
@@ -2004,6 +2027,104 @@ class BridgeApi:
             config_store.grant_tasks_dir_to_tianshu(cfg["tasks_dir"])
         except Exception:
             pass
+        return {"ok": True}
+
+    # ---------- 新手引导 ----------
+
+    def _active_card(self):
+        cid = str(self.ctx.cfg.get("active_card_id") or "")
+        return cs_get_card(self.ctx.cards_dir, cid) if cid else None
+
+    @staticmethod
+    def _provider_key_status(cfg: dict, card: dict | None) -> dict:
+        """模型可用性（不返回 Key 明文）：活跃卡的服务商是否有 Key + 模型。"""
+        providers = [p for p in (cfg.get("providers") or [])
+                     if isinstance(p, dict)]
+        pid = str((card or {}).get("chat_provider") or "")
+        provider = next((p for p in providers if p.get("id") == pid), None)
+        if provider is None:
+            provider = next((p for p in providers
+                             if str(p.get("api_key") or "").strip()), None)
+        if provider is None and providers:
+            provider = providers[0]
+        has_key = bool(provider and str(provider.get("api_key") or "").strip())
+        model = str((card or {}).get("chat_model")
+                    or cfg.get("chat_model") or "").strip()
+        name = str((provider or {}).get("name")
+                   or (provider or {}).get("id") or "")
+        if provider is None:
+            detail = "未配置模型服务商"
+        elif not has_key:
+            detail = f"{name} 未填写 API Key"
+        elif not model:
+            detail = "未选择对话模型"
+        else:
+            detail = f"{name} · {model}"
+        return {"ok": bool(provider and has_key and model),
+                "detail": detail,
+                "provider_id": str((provider or {}).get("id") or ""),
+                "model": model}
+
+    @_safe
+    def onboarding_status(self) -> dict:
+        """首启引导清单：微信/缩放/模型/角色卡/文件目录/引擎状态。
+
+        只返回布尔与可读文案，绝不返回 API Key/令牌明文。
+        """
+        cfg = self.ctx.cfg
+        report = setup.check_environment(cfg)
+        wechat = dict(report.get("wechat") or {"ok": False,
+                                               "detail": "未检测到微信窗口"})
+        # 最小化不是「未检测到」，但视觉通道此时是盲的——首启要单独提示
+        minimized = False
+        hwnd = None
+        try:
+            from wx_backend.visual_win32 import find_wechat_window
+            hwnd = find_wechat_window()
+            if hwnd:
+                import ctypes
+                minimized = bool(ctypes.windll.user32.IsIconic(hwnd))
+        except Exception:
+            pass
+        wechat["minimized"] = minimized
+        # check_environment 对「进程在、窗口没找到」是 ok=True（它要区分
+        # 没开微信和没登录完）；首启要更严格：没有主窗口就是不能开始监听。
+        wechat["window_found"] = hwnd is not None
+        card = self._active_card()
+        api = self._provider_key_status(cfg, card)
+        fdir = str(cfg.get("file_storage_path") or "").strip()
+        files_ok = bool(fdir and os.path.isdir(fdir))
+        engine = getattr(self.ctx, "engine", None)
+        return {
+            "ok": True,
+            "onboarding_done": bool(cfg.get("onboarding_done", True)),
+            "docs_url": DOCS_URL,
+            "wechat": wechat,
+            "scale": report.get("scale"),
+            "api": api,
+            "card": {"ok": card is not None,
+                     "id": str((card or {}).get("id") or ""),
+                     "name": str((card or {}).get("name") or ""),
+                     "nickname": str((card or {}).get("nickname")
+                                     or cfg.get("bot_nickname") or "小漓")},
+            "files_dir": {"ok": files_ok, "detail": fdir or "未配置"},
+            "engine": {"state": getattr(engine, "state", "idle"),
+                       "paused": bool(getattr(
+                           getattr(engine, "bot", None), "paused", False))},
+        }
+
+    @_safe
+    def onboarding_complete(self) -> dict:
+        """标记新手引导完成（前端「开始使用/跳过」收尾）。"""
+        self.ctx.cfg["onboarding_done"] = True
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
+        return {"ok": True}
+
+    @_safe
+    def onboarding_reset(self) -> dict:
+        """重新运行新手引导（设置页入口）：只重置标记，不动配置。"""
+        self.ctx.cfg["onboarding_done"] = False
+        config_store.save_config(self.ctx.cfg, self.ctx.cfg_path)
         return {"ok": True}
 
     @_safe

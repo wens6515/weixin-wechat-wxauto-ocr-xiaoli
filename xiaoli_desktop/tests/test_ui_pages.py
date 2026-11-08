@@ -17,6 +17,13 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, HERE)
+
+try:
+    import xiaoli_app.ui  # noqa: F401
+    _HAS_UI = True
+except Exception:
+    _HAS_UI = False
 
 _SMOKE_CODE = r"""
 import os, sys, tempfile
@@ -61,6 +68,7 @@ os._exit(0)   # 绕开 Qt teardown 原生崩溃（_exit 不刷缓冲，必须先
 """.replace("HERE", repr(HERE))
 
 
+@unittest.skipUnless(_HAS_UI, "xiaoli_app.ui 已移除（Web UI 迁移）")
 class TestPagesSmoke(unittest.TestCase):
     def test_all_pages_construct_and_refresh(self):
         """全部导航页：离屏构造 + refresh 不抛异常、SettingsPage 长记忆方法齐备。"""

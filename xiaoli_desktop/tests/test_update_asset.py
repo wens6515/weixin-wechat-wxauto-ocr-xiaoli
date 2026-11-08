@@ -82,5 +82,29 @@ class TestFetchReleaseAsset(unittest.TestCase):
         self.assertIn("/releases/tags/v3.5.0", get.call_args.args[0])
 
 
+class TestCheckLatestReleaseProxy(unittest.TestCase):
+    def test_proxies_passed_to_release_api(self):
+        """检查更新与下载同口径：web_proxy 必须传到 releases API。"""
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = {"tag_name": "v9.9.9",
+                                  "html_url": "https://x/r"}
+        proxies = {"http": "http://127.0.0.1:7890",
+                   "https": "http://127.0.0.1:7890"}
+        with mock.patch.object(update_check.requests, "get",
+                               return_value=resp) as get:
+            r = update_check.check_latest_release(proxies=proxies)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["newer"])
+        self.assertEqual(get.call_args.kwargs.get("proxies"), proxies)
+
+    def test_no_proxy_by_default(self):
+        resp = mock.Mock(status_code=200)
+        resp.json.return_value = {"tag_name": "v1.0.0", "html_url": ""}
+        with mock.patch.object(update_check.requests, "get",
+                               return_value=resp) as get:
+            update_check.check_latest_release()
+        self.assertIsNone(get.call_args.kwargs.get("proxies"))
+
+
 if __name__ == "__main__":
     unittest.main()

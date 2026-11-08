@@ -20,6 +20,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from xiaoli_app import config_store
 
+try:
+    import xiaoli_app.ui  # noqa: F401
+    _HAS_UI = True
+except Exception:
+    _HAS_UI = False
+
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _RENDER_CODE = r"""
@@ -96,6 +102,7 @@ class TestThemeMigration(unittest.TestCase):
                              f"保留主题 {key} 不应被迁移覆盖")
 
 
+@unittest.skipUnless(_HAS_UI, "xiaoli_app.ui 已移除（Web UI 迁移）")
 class TestRenderSmoke(unittest.TestCase):
     def test_all_themes_render(self):
         """7 套主题 QSS/缩略图/静态层（含装饰）渲染 + 未知主题兜底。"""

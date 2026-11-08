@@ -14,6 +14,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
+try:
+    import soundfile as _sf  # noqa: F401
+    _HAS_SF = True
+except Exception:
+    _HAS_SF = False
+
 from wx_backend.visual_backend import (_VoiceChannel, _capsule_green_count,
                                        _pick_cable_endpoints)
 
@@ -85,6 +91,7 @@ class TestCapsuleGreenCount(unittest.TestCase):
         self.assertEqual(_capsule_green_count(arr), 0)
 
 
+@unittest.skipUnless(_HAS_SF, "soundfile 未安装（开发环境可 skip）")
 class TestLoadResampled(unittest.TestCase):
     def test_mono_resampled_to_render_rate_stereo(self):
         import soundfile as sf

@@ -27,18 +27,19 @@ def parse_version(text):
     return tuple(int(x) for x in m.group(1).split("."))
 
 
-def check_latest_release(timeout=TIMEOUT):
+def check_latest_release(timeout=TIMEOUT, proxies=None):
     """查询最新 release 并与当前版本比对。返回 dict：
     {ok, current, latest, newer, url, error}
     - ok=True：latest 为去前缀版本串，newer=是否比当前新，url=release 页
     - ok=False：error 为可读原因，latest/url 为 None，newer 恒 False
+    proxies 与 fetch_release_asset 同口径：GitHub API 直连不稳时走 web_proxy。
     """
     from xiaoli_app.version import APP_VERSION
     out = {"ok": False, "current": APP_VERSION, "latest": None,
            "newer": False, "url": None, "error": None}
     try:
         resp = requests.get(
-            RELEASES_API, timeout=timeout,
+            RELEASES_API, timeout=timeout, proxies=proxies,
             headers={"Accept": "application/vnd.github+json"})
     except requests.exceptions.RequestException as e:
         out["error"] = f"网络请求失败（{type(e).__name__}）"

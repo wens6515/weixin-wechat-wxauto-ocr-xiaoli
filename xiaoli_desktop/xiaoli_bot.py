@@ -201,6 +201,9 @@ class AgentBot(WeChatBot):
         # OCR 管线（全接收模式下还会反复打开图片查看器），把单核打满
         self._chat_fail_at = {}
         self._chat_fail_count = {}
+        # 退避日志去重：每个会话只在该次退避窗口第一次跳过时记一行 DEBUG，
+        # 避免 0.5s 主循环把同一句刷进 bot.log（真机日志被刷到轮转掉）
+        self._chat_backoff_logged = {}
         self._fail_backoff = 8.0
         # 主动追尾运行态（内存即可：冷却/日限跨重启重置可接受，追尾晚一轮
         # 无害）。pending 由主循环消费（发送切会话，窗口互斥纪律同触发器）。
@@ -226,6 +229,8 @@ class AgentBot(WeChatBot):
         # 主动发起：调度线程只投「到期的 chat」，判定调用与发送都在主循环
         # （判定会执行发送类工具，daemon 线程绝不能碰微信窗口）。
         self._proactive_queue = queue.Queue(maxsize=50)
+        # 安静时段日志去重：只在刚进入安静时段时记一行，不是每轮都记
+        self._proactive_quiet_logged = False
         self._proactive_sched = ProactiveScheduler(self, stop_event=stop_event)
         self._proactive_sched.start()
         # 每日预算：当日告警标记 + 结果缓存（60s 一查——别在 0.5s 轮询里
@@ -1246,9 +1251,10 @@ class AgentBot(WeChatBot):
 
     def _fail_delay(self, fail_n):
         """连续失败第 n 次的退避秒数：8 → 16 → 32 → 60 封顶。"""
+        base = float(getattr(self, "_fail_backoff", 8.0))
         if fail_n <= 0:
-            return float(self._fail_backoff)
-        return min(60.0, float(self._fail_backoff) * (2 ** (fail_n - 1)))
+            return base
+        return min(60.0, base * (2 ** (fail_n - 1)))
 
     def process_new_messages(self):
         self._flush_memory_if_due()
@@ -1313,8 +1319,15 @@ class AgentBot(WeChatBot):
                 delay = self._fail_delay(fail_n)
                 waited = time.time() - self._chat_fail_at.get(key, 0.0)
                 if waited < delay:
-                    logger.debug(f"[退避] {key} 连续失败 {fail_n} 次，"
-                                 f"还需 {delay - waited:.0f}s，跳过")
+                    # 同一退避窗口只记一次：0.5s 轮询每轮都打会把 bot.log
+                    # 刷满、轮转掉真正的错误现场
+                    logged = getattr(self, "_chat_backoff_logged", None)
+                    if logged is None:
+                        logged = self._chat_backoff_logged = {}
+                    if logged.get(key) != fail_n:
+                        logger.debug(f"[退避] {key} 连续失败 {fail_n} 次，"
+                                     f"还需 {delay - waited:.0f}s，跳过")
+                        logged[key] = fail_n
                     continue
                 # 每日预算闸：超限当天不发起模型调用，但点输入框清红圈——
                 # 不清圈会被 8s 退避无限重处理（与静默路径同一纪律）
@@ -1341,6 +1354,8 @@ class AgentBot(WeChatBot):
                     # 处理成功，解除退避（含连续失败计数）
                     self._chat_fail_at.pop(key, None)
                     self._chat_fail_count.pop(key, None)
+                    if getattr(self, "_chat_backoff_logged", None):
+                        self._chat_backoff_logged.pop(key, None)
                     self.last_reply_time = time.time()
                     return  # 每轮只处理一个会话，回复后回到红点监听
                 self._chat_fail_at[key] = time.time()
@@ -1623,18 +1638,25 @@ class AgentBot(WeChatBot):
         诊断日志全部走 DEBUG（只进 bot.log，不进前端 bot_run.log）。
         """
         if self.paused or self._sending_lock:
-            logger.debug("[主动] 引擎暂停/发送锁，跳过")
             return
         if not getattr(self, "proactive_enabled", False):
+            return
+        # 先判空：没有到期项时直接返回，不能在安静时段每 0.5s 打一条
+        # 「安静时段，跳过」——真机日志被这条刷到 2MB 轮转，主动发起
+        # 真正的失败现场全被轮掉。
+        if self._proactive_queue.empty():
+            self._proactive_quiet_logged = False
             return
         if getattr(self, "proactive_quiet_enabled", False) \
                 and getattr(self, "_proactive_sched", None) is not None \
                 and self._proactive_sched._quiet_now():
-            # 入队后跨进了安静时段：不发起（留给下一个到期点）
-            logger.debug("[主动] 安静时段，跳过")
+            # 入队后跨进了安静时段：不发起（留给下一个到期点）。
+            # 同一次安静时段只记一行，避免 0.5s 轮询刷屏。
+            if not getattr(self, "_proactive_quiet_logged", False):
+                logger.debug("[主动] 安静时段，跳过")
+                self._proactive_quiet_logged = True
             return
-        if self._proactive_queue.empty():
-            return
+        self._proactive_quiet_logged = False
         # 天枢任务进行中/成果回传窗口：窗口被任务占用，不主动插话
         try:
             if has_active_tasks(self.tasks_dir):
