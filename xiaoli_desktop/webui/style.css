@@ -315,6 +315,18 @@ code { font-family: Consolas, monospace; }
 @keyframes pagePrev { from { opacity: 0; transform: translateX(-46px) } to { opacity: 1; transform: none } }
 
 .page-title { font-size: 26px; letter-spacing: 2px; margin-bottom: 20px; }
+.page-title-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
+.page-title-row .page-title { margin-bottom: 0; }
+.page-title-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 首页配置未完成提示（缺 Key / 文件目录 / 新手引导） */
+.setup-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; margin-bottom: 16px;
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+}
+.setup-banner .ic { color: var(--warning); flex: none; }
+.setup-banner span { flex: 1; font-size: 13px; line-height: 1.7; }
 
 /* ---------- 通用玻璃卡 ---------- */
 .glass {
@@ -1063,6 +1075,31 @@ select { cursor: pointer; }
 .modal-head .tb-logo { width: 30px; height: 30px; }
 .modal-close { margin-left: auto; }
 .modal-actions { display: flex; gap: 10px; margin-bottom: 13px; }
+
+/* ---------- 新手引导 ---------- */
+.onb { width: min(720px, 94vw); }
+.onb-progress { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 16px; }
+.onb-dot {
+  font-size: 12px; color: var(--muted); padding: 4px 10px;
+  border-radius: 999px; border: 1px solid var(--border);
+}
+.onb-dot.active {
+  color: var(--p1); border-color: var(--p1);
+  background: color-mix(in srgb, var(--p1) 12%, transparent);
+}
+.onb-dot.done {
+  color: var(--success); border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+}
+.onb-step[hidden] { display: none; }
+.onb-status { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
+.onb-status-row { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.65; }
+.onb-status-row .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--muted); }
+.onb-status-row.ok .dot { background: var(--success); }
+.onb-status-row.bad .dot { background: var(--danger); }
+.onb-status-row.warn .dot { background: var(--warning); }
+.onb-tip { font-size: 12.3px; line-height: 1.8; color: var(--muted); margin: 8px 0; }
+.onb-actions { margin-top: 16px; margin-bottom: 0; align-items: center; }
+.onb-spacer { flex: 1; }
 .trig-table .tstate { font-size: 12px; font-weight: 700; }
 .trig-table .tstate.on { color: var(--success); }
 .trig-table .tstate.mid { color: var(--warning); }

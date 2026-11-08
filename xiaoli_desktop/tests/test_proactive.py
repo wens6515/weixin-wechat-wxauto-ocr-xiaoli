@@ -38,6 +38,7 @@ def _make_bot(**kw):
     bot.proactive_quiet_end = "08:00"
     bot._proactive_queue = queue.Queue(maxsize=50)
     bot._proactive_sched = mock.Mock()
+    bot._proactive_quiet_logged = False
     bot._budget_exhausted = mock.Mock(return_value=False)
     bot._get_history = mock.Mock()
     bot._add_history = mock.Mock()
@@ -319,6 +320,28 @@ class TestChatMetaPersistence(unittest.TestCase):
         bot._seed_chat_meta()
         self.assertTrue(bot._chat_is_group["哆菈A夢"])
         self.assertFalse(bot._chat_is_group["王美晨"])
+
+
+class TestQuietLogThrottle(unittest.TestCase):
+    def test_empty_queue_does_not_log_quiet(self):
+        """安静时段 + 空队列：0.5s 主循环每轮都会调到这里，不能每轮打日志。"""
+        bot = _make_bot(proactive_quiet_enabled=True)
+        bot._proactive_sched._quiet_now.return_value = True
+        with mock.patch("xiaoli_bot.logger.debug") as dbg:
+            for _ in range(20):
+                bot._drain_proactive()
+        dbg.assert_not_called()
+
+    def test_quiet_logs_once_for_pending_item(self):
+        """有到期项但处于安静时段：同一次安静时段只记一行。"""
+        bot = _make_bot(proactive_quiet_enabled=True)
+        bot._proactive_sched._quiet_now.return_value = True
+        bot._proactive_queue.put({"chat": "小明"})
+        with mock.patch("xiaoli_bot.logger.debug") as dbg:
+            for _ in range(20):
+                bot._drain_proactive()
+        self.assertEqual(dbg.call_count, 1)
+        self.assertIn("安静时段", dbg.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -12,7 +12,14 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
-from xiaoli_app.ui.pages import count_active_triggers, trigger_state_text
+try:
+    from xiaoli_app.ui.pages import count_active_triggers, trigger_state_text
+    _HAS_UI = True
+except ImportError:
+    # Qt UI 已在 v3.5.0 迁移到 Web，纯函数搬到了 webbridge；
+    # 保留纯函数断言，对话框冒烟测试在无 UI 环境下跳过。
+    from xiaoli_app.webbridge import count_active_triggers, trigger_state_text
+    _HAS_UI = False
 
 
 class TestTriggerStateText(unittest.TestCase):
@@ -163,6 +170,7 @@ os._exit(0)
 """
 
 
+@unittest.skipUnless(_HAS_UI, "xiaoli_app.ui 已移除（Web UI 迁移）")
 class TestTriggerManagerDialogSmoke(unittest.TestCase):
     """子进程离屏渲染冒烟（与 test_ui_pages 同模式：os._exit 绕 Qt teardown）。"""
 

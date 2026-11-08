@@ -70,7 +70,7 @@ except ImportError:  # 非 Windows / 未装 pywin32：退回明文（功能不�
     _DPAPI_OK = False
 
 _DPAPI_PREFIX = "dpapi:"
-_SECRET_KEYS = ("ai_api_key", "vision_api_key")
+_SECRET_KEYS = ("ai_api_key", "vision_api_key", "image_gen_api_key")
 
 
 def _encrypt_secret(plain):
@@ -714,6 +714,30 @@ def save_config(cfg, path="config.json"):
     out = dict(cfg)
     out.pop("chat_card_params", None)
     _atomic_write_json(path, _encrypt_cfg_keys(out), indent=4)
+    _encrypt_backup_keys(path)
+
+
+def _encrypt_backup_keys(path):
+    """把 config.json.bak 里的明文 key 也迁成密文。
+
+    原子写会先把旧主文件复制成 .bak；升级后的第一次保存可能把旧版明文
+    key 留在 .bak 里，只加密主文件等于留了个后门。备份内容本身不动（仍是
+    上一份配置），只对 key 字段做同样的 DPAPI 加密；失败不影响主文件。
+    """
+    bak = path + ".bak"
+    try:
+        with open(bak, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return
+        data.pop("chat_card_params", None)  # 派生投影不落盘，避免嵌套 key 残留
+        enc = _encrypt_cfg_keys(data)
+        tmp = bak + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(enc, f, ensure_ascii=False, indent=4)
+        os.replace(tmp, bak)
+    except (OSError, ValueError):
+        pass
 
 
 def _project_chat_bindings(cfg, cards_dir):
@@ -821,7 +845,8 @@ def load_config_store(path="config.json", cards_dir="cards"):
     文件不存在时返回空 dict（迁移会补 providers 与默认卡结构）。
     """
     cfg = {}
-    if os.path.isfile(path):
+    existed = os.path.isfile(path)
+    if existed:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -921,6 +946,11 @@ def load_config_store(path="config.json", cards_dir="cards"):
             save_card(cards_dir, card)
         except Exception as e:
             logger.error(f"[配置] 默认卡补建失败（回退模板投影）: {e}")
+    # 新手引导完成标记：配置文件已存在 = 升级用户，默认视为已完成，避免
+    # 升级后被引导打扰；全新安装（文件原本不存在）默认未完成，由前端展示
+    # 五步引导。用户也可以从设置页重新运行引导（onboarding_reset）。
+    if "onboarding_done" not in cfg:
+        cfg["onboarding_done"] = bool(existed)
     cfg = project_config(cfg, card)
     # per-chat 绑定清洗 + 参数投影（派生数据：内存可用、save_config 落盘时剥离）
     sanitize_chat_bindings(cfg, cards_dir)

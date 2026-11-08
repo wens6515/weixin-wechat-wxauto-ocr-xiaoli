@@ -20,6 +20,9 @@ def _bridge(tmpdir):
     cfg = {
         "ai_api_key": SECRET,
         "vision_api_key": "",
+        "image_gen_api_key": "img-secret-9876543210",
+        "remote_token": "token-secret-abcdef",
+        "web_proxy": "http://user:pass@127.0.0.1:7890",
         "providers": [{"id": "deepseek", "base_url": "https://x",
                        "api_key": SECRET, "models": []}],
         "chat_card_params": {"林小满": {"ai_api_key": SECRET,
@@ -40,8 +43,14 @@ class TestSanitizeCfg(unittest.TestCase):
             self.assertNotIn(SECRET, json.dumps(p))
         for v in out["chat_card_params"].values():
             self.assertNotIn(SECRET, json.dumps(v))
+        # 画图 Key / 远程令牌 / 代理账号密码同样不能进诊断包
+        self.assertNotIn("img-secret-9876543210", out["image_gen_api_key"])
+        self.assertNotIn("token-secret-abcdef", out["remote_token"])
+        self.assertIn("***@127.0.0.1:7890", out["web_proxy"])
+        self.assertNotIn("user:pass", out["web_proxy"])
         # 原配置不动（脱敏只作用于导出副本）
         self.assertEqual(b.ctx.cfg["ai_api_key"], SECRET)
+        self.assertEqual(b.ctx.cfg["remote_token"], "token-secret-abcdef")
 
 
 class TestExportDiagnostics(unittest.TestCase):
@@ -61,6 +70,9 @@ class TestExportDiagnostics(unittest.TestCase):
             blob = "".join(zf.read(n).decode("utf-8", errors="replace")
                            for n in names)
         self.assertNotIn(SECRET, blob)
+        self.assertNotIn("img-secret-9876543210", blob)
+        self.assertNotIn("token-secret-abcdef", blob)
+        self.assertNotIn("user:pass", blob)
         self.assertIn("小漓", blob)
 
     def test_no_tmp_files_left(self):
