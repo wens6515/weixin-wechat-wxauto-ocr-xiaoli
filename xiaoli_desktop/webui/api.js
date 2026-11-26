@@ -130,6 +130,7 @@ const MOCK = (() => {
             web_proxy: "", first_prompt_path: "", bot_nickname: "小漓", start_paused: true,
             web_search_enabled: true, task_enabled: false, state_watch_enabled: false,
             model_trigger_manage: "off", sticker_mode: "off",
+            tool_reply_mode: "compat", tool_reply_retry: true,
             segment_wait_enabled: true, segment_wait_seconds: 2,
             segment_jitter_enabled: false, segment_jitter_min: 1.5, segment_jitter_max: 3,
             tianshu_guided: false,
@@ -290,8 +291,20 @@ const MOCK = (() => {
     memory_clear_all: () => ({ ok: true }),
     memory_export: (chat, mode) => ({ ok: true, filename: chat + "-记忆." + mode, content: "演示数据" }),
     memory_bind_card: () => ({ ok: true }),
-    persona_state_overview: () => ({ ok: true, enabled: false,
-      period: "深夜", rows: [] }),
+    persona_state_overview: () => {
+      const now = Math.floor(Date.now() / 1000);
+      return { ok: true, enabled: true, period: "晚上", rows: [
+        { chat: "联系人丁", mood: "聊得起劲", energy: 72, energy_raw: 85,
+          trigger: "对方刚夸了她", today: 36, ts: now - 110,
+          history: [{ energy: 58 }, { energy: 66 }, { energy: 74 }, { energy: 72 }] },
+        { chat: "“闲聊”集团", mood: "有点累", energy: 34, energy_raw: 46,
+          trigger: "群里刷了一下午", today: 58, ts: now - 900,
+          history: [{ energy: 62 }, { energy: 51 }, { energy: 42 }, { energy: 34 }] },
+        { chat: "联系人乙", mood: "平静", energy: 63, energy_raw: 68,
+          trigger: "", today: 12, ts: now - 3600,
+          history: [{ energy: 66 }, { energy: 65 }, { energy: 63 }] },
+      ] };
+    },
     get_usage: () => ({ ok: true, ...JSON.parse(JSON.stringify(state.usage)),
       budget: { enabled: false, limit: 0, today: 0 } }),
     refresh_balances: () => {

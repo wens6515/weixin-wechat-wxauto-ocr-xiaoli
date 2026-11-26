@@ -15,21 +15,25 @@ from xiaoli_app.persona_state import (PersonaStateStore, build_state_block,
 
 class TestParseStateJson(unittest.TestCase):
     def test_ok(self):
-        mood, energy = parse_state_json('{"mood": "开心", "energy": 80}')
+        mood, energy, trigger = parse_state_json(
+            '{"mood": "开心", "energy": 80, "trigger": "对方夸了她"}')
         self.assertEqual(mood, "开心")
         self.assertEqual(energy, 80)
+        self.assertEqual(trigger, "对方夸了她")
 
     def test_code_fence(self):
-        mood, energy = parse_state_json('```json\n{"mood": "有点累", "energy": 30}\n```')
+        mood, energy, _trigger = parse_state_json(
+            '```json\n{"mood": "有点累", "energy": 30}\n```')
         self.assertEqual(mood, "有点累")
         self.assertEqual(energy, 30)
 
     def test_bad_json_keeps_none(self):
-        self.assertEqual(parse_state_json("今天很开心"), (None, None))
-        self.assertEqual(parse_state_json(""), (None, None))
+        self.assertEqual(parse_state_json("今天很开心"), (None, None, ""))
+        self.assertEqual(parse_state_json(""), (None, None, ""))
 
     def test_energy_out_of_range_none(self):
-        mood, energy = parse_state_json('{"mood": "平静", "energy": 150}')
+        mood, energy, _trigger = parse_state_json(
+            '{"mood": "平静", "energy": 150}')
         self.assertEqual(mood, "平静")
         self.assertIsNone(energy)
 
@@ -39,11 +43,22 @@ class TestStore(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             st = PersonaStateStore(os.path.join(d, "persona_state.json"))
             self.assertIsNone(st.get("联系人丁"))
-            st.set("联系人丁", "开心", 80)
+            st.set("联系人丁", "开心", 80, "对方夸了她")
             got = st.get("联系人丁")
             self.assertEqual(got["mood"], "开心")
             self.assertEqual(got["energy"], 80)
+            self.assertEqual(got["trigger"], "对方夸了她")
             self.assertGreater(got["ts"], 0)
+            self.assertEqual(len(got["history"]), 1)
+
+    def test_history_appends_and_caps(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = PersonaStateStore(os.path.join(d, "persona_state.json"))
+            for i in range(35):
+                st.set("联系人丁", "平静", 50 + (i % 10))
+            got = st.get("联系人丁")
+            self.assertEqual(len(got["history"]), 30, "趋势历史保留最近 30 条")
+            self.assertEqual(got["history"][-1]["energy"], 54)
 
     def test_quote_variant_same_key(self):
         """OCR 引号变体（「“闲聊”集团」vs「闲聊”集团」）落同一状态。"""
@@ -75,8 +90,9 @@ class TestBuildStateBlock(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             bot = _Bot(d, [])
             text = build_state_block(bot, "联系人丁")
-            self.assertIn("背景感受", text)
+            self.assertIn("只调语气", text)
             self.assertIn("今天还没怎么聊", text)
+            self.assertIn("→", text)
 
     def test_heat_counted_from_history(self):
         hist = [{"role": "user", "content": "x", "time": f"{self.TODAY} 10:00:00"}
@@ -91,6 +107,16 @@ class TestBuildStateBlock(unittest.TestCase):
             persona_state._store(bot).set("联系人丁", "聊得起劲", 70)
             text = build_state_block(bot, "联系人丁")
             self.assertIn("聊得起劲", text)
+            self.assertIn("精力 70/100", text)
+
+    def test_trigger_injected(self):
+        with tempfile.TemporaryDirectory() as d:
+            bot = _Bot(d, [])
+            persona_state._store(bot).set(
+                "联系人丁", "有点委屈", 60, "聊到一半对方没回了")
+            text = build_state_block(bot, "联系人丁")
+            self.assertIn("起因：聊到一半对方没回了", text)
+            self.assertIn("语气软一点", text)
 
     def test_stale_mood_omitted(self):
         with tempfile.TemporaryDirectory() as d:
@@ -105,14 +131,35 @@ class TestBuildStateBlock(unittest.TestCase):
                     json.dump(data, f, ensure_ascii=False)
             text = build_state_block(bot, "联系人丁")
             self.assertNotIn("旧情绪", text)
-            self.assertNotIn("精力有点跟不上了", text)
 
-    def test_low_energy_noted(self):
+    def test_low_energy_gives_short_reply_hint(self):
         with tempfile.TemporaryDirectory() as d:
             bot = _Bot(d, [])
             persona_state._store(bot).set("联系人丁", "平静", 30)
-            self.assertIn("精力有点跟不上了",
-                          build_state_block(bot, "联系人丁"))
+            text = build_state_block(bot, "联系人丁")
+            self.assertIn("精力 30/100", text)
+            self.assertIn("这轮回得更短", text)
+
+    def test_unchanged_state_injects_short_marker(self):
+        """状态没变只注入短标记（长描述每轮重复会被模型当背景噪声）。"""
+        with tempfile.TemporaryDirectory() as d:
+            bot = _Bot(d, [])
+            persona_state._store(bot).set("联系人丁", "平静", 70)
+            first = build_state_block(bot, "联系人丁")
+            second = build_state_block(bot, "联系人丁")
+            self.assertIn("→", first)
+            self.assertNotIn("→", second)
+            self.assertIn("[状态", second)
+
+    def test_energy_decays_locally(self):
+        """精力随时间本地衰减：90 分钟 → -12（每 30 分钟 -4），下限 20。"""
+        now = time.time()
+        e = persona_state.effective_energy(
+            {"energy": 70, "ts": now - 90 * 60}, now=now)
+        self.assertEqual(e, 58)
+        low = persona_state.effective_energy(
+            {"energy": 25, "ts": now - 24 * 3600}, now=now)
+        self.assertEqual(low, persona_state.ENERGY_FLOOR)
 
 
 if __name__ == "__main__":

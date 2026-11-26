@@ -142,7 +142,14 @@ class TestFollowupDrain(unittest.TestCase):
         bot._get_history = lambda c: []
         bot._chat_last_user_at = lambda c: 0.0
         bot._add_history = lambda c, r, t: None
-        bot._followup_generate = lambda chat: "对了，那个文件你看了吗"
+
+        def fake_gen(chat):
+            # 新契约：strict 下由模型自己调 send_message，_followup_generate
+            # 返回「是否已发出」，不再返回文本。
+            bot.sent.append((chat, "对了，那个文件你看了吗"))
+            return True
+
+        bot._followup_generate = fake_gen
         bot._followup_pending = [self._due()]
         bot._drain_followups()
         self.assertEqual(bot.sent, [("联系人丁", "对了，那个文件你看了吗")])

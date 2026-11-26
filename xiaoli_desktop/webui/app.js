@@ -136,7 +136,7 @@ const PAGE_LOADERS = {
   usage: () => loadUsage(), cards: () => loadCards(),
   models: () => loadModels(), memory: () => loadMemory(),
   logs: () => initLogPage(), tasks: () => loadTasks(),
-  persona: () => loadPersona(),
+  persona: () => loadPersona(), settings: () => initSettingsPage(),
 };
 
 function indicatorMode() {
@@ -178,24 +178,107 @@ nav.addEventListener("click", (e) => {
   const btn = e.target.closest(".nav-item");
   if (btn) goPage(btn.dataset.page);
 });
-$("#anchorRow").addEventListener("click", (e) => {
-  const btn = e.target.closest(".anchor");
-  if (!btn) return;
-  [...btn.parentElement.children].forEach((b) => b.classList.toggle("active", b === btn));
-  document.getElementById(btn.dataset.anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+/* ---- 设置页：左侧分组目录 + 搜索（17 张卡分 5 组，只显示当前组） ---- */
+const SETTINGS_GROUP_KEY = "xiaoli.settings.group";
+
+function settingsCards() {
+  return $$("#settingsBody > .sec-card");
+}
+
+function settingsCardText(card) {
+  // 缓存每张卡的可搜索文本（卡内文案 + 输入框 placeholder）：输入值不计入，
+  // 用户搜的是设置项名称/说明，不是自己填的内容。
+  if (!card.dataset.search) {
+    const extra = [...card.querySelectorAll("input[placeholder]")]
+      .map((el) => el.placeholder).join(" ");
+    card.dataset.search = (card.textContent + " " + extra).toLowerCase();
+  }
+  return card.dataset.search;
+}
+
+function showSettingsGroup(group) {
+  const body = $("#settingsBody");
+  if (!body) return;
+  const btns = $$("#settingsGroups .settings-group");
+  const valid = btns.some((b) => b.dataset.group === group)
+    ? group : (btns[0]?.dataset.group || "look");
+  const q = $("#settingsSearch");
+  if (q && q.value) q.value = "";
+  body.classList.remove("searching");
+  settingsCards().forEach((c) => { c.hidden = c.dataset.group !== valid; });
+  btns.forEach((b) => b.classList.toggle("active", b.dataset.group === valid));
+  const info = $("#settingsSearchInfo");
+  if (info) info.hidden = true;
+  try { localStorage.setItem(SETTINGS_GROUP_KEY, valid); } catch (e) {}
+  $("#content").scrollTop = 0;
+}
+
+function applySettingsSearch(raw) {
+  const body = $("#settingsBody");
+  if (!body) return;
+  const q = (raw || "").trim().toLowerCase();
+  if (!q) {
+    let saved = "look";
+    try { saved = localStorage.getItem(SETTINGS_GROUP_KEY) || "look"; } catch (e) {}
+    showSettingsGroup(saved);
+    return;
+  }
+  body.classList.add("searching");
+  let hits = 0;
+  settingsCards().forEach((c) => {
+    const hit = settingsCardText(c).includes(q);
+    c.hidden = !hit;
+    if (hit) hits += 1;
+  });
+  $$("#settingsGroups .settings-group").forEach((b) => b.classList.remove("active"));
+  const info = $("#settingsSearchInfo");
+  if (info) {
+    info.hidden = false;
+    info.textContent = hits
+      ? `搜索到 ${hits} 个设置块 · 清空搜索回到分组`
+      : "没有匹配的设置项";
+  }
+}
+
+function initSettingsPage() {
+  if (!$("#settingsBody")) return;
+  let group = "look";
+  try { group = localStorage.getItem(SETTINGS_GROUP_KEY) || "look"; } catch (e) {}
+  const hash = (location.hash || "").replace("#", "");
+  const target = hash ? document.getElementById(hash) : null;
+  if (target && target.dataset.group) group = target.dataset.group;
+  showSettingsGroup(group);
+  if (target && hash.startsWith("sec-")) {
+    setTimeout(() => target.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+  }
+}
+
+$("#settingsGroups").addEventListener("click", (e) => {
+  const btn = e.target.closest(".settings-group");
+  if (btn) showSettingsGroup(btn.dataset.group);
 });
-/* ---- 设置页回到顶部：导航行滚出视口（看不见）后右下角浮出圆形按钮 ---- */
+let settingsSearchTimer = 0;
+$("#settingsSearch").addEventListener("input", (e) => {
+  clearTimeout(settingsSearchTimer);
+  const v = e.target.value;
+  settingsSearchTimer = setTimeout(() => applySettingsSearch(v), 120);
+});
+$("#settingsSearch").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { e.target.value = ""; applySettingsSearch(""); }
+});
+window.addEventListener("hashchange", () => {
+  if (curKey === "settings") initSettingsPage();
+});
+initSettingsPage();
+
+/* ---- 设置页回到顶部：滚过一屏后右下角浮出圆形按钮 ---- */
 $("#content").addEventListener("scroll", () => {
   const btn = $("#btnBackTop");
   if (!btn) return;
-  const row = $("#anchorRow");
-  btn.hidden = !(curKey === "settings" && row &&
-    row.getBoundingClientRect().bottom < 0);
+  btn.hidden = !(curKey === "settings" && $("#content").scrollTop > 400);
 }, { passive: true });
 $("#btnBackTop").addEventListener("click", () => {
   $("#content").scrollTo({ top: 0, behavior: "smooth" });
-  $$("#anchorRow .anchor").forEach((b, i) =>
-    b.classList.toggle("active", i === 0));
 });
 window.addEventListener("resize", () =>
   moveIndicator(navBtns.find((b) => b.dataset.page === curKey) || navBtns[0]));
@@ -1523,33 +1606,78 @@ function fmtAgo(ts) {
   if (s < 86400) return Math.floor(s / 3600) + " 小时前";
   return Math.floor(s / 86400) + " 天前";
 }
+const MOOD_TONE = {
+  "开心": "warm", "被逗笑": "warm", "聊得起劲": "warm", "想撒娇": "warm",
+  "平静": "calm", "有点累": "tired",
+  "有点委屈": "low", "有点担心": "low",
+  "有点敷衍": "cool", "心虚": "cool",
+};
+
+function moodTone(mood) {
+  return MOOD_TONE[mood] || "calm";
+}
+
+function personaSpark(history) {
+  const pts = (history || []).map((h) => Number(h.energy))
+    .filter((v) => Number.isFinite(v));
+  if (pts.length < 2) return "";
+  const w = 120, h = 26, pad = 3;
+  const step = (w - pad * 2) / (pts.length - 1);
+  const coords = pts.map((v, i) =>
+    `${(pad + i * step).toFixed(1)},${(h - pad - (v / 100) * (h - pad * 2)).toFixed(1)}`
+  ).join(" ");
+  return `<svg class="persona-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+    <polyline points="${coords}"/></svg>`;
+}
+
+function personaCard(row) {
+  const div = document.createElement("div");
+  div.className = "persona-card mood-" + moodTone(row.mood);
+  const energy = Number.isFinite(+row.energy)
+    ? Math.max(0, Math.min(100, +row.energy)) : null;
+  div.innerHTML = `
+    <div class="persona-head"><b>${esc(row.chat)}</b>
+      <span>${fmtAgo(row.ts)}更新</span></div>
+    <div class="persona-mood">
+      <span class="mood-pill">${esc(row.mood || "还没定量")}</span>
+      ${row.today ? `<span class="persona-today">今日 ${row.today} 条</span>` : ""}
+    </div>
+    ${row.trigger ? `<div class="persona-trigger">起因：${esc(row.trigger)}</div>` : ""}
+    <div class="persona-energy">
+      <div class="trig-bar"><span style="width:${energy ?? 0}%"></span></div>
+      <small class="baloo">${energy != null ? "精力 " + energy : "精力 —"}</small>
+    </div>
+    ${personaSpark(row.history)}`;
+  return div;
+}
+
 async function loadPersona() {
   const r = await API.persona_state_overview();
   if (!r.ok) return;
   $("#personaPeriod").textContent = r.period || "—";
+  const clock = $("#personaClock");
+  if (clock) {
+    clock.textContent = new Date().toLocaleString("zh-CN", { hour12: false });
+  }
   $("#personaDisabled").hidden = !!r.enabled;
+  const rows = r.rows || [];
+  $("#personaChatKpi").textContent = String(rows.length);
+  const energies = rows.map((x) => Number(x.energy))
+    .filter((v) => Number.isFinite(v));
+  const avg = energies.length
+    ? Math.round(energies.reduce((a, b) => a + b, 0) / energies.length) : null;
+  $("#personaEnergyKpi").textContent = avg != null ? avg : "—";
+  $("#personaEnergyBar").style.width =
+    (avg != null ? Math.max(0, Math.min(100, avg)) : 0) + "%";
   const box = $("#personaRows");
   box.innerHTML = "";
-  if (!(r.rows || []).length) {
+  if (!rows.length) {
     box.appendChild(emptyBox(
       r.enabled ? "还没有状态记录——聊几轮后（每次回复定量一次）这里会出现小漓的当前感受"
                 : "状态层未开启"));
     return;
   }
-  for (const row of r.rows) {
-    const div = document.createElement("div");
-    div.className = "feat-row slim";
-    const energy = Number.isFinite(+row.energy)
-      ? Math.max(0, Math.min(100, +row.energy)) : null;
-    div.innerHTML = `
-      <div class="feat-text"><b>${esc(row.chat)}</b>
-        <small>${row.mood ? "心情：" + esc(row.mood) : "心情还没定量"} · ${fmtAgo(row.ts)}更新</small></div>
-      <div class="persona-energy">
-        <div class="trig-bar"><span style="width:${energy ?? 0}%"></span></div>
-        <small class="baloo">${energy != null ? "精力 " + energy : "精力 —"}</small>
-      </div>`;
-    box.appendChild(div);
-  }
+  for (const row of rows) box.appendChild(personaCard(row));
 }
 
 /* ============================================================
@@ -1574,6 +1702,13 @@ function refreshSettings() {
   $("#cbGlobalMem").checked = !!m.global_memory_enabled;
   $("#cbSharedPool").checked = !!m.shared_pool_enabled;
   $("#cbPersonaState").checked = !!m.persona_state_enabled;
+  const trSeg = $("#toolReplySeg");
+  if (trSeg) {
+    [...trSeg.children].forEach((b) =>
+      b.classList.toggle("active",
+        b.dataset.v === (m.tool_reply_mode || "compat")));
+  }
+  $("#cbToolRetry").checked = m.tool_reply_retry !== false;
   $$("#mediaWaitSeg button").forEach((b) =>
     b.classList.toggle("active", b.dataset.v === (m.media_wait_mode || "fixed")));
   $("#spMediaWaitSec").value = m.media_wait_seconds ?? 10;
@@ -1795,6 +1930,25 @@ $("#cbPersonaState").addEventListener("change", async (e) => {
   toast(r.ok ? (e.target.checked
     ? "状态层已开启：小漓会随时段与情绪起伏（情绪定量每聊天 5 分钟一次，有少量成本）"
     : "状态层已关闭") : "保存失败", r.ok ? "ok" : "err");
+});
+/* ---- 工具化回复（严格 / 兼容） ---- */
+$("#toolReplySeg").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  [...btn.parentElement.children].forEach((b) =>
+    b.classList.toggle("active", b === btn));
+  const r = await API.save_config({ tool_reply_mode: btn.dataset.v });
+  toast(r.ok ? (btn.dataset.v === "strict"
+    ? "已切换为严格工具化回复：文字只能经 send_message 发出"
+    : "已切换为兼容模式：模型直接输出的文本也会发送") : "保存失败",
+    r.ok ? "ok" : "err");
+});
+$("#cbToolRetry").addEventListener("change", async (e) => {
+  const r = await API.save_config({ tool_reply_retry: e.target.checked });
+  toast(r.ok ? (e.target.checked
+    ? "模型未调工具时将纠正重试一次"
+    : "模型未调工具时直接丢弃本轮（不再纠正）") : "保存失败",
+    r.ok ? "ok" : "err");
 });
 /* ---- 媒体消息等待（双模式） ---- */
 $("#mediaWaitSeg").addEventListener("click", (e) => {

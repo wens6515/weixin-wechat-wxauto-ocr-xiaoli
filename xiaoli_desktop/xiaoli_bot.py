@@ -81,6 +81,19 @@ VISION_ROUTE_PROMPT = (
     "不要调用任何工具。"
 )
 
+# 严格工具模式的任务桥变体：模板里那句「普通闲聊不要调用任何工具」与
+# 「回复必须经 send_message」直接冲突（真机：模型因此频繁只输出文字，
+# 纠偏又因 reasoning_content 400 失败 → 完全不回消息）。严格模式下换成
+# 这一版：闲聊不投递任务，但说话必须走发送工具。
+VISION_ROUTE_PROMPT_TOOLS = (
+    "有人给你发了条消息，照你平时的样子回他。\n"
+    "要回复必须调用 send_message 工具把话说出去——直接输出文字不会被发送。"
+    "只有当这件事确实需要动手做出来时才调用 dispatch_task 把活交出去"
+    "（例如：根据文档做一个网站、做一个 PPT、写一段代码、分析一份数据、"
+    "整理文件、生成文档）；普通的闲聊、打招呼、问问题、要资料都调用 "
+    "send_message 回复，不要投递任务。"
+)
+
 
 # 任务桥按聊天关闭且**其他工具也不可用**（语音/搜索/闹钟/回忆全无）时的
 # 纯聊天 prompt 变体：文字里完全不提任何工具名，与「工具不声明」配套——
@@ -122,9 +135,9 @@ VISION_GROUP_AT_PROMPT = (
 FOLLOWUP_EVAL_PROMPT = (
     "你刚回完对方的话（最近对话见历史）。现在有一个可选动作：**自然地补"
     "一句**——像真人那样偶尔回完话想起什么，追加一条短消息（想到了什么、"
-    "顺口一问、分享个相关的东西）。想补就只输出那一条消息的文本（口语化、"
-    "二十字左右）；不想补就只输出 [不补] 三个字符。要克制：十次里补两三次"
-    "就够了，只有真的自然才补。不要调用任何工具。"
+    "顺口一问、分享个相关的东西）。想补就调用 send_message 发那一条（口语化、"
+    "二十字左右）；不想补就调用 no_reply（或什么都不调用）。要克制：十次里"
+    "补两三次就够了，只有真的自然才补。"
 )
 
 # 引用标注解析（get_messages 装配的「[引用 …] 」前缀）
@@ -366,7 +379,11 @@ class AgentBot(WeChatBot):
         # 关但语音/搜索/闹钟等工具可用 → 中性变体（「不要调用任何工具」会
         # 压制已声明工具）；一个工具都没有 → 纯聊天变体防幻觉。
         if self.feature_enabled(chat_name, "task"):
-            route_prompt = VISION_ROUTE_PROMPT
+            # 严格工具模式下模板不能带「普通闲聊不要调用任何工具」——
+            # 那与「回复必须经 send_message」冲突（真机不回消息的根因之一）
+            route_prompt = (VISION_ROUTE_PROMPT_TOOLS
+                            if self._tool_reply_strict()
+                            else VISION_ROUTE_PROMPT)
         elif self._vision_tools(chat_name):
             route_prompt = VISION_NEUTRAL_PROMPT
         else:
@@ -410,6 +427,10 @@ class AgentBot(WeChatBot):
         if not result:
             return None
         kind = result.get("kind")
+        if kind == "silent":
+            # 严格工具模式：模型空输出 + 无任何动作 = 主动沉默。按「已读未
+            # 回复」收尾（清红圈 + 入史），绝不落到文本降级重发。
+            return self._handle_no_reply(chat_name, result, user_text)
         if kind == "tool_call" and result.get("name") == "no_reply":
             # 智能静默（no_reply_enabled 开启时声明）：模型决定不回复
             return self._handle_no_reply(chat_name, result, user_text)
@@ -446,6 +467,18 @@ class AgentBot(WeChatBot):
             )
             return True
         if kind == "text":
+            actions = result.get("actions") or []
+            if actions:
+                # 严格工具模式：发送动作已在工具循环内完成（send_message /
+                # 表情包 / 图片 / 文件），这里只入史 + 占位归零 + 收尾钩子。
+                self._commit_tool_actions(chat_name, actions,
+                                          user_text=user_text)
+                return True
+            if self._tool_reply_strict():
+                # 严格模式：没有发送动作 = 本条不发。call_vision_api 已把
+                # 直出文本丢弃（或返回 silent），这里按「已读未回复」收尾。
+                logger.info(f"[严格工具] {chat_name!r} 本轮没有发送动作，不发送")
+                return self._handle_no_reply(chat_name, result, user_text)
             reply = str(result.get("content") or "").strip()
             sticker_sent = bool(result.get("sticker_sent"))
             stickers = [str(s).strip() for s in (result.get("stickers") or [])
@@ -769,6 +802,17 @@ class AgentBot(WeChatBot):
             f"用户对文件处理的要求是：{instruction}\n\n"
             f"请根据文件内容和用户的要求，以{self.nickname}的身份回复用户。"
         )
+        if self._tool_reply_strict():
+            # 严格工具模式：文件问答也必须走带工具的 vision 链路（模型自己
+            # 调 send_message 才会发出），绝不回退 call_chat_ai 的文本发送。
+            resp = self.call_vision_api(
+                [{"type": "text", "text": refine_prompt}], chat_id=chat_name)
+            if resp is not None:
+                return bool(self._apply_vision_result(
+                    chat_name, sender, resp, user_text=refine_prompt))
+            logger.warning(
+                f"[严格工具] 文件问答 vision 失败，严格模式下不回退文本: {chat_name!r}")
+            return True
         final_reply = self.call_chat_ai(chat_name, refine_prompt, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
         self._deliver_reply(chat_name, final_reply)
         return True
@@ -805,14 +849,15 @@ class AgentBot(WeChatBot):
                 "请按人设自然地主动回复。" + hint)
 
     def _trigger_generate_reply(self, chat, trigger):
-        """触发器回递生成（定时/条件统一火线）：优先走 vision 链路——工具
-        全程可用（manage_reminder 现场调整触发器 / web_search / no_reply），
-        生成后由调用方 _deliver_reply(trigger=True) 发送；vision 失败/未收敛
-        降级旧 call_chat_ai 链路。历史两条链路对齐：user=触发事件、
-        assistant=最终回复（call_chat_ai 自带写入；vision 链路在此手写——
-        它不自动写历史）。
+        """触发器回递生成（定时/条件统一火线）：走 vision 链路——工具全程
+        可用（manage_reminder 现场调整触发器 / web_search / send_message），
+        严格工具模式下由模型自己调用 send_message 发出；compat 旧行为返回
+        文本交调用方 _deliver_reply(trigger=True) 发送。
+        历史口径：user=触发事件、assistant=最终回复。
 
-        返回 ("reply", 文本) / ("silent", None) / ("fallback", None)。"""
+        返回 ("sent", None) / ("silent", None) / ("reply", 文本) /
+        ("fallback", None)。"""
+        strict = self._tool_reply_strict()
         resp = None
         try:
             resp = self.call_vision_api(
@@ -820,12 +865,33 @@ class AgentBot(WeChatBot):
         except Exception as e:
             logger.error(f"[触发回递] vision 链路异常: {e}")
         if resp and resp.get("kind") == "text":
+            actions = resp.get("actions") or []
+            if actions:
+                # 工具循环内已发出：只入史 + 收尾，不再重发
+                self._commit_tool_actions(chat, actions, user_text=trigger)
+                logger.info(f"[触发回递] {chat!r} 已通过工具发送")
+                return "sent", None
+            if strict:
+                self._add_history(chat, "user", trigger)
+                self._add_history(chat, "assistant", "[触发未回复]")
+                logger.info(f"[严格工具] {chat!r} 触发事件未调用发送工具，不回复")
+                return "silent", None
             reply = strip_reply_prefix(str(resp.get("content") or "").strip())
             if reply:
                 self._add_history(chat, "user", trigger)
                 self._add_history(chat, "assistant", reply)
                 return "reply", reply
             return "fallback", None
+        if resp and resp.get("kind") == "silent":
+            self._add_history(chat, "user", trigger)
+            self._add_history(chat, "assistant", "[触发未回复]")
+            return "silent", None
+        if resp and resp.get("kind") == "tool_call" \
+                and resp.get("name") == "send_voice":
+            # 语音模式（auto/always）：触发回递也必须经语音工具发出
+            if self._handle_send_voice(chat, resp, trigger):
+                return "sent", None
+            return "silent", None
         if resp and resp.get("kind") == "tool_call" \
                 and resp.get("name") == "no_reply":
             # 模型对触发事件本身选择沉默（罕见）：记录在案，不发送不降级
@@ -865,9 +931,13 @@ class AgentBot(WeChatBot):
                                         time.localtime(r.get("fire_at") or now))
                 trigger = self._reminder_trigger_text(chat, r, fire_hm)
                 mode, reply = self._trigger_generate_reply(chat, trigger)
-                if mode == "silent":
+                if mode in ("silent", "sent"):
                     continue
                 if mode != "reply":
+                    if self._tool_reply_strict():
+                        # 严格工具模式：不回退文本发送（没调工具就不发）
+                        logger.info(f"[严格工具] {chat!r} 触发回递降级路径关闭，不发")
+                        continue
                     # 降级：旧 call_chat_ai 链路（人设/历史/缓存布局全沿用）
                     reply = self.call_chat_ai(chat, trigger)
                 self._deliver_reply(chat, reply, trigger=True)
@@ -911,10 +981,15 @@ class AgentBot(WeChatBot):
                            f"请按人设向用户说明情况并致歉。")
             try:
                 mode, reply = self._trigger_generate_reply(chat, trigger)
-                if mode != "silent":
-                    if mode != "reply":
-                        reply = self.call_chat_ai(chat, trigger)
-                    self._deliver_reply(chat, reply, trigger=True)
+                if mode in ("silent", "sent"):
+                    logger.info(f"[状态监视] 已回递 -> {chat} ({kind})")
+                    continue
+                if mode != "reply":
+                    if self._tool_reply_strict():
+                        logger.info(f"[严格工具] {chat!r} 监视回递降级路径关闭，不发")
+                        continue
+                    reply = self.call_chat_ai(chat, trigger)
+                self._deliver_reply(chat, reply, trigger=True)
                 logger.info(f"[状态监视] 已回递 -> {chat} ({kind})")
             except Exception as e:
                 logger.error(f"[状态监视] 回递失败 {chat}: {e}")
@@ -990,7 +1065,8 @@ class AgentBot(WeChatBot):
             self._add_history(chat_name, "user", user_text)
         self._add_history(chat_name, "assistant", "[已读未回复]")
         self._pending_placeholders.pop(chat_name, None)
-        mark_read = getattr(self.wx, "mark_session_read", None)
+        mark_read = getattr(getattr(self, "wx", None),
+                            "mark_session_read", None)
         if mark_read is not None:
             try:
                 mark_read()
@@ -1242,7 +1318,14 @@ class AgentBot(WeChatBot):
             is_group=is_group, multi_sender=multi_sender, img_paths=img_paths)
         if resp is not None:
             return True
-        # vision 降级（None）：API 失败回退普通聊天
+        if self._tool_reply_strict():
+            # 严格工具模式：vision 失败也不回退 call_chat_ai（那是无工具的
+            # 文本发送路径）。按「已读未回复」收尾：清红圈 + 入史，防 8s
+            # 退避无限重处理同一条消息。
+            logger.warning(
+                f"[严格工具] vision 调用失败，严格模式下不回退文本: {chat_name!r}")
+            return self._handle_no_reply(chat_name, {}, question)
+        # compat 降级（None）：API 失败回退普通聊天
         reply = self.call_chat_ai(chat_name, question, sender_name=sender, is_group=is_group, multi_sender=multi_sender)
         self._deliver_reply(chat_name, reply)
         return True
@@ -1578,31 +1661,48 @@ class AgentBot(WeChatBot):
                 self._followup_day = {"date": today, "count": 0}
             if self._followup_day["count"] >= int(getattr(self, "followup_daily_max", 10)):
                 return
-            text = self._followup_generate(chat)
-            if not text:
+            sent = self._followup_generate(chat)
+            if not sent:
                 continue
             self._followup_last[chat] = time.time()
             self._followup_day["count"] += 1
-            # 纯文本写历史（不加标记——带标记的 assistant 消息会被模型当
-            # 「段首格式」复读进后续回复），下一轮模型看得到自己补过这句
-            self._add_history(chat, "assistant", text)
-            self._send_trigger_reply(text, chat)
-            logger.info(f"[追尾] -> {chat}: {text[:40]}")
 
     def _followup_generate(self, chat):
-        """触发时刻的追尾评估小调用。返回追尾文本或 None（放弃本轮）。"""
+        """触发时刻的追尾评估小调用：想补就由模型自己调用 send_message。
+
+        严格工具模式下返回 True = 已用工具发出；False = 不补/未调工具。
+        compat 旧行为：模型输出文本 → 引擎 _send_trigger_reply 发送。
+        """
         try:
             resp = self.call_vision_api(
-                [{"type": "text", "text": FOLLOWUP_EVAL_PROMPT}], chat_id=chat)
+                [{"type": "text", "text": FOLLOWUP_EVAL_PROMPT}], chat_id=chat,
+                force_no_reply=True)
         except Exception as e:
             logger.debug(f"[追尾] 评估调用失败: {e}")
-            return None
-        if not resp or resp.get("kind") != "text":
-            return None
+            return False
+        if not resp:
+            return False
+        actions = resp.get("actions") or []
+        if actions:
+            if resp.get("kind") != "text":
+                return False
+            # 动作已在工具循环内发出：纯文本写历史（不加标记——带标记的
+            # assistant 消息会被模型当「段首格式」复读进后续回复）
+            self._commit_tool_actions(chat, actions)
+            last = [a for a in actions if a.get("type") == "text"]
+            logger.info(f"[追尾] -> {chat}: "
+                        f"{str(last[-1].get('content') or '')[:40] if last else '[媒体]'}")
+            return True
+        if resp.get("kind") != "text" or self._tool_reply_strict():
+            return False
         t = strip_reply_prefix(str(resp.get("content") or "").strip())
         if not t or "[不补]" in t:
-            return None
-        return t
+            return False
+        self._add_history(chat, "assistant", t)
+        if not self._send_trigger_reply(t, chat):
+            return False
+        logger.info(f"[追尾] -> {chat}: {t[:40]}")
+        return True
 
     @staticmethod
     def _proactive_gap_text(last_ts, now=None):
@@ -1747,16 +1847,8 @@ class AgentBot(WeChatBot):
             return
         actions = resp.get("actions") or []
         if actions:
-            self._pending_placeholders.pop(chat, None)
-            last_text = ""
-            for a in actions:
-                mark = self._action_history_text(a)
-                if mark:
-                    self._add_history(chat, "assistant", mark)
-                if a.get("type") == "text":
-                    last_text = str(a.get("content") or "")
-            if last_text:
-                self._after_reply_sent(chat, last_text)
+            # 动作已在工具循环内发出：只入史 / 占位归零 / 收尾
+            self._commit_tool_actions(chat, actions)
             self._proactive_sched.mark_sent(chat)
             self._clear_group_cursor(chat)
             logger.info(f"[主动] {chat!r} 通过工具发送（距上次 {gap}）")
@@ -1765,9 +1857,9 @@ class AgentBot(WeChatBot):
         if not text:
             logger.debug(f"[主动] {chat!r} 模型未输出文本，跳过")
             return
-        if tool_only:
-            # 群聊全接收纪律：没有工具动作 = 不发（纯文本丢弃）
-            logger.info(f"[主动] {chat!r} 群聊全接收模式下未调发送工具，不发")
+        if tool_only or self._tool_reply_strict():
+            # 工具化纪律：没有工具动作 = 不发（纯文本丢弃，引擎不兜底）
+            logger.info(f"[主动] {chat!r} 未调用发送工具，不发")
             return
         if not self._send_trigger_reply(text, chat):
             logger.debug(f"[主动] {chat!r} 发送未确认，放弃本次（不写历史）")
@@ -2288,6 +2380,34 @@ class AgentBot(WeChatBot):
         except Exception as e:
             logger.warning(f"[已读] 标记已读失败: {e}")
 
+    def _tool_reply_strict(self):
+        """是否严格工具化回复（默认严格；未初始化的测试桩按旧行为）。"""
+        return getattr(self, "tool_reply_mode", "compat") == "strict"
+
+    def _commit_tool_actions(self, chat, actions, user_text=None):
+        """工具循环已经把动作发出去了：只做入史 / 占位归零 / 收尾钩子。
+
+        严格工具模式下发送发生在 call_vision_api 的工具循环里（send_message
+        等执行型工具），上层**不得**再发送一次——这里只补记忆与状态收尾，
+        避免「发了两遍」或「发了没入史」。
+        返回是否有发送动作。
+        """
+        if not actions:
+            return False
+        if user_text:
+            self._add_history(chat, "user", user_text)
+        last_text = ""
+        for a in actions:
+            mark = self._action_history_text(a)
+            if mark:
+                self._add_history(chat, "assistant", mark)
+            if a.get("type") == "text":
+                last_text = str(a.get("content") or "")
+        self._pending_placeholders.pop(chat, None)
+        if last_text:
+            self._after_reply_sent(chat, last_text)
+        return True
+
     @staticmethod
     def _action_history_text(action):
         """发送动作 → 写进历史的 assistant 文本。"""
@@ -2467,13 +2587,18 @@ class AgentBot(WeChatBot):
         """全接收模式的发送闸：用户消息已入史，这里只处理模型的输出。
 
         - 有发送动作（send_message/表情包/图片/文件）→ 按顺序写 assistant
-          历史；纯文本按模式丢弃
-        - hybrid 且本批有 @ → 文本直接发（@ 必回）
+          历史，**不再重发**（工具循环内已经发出）
+        - hybrid 且本批有 @：同样必须走工具——严格工具模式下不调用工具
+          就不回复（用户定案：@必回不等于引擎兜底发文本）
+        - 兼容模式（tool_reply_mode=compat）保留旧的文本直发
         - 其余（text 无动作 / no_reply）→ 沉默：不写任何 assistant 条目
         """
         kind = resp.get("kind")
         actions = resp.get("actions") or []
         content = strip_reply_prefix(str(resp.get("content") or "").strip())
+        strict = self._tool_reply_strict()
+        if kind == "silent":
+            return
         if kind == "tool_call":
             name = resp.get("name")
             if name == "no_reply":
@@ -2503,26 +2628,20 @@ class AgentBot(WeChatBot):
             logger.warning(f"[群聊] 未知响应 kind={kind!r}，按沉默处理")
             return
         if actions:
-            # 任何发送动作都是实质回复：占位计数归零（与 _send_text 同语义，
-            # 否则 skip_bot 会一直跳过占位之后的 bot 消息，bot_bottom 错位）
-            self._pending_placeholders.pop(chat_name, None)
-            sent_text = None
-            for a in actions:
-                mark = self._action_history_text(a)
-                if mark:
-                    self._add_history(chat_name, "assistant", mark)
-                if a.get("type") == "text":
-                    sent_text = str(a.get("content") or "")
-            if force_text_send and content and not sent_text:
-                # hybrid @ 批次：模型既发了表情包又说了话，两样都发
+            # 动作已由工具循环发出：只入史 + 占位归零 + 收尾
+            self._commit_tool_actions(chat_name, actions)
+            if force_text_send and content and not strict:
+                # compat：hybrid @ 批次模型既发了表情包又说了话，两样都发
                 self._add_history(chat_name, "assistant", content)
                 self._deliver_reply(chat_name, content)
-                sent_text = content
-            if sent_text:
-                self._after_reply_sent(chat_name, sent_text)
+                self._after_reply_sent(chat_name, content)
             self._clear_group_cursor(chat_name)
             return
         if force_text_send and content:
+            if strict:
+                # @ 必回也必须走工具：没调工具就不回复，引擎不兜底发文本
+                logger.info(f"[严格工具] {chat_name!r} @批次未调用发送工具，不回复")
+                return
             self._add_history(chat_name, "assistant", content)
             self._deliver_reply(chat_name, content)
             self._after_reply_sent(chat_name, content)

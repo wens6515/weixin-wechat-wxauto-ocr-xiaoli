@@ -279,6 +279,21 @@ class TestRoutePromptVariant(unittest.TestCase):
         b._vision_route("联系人丁", "王", "在吗")
         self.assertIn(VISION_ROUTE_PROMPT, captured["text"])
 
+    def test_vision_route_uses_tool_prompt_in_strict_mode(self):
+        """严格工具模式：任务桥模板不得再教「闲聊不要调用任何工具」。"""
+        b = _make_bot()
+        b.tool_reply_mode = "strict"
+        captured = {}
+
+        def fake_call_vision_api(content, chat_id=None, related_memory=None):
+            captured["text"] = content[0]["text"]
+            return {"kind": "text", "content": ""}
+
+        b.call_vision_api = fake_call_vision_api
+        b._vision_route("联系人丁", "王", "在吗")
+        self.assertIn("必须调用 send_message", captured["text"])
+        self.assertNotIn("不要调用任何工具", captured["text"])
+
 
 class TestSanitizeFeatureOverrides(unittest.TestCase):
     """config_store 清洗：键归一化、白名单、bool-only、空条目删除。"""

@@ -892,16 +892,8 @@ class VisualBackend:
 
         # 2. 按 y 聚类（标签行如 '[ 视频 ]' 与所属主名 y 差 ~38px，会话项间距 ~114px。
         #    阈值 45：并入标签/预览行，分隔不同会话项。）
-        cand.sort(key=lambda it: it["y"])
-        clusters: list[list[dict]] = []
-        for it in cand:
-            if clusters and it["y"] - clusters[-1][-1]["y"] < _pxr(45):
-                clusters[-1].append(it)
-            else:
-                clusters.append([it])
-
         # 3. 每聚类取主名（标签/预览行除外 + OCR 残留清理，与条带路径共用）
-        for cluster in clusters:
+        for cluster in self._cluster_list_rows(cand):
             picked = self._pick_main_name(cluster)
             if not picked:
                 # 无主名（全是标签/预览）→ 跳过
@@ -911,6 +903,42 @@ class VisualBackend:
             cy = win_t + main_line["y"] + main_line["h"] // 2
             self._session_coords[name] = (cx, cy)
         return self._session_coords
+
+    @staticmethod
+    def _cluster_list_rows(blocks: list[dict]) -> list[list[dict]]:
+        """按 y 把列表区 OCR 行聚成会话行（标题/标签/预览 y 差 <45px 同项）。
+
+        会话项间距 ~110px、项内标题→预览 ~35px：阈值 45 恰好并入同项、
+        分隔不同项。整表提名与按名定位共用本函数——两处各写一遍聚类必然
+        漂移（真机缺陷：按名定位没聚类，把群聊预览行当成会话名）。
+        """
+        clusters: list[list[dict]] = []
+        for it in sorted(blocks, key=lambda b: b["y"]):
+            if clusters and it["y"] - clusters[-1][-1]["y"] < _pxr(45):
+                clusters[-1].append(it)
+            else:
+                clusters.append([it])
+        return clusters
+
+    def _list_title_rows(self, blocks: list[dict]) -> list[tuple[str, dict, str]]:
+        """列表区 OCR 行 → [(标题名, 标题行对象, 归一化键)]，每会话行只留标题行。
+
+        预览行（群聊「发送者：内容」、私聊正文）、`[视频]/[图片]` 标签行、
+        时间戳行都不是候选——它们由 `_pick_main_name` 在聚类内剔除。
+        这是「按名定位」的单一事实源：**不得**直接拿原始 OCR 行做名字匹配
+        （真机缺陷：群聊预览「联系人甲：yes, is me」被当成会话「联系人甲」命中，
+        点击落进群里，随后标题复验不过 → 主动发起/追尾每次都被放弃）。
+        """
+        rows: list[tuple[str, dict, str]] = []
+        for cluster in self._cluster_list_rows(blocks):
+            picked = self._pick_main_name(cluster)
+            if not picked:
+                continue
+            name, line = picked
+            key = _norm_chat_key(name)
+            if key:
+                rows.append((name, line, key))
+        return rows
 
     @staticmethod
     def _pick_main_name(lines: list[dict]) -> tuple[str, dict] | None:
@@ -1070,17 +1098,27 @@ class VisualBackend:
         return None
 
     def resolve_chat_coord(self, chat: str) -> tuple[int, int] | None:
-        """按会话名现读列表区 OCR，返回该会话的屏幕点击坐标；找不到返回 None。
+        """按会话名现读列表区 OCR，返回该会话**标题行**的屏幕点击坐标。
 
         供「触发式发送」路径使用（定时/条件到点后要切到指定会话）：目标
         会话此刻通常**没有红圈**（消息早已读过），既无法靠红圈锚定，也可能
         不在 _session_coords 缓存里（只有走过的路径才填）。这里现截一帧、
-        读列表区 OCR，按会话名归一化匹配（含双向子串兜底，容忍 OCR 残缺），
-        命中取该块中心。
+        读列表区 OCR，按会话名匹配命中取该块中心。
 
-        为何不用整窗 OCR（iter_sessions）：整窗 ~1.2s，列表区 crop ~0.46s，
-        且列表区本就不含搜索框/消息区，语义更干净（真机实测见
-        .rivet/scratch/bench_ocr.py）。
+        判据（与 `_extract_session_names` 同源，防两套口径漂移）：
+        1. 列表区 crop OCR（~0.46s；比整窗 ~1.2s 快，且不含搜索框/消息区）；
+        2. 按 y 聚类成会话行，每行**只取标题行**（`_list_title_rows`）——
+           预览行/标签行/时间戳一律不是候选。真机缺陷：群聊预览行
+           「联系人甲：yes, is me」曾被当成会话「联系人甲」命中，点击落进
+           「某群聊」，随后标题复验不过、主动发起每次被放弃；
+        3. 匹配分三档，档内必须唯一：
+           - exact：归一化相等（最优）
+           - truncated：候选是目标的 OCR 截断（`target.startswith(cand)`，
+             且长度不少于目标的 60%——容忍真机「闲聊"集团」这类缺字）
+           - extended：候选以目标开头（`cand.startswith(target)`，仅当
+             以上两档全空且唯一——容忍记忆键来自更残缺的那次 OCR）
+           档内有多个候选 = 无法确定是哪个会话 → **不点**（宁可不发，
+           也不赌；同名联系人与群、名字互为前缀时都会走到这里）。
         """
         if self._hwnd is None:
             return None
@@ -1097,22 +1135,41 @@ class VisualBackend:
         target = _norm_chat_key(chat)
         if not target:
             return None
-        hit = None
-        for it in blocks:
-            key = _norm_chat_key(it.get("text") or "")
-            if not key:
-                continue
-            # 双向子串：OCR 漏字（「闲聊”」vs「“闲聊”集团」）也算命中
-            if key == target or key.startswith(target) or target.startswith(key):
-                hit = it
-                break
-        if hit is None:
-            logger.debug(f"[定位] 列表区未找到会话 {chat!r}")
+        rows = self._list_title_rows(blocks)
+        if not rows:
+            logger.debug(f"[定位] 列表区没有可用的会话标题行（目标 {chat!r}）")
             return None
+        tiers: dict[str, list[tuple[str, dict]]] = {
+            "exact": [], "truncated": [], "extended": []}
+        for name, line, key in rows:
+            if key == target:
+                tiers["exact"].append((name, line))
+            elif target.startswith(key) and len(key) >= max(2, int(len(target) * 0.6)):
+                tiers["truncated"].append((name, line))
+            elif key.startswith(target):
+                tiers["extended"].append((name, line))
+        picked: tuple[str, str, dict] | None = None
+        for tier in ("exact", "truncated", "extended"):
+            hits = tiers[tier]
+            if len(hits) == 1:
+                picked = (tier, hits[0][0], hits[0][1])
+                break
+            if len(hits) > 1:
+                logger.warning(
+                    f"[定位] 会话 {chat!r} 命中 {len(hits)} 个{tier}候选"
+                    f"（{[h[0] for h in hits]}），放弃点击（防认错会话）")
+                return None
+        if picked is None:
+            logger.debug(f"[定位] 列表区未找到会话 {chat!r}，"
+                         f"候选={[r[0] for r in rows]}")
+            return None
+        tier, name, line = picked
+        if tier != "exact":
+            logger.debug(f"[定位] {chat!r} 按 {tier} 命中标题行 {name!r}")
         rect = wt.RECT()
         u32.GetWindowRect(self._hwnd, ctypes.byref(rect))
-        return (rect.left + sl + hit["x"] + hit["w"] // 2,
-                rect.top + st + hit["y"] + hit["h"] // 2)
+        return (rect.left + sl + line["x"] + line["w"] // 2,
+                rect.top + st + line["y"] + line["h"] // 2)
 
     def _switch_chat(self, chat: str, force: bool = False) -> bool:
         """点击会话列表中的目标会话切换聊天。返回是否已切换。
@@ -1136,8 +1193,15 @@ class VisualBackend:
 
         坐标来源优先级：_session_coords 缓存（整窗 OCR 兼容通道填充，热路径
         不再主动重建）→ resolve_chat_coord 现读列表区 OCR（触发式发送主
-        路径）。点击成功后若标题非空（微信确认选中），采样该条目行背景色
-        自学习缓存选中高亮（_learn_selected_row_color）。
+        路径）。
+
+        **点击后必须复验**（标题是权威信号）：标题非空且不是目标会话 →
+        返回 False，且**不更新 _current_chat**。旧实现点完无条件
+        `_current_chat = chat` 并返回 True，一旦定位误命中（真机：群聊
+        预览行冒充会话名）就把状态写错——后续标题读不到的兜底分支会据此
+        误判「已在目标会话」，反而跳过切换。标题读不到（遮挡/空）时保持
+        旧语义：信任本次点击并更新状态，落点交给调用方的置前标题复验。
+        复验用的这次标题 OCR 原本就存在（采样选中高亮色），零额外成本。
         """
         if not force:
             # 1) 标题区 OCR = 权威信号：它读到什么，微信就停在什么会话上。
@@ -1187,19 +1251,31 @@ class VisualBackend:
             self._foreground()  # 点击依赖前台，先置前微信窗口
             logger.info(f"[切换] 点击会话 {chat!r} @({coord[0]},{coord[1]}) force={force} _current_chat={self._current_chat!r}")
             pyautogui.click(coord[0], coord[1])
-            self._current_chat = chat
             time.sleep(0.5)  # 等待消息区刷新
-            # 自学习选中高亮：点击成功且标题非空（微信确认已选中）→ 采样该
-            # 条目行背景色。标题解析名与 chat 宽容匹配才采样——点击落空切到
-            # 别处时（标题非空但非目标会话）不采样，避免把未选中行缓存成
-            # 选中色导致后续误判。
+            # 点击后复验（标题是权威信号）：标题非空却不是目标会话 = 定位
+            # 落空（真机：群聊预览行冒充会话名，点进了「某群聊」）。
+            # 此时不认这次切换、不污染 _current_chat，返回 False 交调用方
+            # fail-closed。标题读不到（遮挡/空）仍按旧语义信任本次点击——
+            # 置前标题复验在上层（_ensure_chat_active），那一步读不到同样不发。
+            title = None
             try:
                 title = self.read_title(foreground=False)
-                parsed = parse_title(title)[0] if title else ""
-                if title and _same_chat_name(parsed, chat):
+            except Exception as e:
+                logger.debug(f"[切换] 点击后读标题失败: {e}")
+            parsed = parse_title(title)[0] if title else ""
+            if title and not _same_chat_name(parsed, chat):
+                logger.warning(
+                    f"[切换] 点击后标题={parsed!r}，目标={chat!r}，落点不符"
+                    "（定位误命中）——不认这次切换")
+                return False
+            self._current_chat = chat
+            if title:
+                # 自学习选中高亮：标题确认已选中才采样该条目行背景色，
+                # 避免把未选中行缓存成选中色导致后续误判。
+                try:
                     self._learn_selected_row_color(coord[1])
-            except Exception:
-                pass
+                except Exception:
+                    pass
             return True
         except Exception as e:
             logger.warning(f"[切换] 点击会话失败: {e}")

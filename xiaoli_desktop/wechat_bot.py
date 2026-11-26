@@ -122,6 +122,13 @@ VISION_MODEL_DEFAULT = "deepseek-flash"
 # vision 工具循环的补全调用上限：搜索 + 抓取（含换源重试一次）+ 作答（防循环烧钱）
 VISION_TOOL_ROUNDS = 4
 
+# 文本发送工具：一次响应里**只**调 send_message 且发送成功时直接收尾、不再
+# 多要一轮。严格工具化后每条文字回复都先返回 send_message 工具调用——若继续
+# 循环再请求一次，等于把每次回复的 API 调用翻倍（延迟与费用都翻）。
+# 表情包/图片/文件不在此列：模型常「先发表情再补一句话」，需要下一轮把话
+# 经 send_message 发出来。
+_TEXT_SEND_TOOL = "send_message"
+
 # 回复长度的物理上限（两条链路共用：vision 与 chat）。历史默认 400 连推理
 # 模型的思考 token 都装不下（正文被压没）；用户定案放宽到 40000——长度
 # 纪律交给 REPLY_STYLE_RULES 的提示词，这里只是物理兜底。
@@ -135,6 +142,30 @@ ALWAYS_VOICE_RULES = (
     "send_voice 工具来发——text 写要说出口的内容（口语化、适合念出来，"
     "不要用颜文字/emoji/符号），emotion 按当前语境从可用情绪里挑一个。"
     "不要直接输出文字回复。"
+)
+
+# 严格工具模式下模型只输出文字时的纠偏提示（再请求一轮，仅一次）：
+# 不写进记忆，只作为本次工具往返的协议消息。
+TOOL_REPLY_RETRY_HINT = (
+    "【必须用工具发送】你刚才只输出了文字，没有调用任何发送工具，这条消息"
+    "没有发出去。要回复必须调用 send_message（语音模式用 send_voice）；发图/"
+    "表情/文件用对应工具；不想回复请调用 no_reply 或什么都不做。"
+)
+
+# 严格工具模式常驻纪律（放在尾区 user 之前，不随轮次变化）：把「工具是唯一
+# 出口」写进上下文，不只靠工具描述——描述在请求头部，弱模型容易只看提示词。
+TOOL_REPLY_RULES = (
+    "【工具化回复】要把任何消息发出去都必须调用工具：文字用 send_message，"
+    "语音用 send_voice，表情包/图片/文件用对应发送工具。只输出文字不会被"
+    "发送；不想回复就不要调用任何发送工具。"
+)
+
+# 拼在本轮 user 文本末尾的同一纪律（比只放 system 更贴近决策点）：也用来
+# 抵消任务桥 prompt 里「普通闲聊……不要调用任何工具」与发送通道的冲突。
+STRICT_TOOL_PROMPT_SUFFIX = (
+    "\n\n【工具化回复】要回复必须调用 send_message 工具（语音模式用 "
+    "send_voice）；直接输出文字不会被发送。上文「不要调用任何工具」只是说"
+    "闲聊不要投递任务，不适用于发消息。"
 )
 
 # 回复分段的段间间隔（秒，用户定案：固定 2s）。注意底层视觉后端「发一条」
@@ -435,6 +466,15 @@ class WeChatBot(MediaCaptureMixin):
         # 在开启时声明（关闭 = 模型看不到该能力，提示词也不提——防幻觉调用
         # 纪律）。静默分支的清红圈/记忆标注/占位归零在 AgentBot._handle_no_reply。
         self.no_reply_enabled = bool(cfg.get("no_reply_enabled", False))
+        # 工具化回复（默认严格）：文本只能经 send_message 发出，模型直接输出的
+        # 文字一律丢弃——群聊全接收模式的语义推广到全部链路。compat 回退旧
+        # 行为（文本即发送），给弱工具模型与排障留退路；严格模式下模型只输出
+        # 文字时是否纠正重试一次由 tool_reply_retry 决定。
+        self.tool_reply_mode = str(
+            cfg.get("tool_reply_mode", "compat") or "compat").strip().lower()
+        if self.tool_reply_mode not in ("strict", "compat"):
+            self.tool_reply_mode = "compat"
+        self.tool_reply_retry = bool(cfg.get("tool_reply_retry", True))
         # 全局记忆（默认关）：save_global_memory 工具写入 + 全局块尾区注入
         # 所有聊天。全局内容定义：关于小漓自己/主人/世界的跨聊天稳定事实。
         self.global_memory_enabled = bool(cfg.get("global_memory_enabled", False))
@@ -938,9 +978,10 @@ class WeChatBot(MediaCaptureMixin):
         return True, f"表情包已发出：{fname}"
 
     def _exec_send_message(self, chat_id, raw_args):
-        """send_message 工具执行（群聊全接收模式）：把模型要发的话真的发出去。
+        """send_message 工具执行（全链路唯一文字发送通道）：把模型要发的话
+        真的发出去。
 
-        这是「工具发送闸」的落地点：全接收模式下模型直接输出的文本会被
+        这是「工具发送闸」的落地点：严格工具模式下模型直接输出的文本会被
         丢弃，只有调用本工具（或表情包/语音/图片/文件等发送类工具）才会
         产生微信消息。发送走 _send_parts（与普通回复同一套拆分/段间节奏），
         不碰占位计数——占位是任务投递的语义。
@@ -958,16 +999,16 @@ class WeChatBot(MediaCaptureMixin):
         # 工具调用发生在模型判定期间，窗口未必在目标会话（主动发起尤其
         # 明显）——发送前确认/切换并复验标题，确认不了宁可不发。
         if not self._ensure_chat_active(chat_id):
-            logger.warning(f"[群聊发送] 未能确认窗口在会话 {chat_id!r}，放弃发送")
+            logger.warning(f"[工具发送] 未能确认窗口在会话 {chat_id!r}，放弃发送")
             return False, "没能确认当前会话，消息没有发送"
         try:
             n = self._send_parts(chat_id, text)
         except Exception as e:
-            logger.error(f"[群聊发送] {chat_id!r} 失败: {e}")
+            logger.error(f"[工具发送] {chat_id!r} 失败: {e}")
             return False, f"发送失败：{e}"
         if not n:
             return False, "send_message 内容为空，没有发送"
-        logger.info(f"[群聊发送] 已发送给 {chat_id!r}: {text[:40]}")
+        logger.info(f"[工具发送] 已发送给 {chat_id!r}: {text[:40]}")
         return True, f"已发送（{n} 段）"
 
     def _describe_sticker(self, image_path):
@@ -1200,7 +1241,38 @@ class WeChatBot(MediaCaptureMixin):
     def _get_history(self, chat_id):
         return self._mem.recent(chat_id)
 
+    def _today_msg_count(self, chat_id):
+        """今日用户消息条数（状态层热度用）。
+
+        会话内计数器为准（每次 _add_history(user) 自增，不会像近期窗口那样
+        封顶在 30~60）；进程重启后首次调用回落到近期历史里数今天的条目——
+        重启后可能少算，但不会归零。q"""
+        today = time.strftime("%Y-%m-%d")
+        rec = getattr(self, "_msg_today", None)
+        if not isinstance(rec, dict):
+            rec = self._msg_today = {}
+        ent = rec.get(chat_id)
+        if isinstance(ent, list) and len(ent) == 2 and ent[0] == today:
+            return int(ent[1] or 0)
+        n = 0
+        try:
+            for m in self._get_history(chat_id):
+                if str(m.get("role")) == "user" \
+                        and str(m.get("time") or "").startswith(today):
+                    n += 1
+        except Exception:
+            n = 0
+        rec[chat_id] = [today, n]
+        return n
+
     def _add_history(self, chat_id, role, content):
+        if str(role) == "user":
+            # 状态层热度计数：先 seed（不含本条）再 +1，避免重复计数
+            self._today_msg_count(chat_id)
+            today = time.strftime("%Y-%m-%d")
+            ent = self._msg_today.get(chat_id)
+            if isinstance(ent, list) and ent[0] == today:
+                ent[1] = int(ent[1] or 0) + 1
         self._mem.add(chat_id, role, content,
                       deep_enabled=bool(getattr(self, "memory_deep_enabled", True)))
 
@@ -1393,26 +1465,26 @@ class WeChatBot(MediaCaptureMixin):
                                    "required": []},
                 },
             })
-        # 群聊全接收模式（tool_only）的正式发言通道：模型调用它才会真正
-        # 发出微信消息。工具循环内执行（_exec_send_message），回填回执后
-        # 模型可以继续调用（表情包/图片）或直接结束；直接输出的文本由上层
-        # 丢弃——「不调工具 = 不发」是全接收模式的硬语义。
-        # always 语音且 TTS 实际可用时不声明：那条纪律要求所有回复走
-        # send_voice（它本身就是工具）；配置不齐时语音链路会回退文本，
-        # 此时保留 send_message 作为唯一可行通道，免得一个字都发不出去。
+        # 文字发送的唯一通道：严格工具模式全链路声明；compat 只在 group
+        # tool_only 下声明（否则模型调工具发出后，文本又被当回复发一次 →
+        # 同一条消息发两遍）。
         _voice_ready_profile = self._voice_profile_ready()
         _voice_always = (_voice_ready_profile is not None
                          and self.voice_state(chat_id) == "always")
-        if tool_only and not _voice_always:
+        _strict_reply = (getattr(self, "tool_reply_mode", "compat")
+                         == "strict")
+        if (tool_only or _strict_reply) and not _voice_always \
+                and chat_id is not None:
             tools.append({
                 "type": "function",
                 "function": {
                     "name": "send_message",
-                    "description": "在当前群聊里发一条文字消息。这是本模式下"
-                                   "唯一能把文字发出去的通道：调用它才会真正"
-                                   "发送，直接输出文字不会被发送。想接话就调用"
-                                   "（通常一条，最多两条；多条请分多次调用）；"
-                                   "不想接话就什么都不要调用、不要输出。",
+                    "description": "在当前会话里发一条文字消息。这是唯一能把"
+                                   "文字发出去的通道：调用它才会真正发送，"
+                                   "直接输出文字不会被发送。想接话就调用"
+                                   "（通常一条，最多两条；多条请用换行分段或"
+                                   "分多次调用）；不想接话就什么都不要调用、"
+                                   "不要输出。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -1863,6 +1935,24 @@ class WeChatBot(MediaCaptureMixin):
         """
         # per-chat 角色卡绑定：该聊天绑定了卡时，人设/参数/端点以卡为准
         ov = self._chat_overrides(chat_id)
+        # 严格工具模式（默认）：文本只能经 send_message 发出。这里先取开关，
+        # 消息尾部纪律、工具声明、响应分流三处共用同一个值。
+        # chat_id 为空（纯描述/图片识别等无会话上下文的调用）不适用——没有
+        # 发送目标，工具也不会声明，文本就是唯一输出。
+        strict = (chat_id is not None
+                  and getattr(self, "tool_reply_mode", "compat") == "strict")
+        if strict and isinstance(content, list):
+            # 把「必须调 send_message」写进本轮 user 文本（不只是 system）：
+            # 任务桥开启时路由 prompt 里有「普通闲聊……不要调用任何工具」，
+            # 与发送纪律直接冲突——真机就是因此频繁只输出文字。
+            content = list(content)
+            for i, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") == "text":
+                    content[i] = dict(
+                        block,
+                        text=str(block.get("text") or "")
+                        + STRICT_TOOL_PROMPT_SUFFIX)
+                    break
         headers = {"Authorization": f"Bearer {ov.get('ai_api_key') or self.vision_api_key}",
                    "Content-Type": "application/json"}
         # 人设由 system 纯文本消息承载（绝不放图片——DeepSeek 限制图片
@@ -1904,18 +1994,11 @@ class WeChatBot(MediaCaptureMixin):
         _g_related = self._match_global_memory(_g_text)
         if _g_related:
             messages.append({"role": "system", "content": _g_related})
-        # 当前时间 system：无条件注入且紧贴当前消息（历史之后——它每秒变化，
-        # 插在历史前会打断缓存前缀）；persona 为空时本条保证 messages 至少
-        # 一条 system，消除空 messages 隐患。
-        current_time = time.strftime("%Y-%m-%d %H:%M:%S")
-        messages.append({"role": "system", "content": f"当前时间：{current_time}"})
-        # 状态层（开关开启时）：时段/热度/情绪背景，紧贴当前时间之后
-        _persona = self._persona_state_block(chat_id)
-        if _persona:
-            messages.append({"role": "system", "content": _persona})
-        # eager 态触发器清单注入（manage_reminder 配套）：紧跟当前时间的尾区
-        # ——清单变化极少（创建/取消才变），放这里不打碎「人设+历史」前缀
-        # 缓存；模型拿到 id 后取消/修改可一轮完成，还能主动说出已有约定。
+        # 当前时间与状态层已移到所有可选尾区块之后（见下方「时间 + 状态」），
+        # 让它们真正紧贴当前消息。
+        # eager 态触发器清单注入（manage_reminder 配套）：尾区——清单变化
+        # 极少（创建/取消才变），放这里不打碎「人设+历史」前缀缓存；模型拿到
+        # id 后取消/修改可一轮完成，还能主动说出已有约定。
         if chat_id and str(getattr(self, "model_trigger_manage", "off")
                            or "off") == "eager":
             listing = self._active_triggers_brief(chat_id)
@@ -1939,6 +2022,19 @@ class WeChatBot(MediaCaptureMixin):
         # content=None = 无当前来信（旧调用形态）：消息列表以 system 结尾。
         # 主动发起已改为把「距上次聊天 X」作为 user 文本传入——thinking
         # 模型不接受「以 system 结尾并续写 assistant」的形状。
+        if strict and chat_id is not None:
+            # 严格工具纪律放尾区 user 之前：常驻提示「工具是唯一出口」，
+            # 不随轮次变化，不影响前缀缓存。
+            messages.append({"role": "system", "content": TOOL_REPLY_RULES})
+        # 时间 + 状态（用户定案 A2）：合并成一条 system，放在所有可选尾区块
+        # （触发器清单/表情包清单/语音纪律/工具纪律）之后、user 之前——真正
+        # 紧贴决策点。旧布局里状态后面还夹着 1~3 条 system，且是描述性长句，
+        # 模型基本当背景噪声。两块都逐轮变化，本来就在缓存尾巴。
+        _tail_parts = [f"当前时间：{time.strftime('%Y-%m-%d %H:%M:%S')}"]
+        _persona = self._persona_state_block(chat_id)
+        if _persona:
+            _tail_parts.append(_persona)
+        messages.append({"role": "system", "content": "\n".join(_tail_parts)})
         if content is not None:
             messages.append({"role": "user", "content": content})
         with self._model_lock:
@@ -1986,12 +2082,20 @@ class WeChatBot(MediaCaptureMixin):
         stickers_sent: list[str] = []
 
         def _finish(d):
-            """群聊全接收/主动发起才附带 actions/sent_any（普通私聊返回形态
-            保持不变，既有调用方与测试依赖原字典）。"""
-            if tool_only or force_no_reply or collect_actions:
+            """群聊全接收/主动发起/严格工具模式才附带 actions/sent_any
+            （compat 普通私聊返回形态保持不变，既有调用方与测试依赖原字典）。"""
+            if tool_only or force_no_reply or collect_actions or strict:
                 d["actions"] = list(actions)
                 d["sent_any"] = bool(actions)
             return d
+
+        # 严格工具模式：文本只能经 send_message 发出；模型直接输出的文字
+        # 丢弃（群聊全接收语义推广到全部链路）。compat = 旧行为。
+        # 群聊全接收（tool_only）的沉默是正常态，不做"只输出文字"纠偏——
+        # 否则 auto 模式每一批闲聊都会被纠偏成一次发送，全接收变全回复。
+        retry_on_text = strict and bool(getattr(self, "tool_reply_retry", True))
+        reply_expected = not tool_only
+        repaired = False
 
         try:
             for _round in range(VISION_TOOL_ROUNDS):
@@ -2013,13 +2117,50 @@ class WeChatBot(MediaCaptureMixin):
                         (message.get("content") or "").strip())
                     if not content:
                         if sticker_sent or actions:
-                            # 纯动作回复（表情包/全接收模式的 send_message）：
+                            # 纯动作回复（表情包/send_message）：
                             # 已经发出去了，空文本是预期终态，绝不降级闲聊
                             return _finish({"kind": "text", "content": "",
                                             "sticker_sent": sticker_sent,
                                             "stickers": stickers_sent})
+                        if strict:
+                            # 严格模式：空输出 + 无动作 = 主动沉默（不是 API
+                            # 失败）。返回 silent 让上层按「已读未回复」收尾，
+                            # 绝不落到 call_chat_ai 文本降级。
+                            return _finish({"kind": "silent"})
                         logger.warning("视觉模型返回空 content")
                         return None
+                    if strict:
+                        if actions:
+                            # 已经用工具发过东西，尾部文字只是草稿：丢弃收尾
+                            logger.debug(
+                                f"[严格工具] 发送后有尾随文字，丢弃: {content[:40]!r}")
+                            return _finish({"kind": "text", "content": "",
+                                            "sticker_sent": sticker_sent,
+                                            "stickers": stickers_sent})
+                        if reply_expected and retry_on_text and not repaired:
+                            repaired = True
+                            logger.info(
+                                f"[严格工具] 模型只输出文字未调工具，"
+                                f"纠正重试一次: {content[:40]!r}")
+                            # thinking 模型：这一轮 assistant 必须把
+                            # reasoning_content 原样带回，否则下一次请求直接
+                            # 400（真机：The reasoning_content in the thinking
+                            # mode must be passed back to the API）——修复前
+                            # 纠偏请求 100% 失败，用户看到的就是「不回消息」。
+                            _retry_msg = {"role": "assistant",
+                                          "content": content}
+                            _rc = message.get("reasoning_content")
+                            if isinstance(_rc, str) and _rc:
+                                _retry_msg["reasoning_content"] = _rc
+                            messages.append(_retry_msg)
+                            messages.append({"role": "system",
+                                             "content": TOOL_REPLY_RETRY_HINT})
+                            continue
+                        logger.info(
+                            f"[严格工具] 模型只输出文字未调发送工具，"
+                            f"丢弃本轮: {content[:40]!r}")
+                        return _finish({"kind": "text", "content": "",
+                                        "dropped_text": content})
                     if sticker_sent:
                         return _finish({"kind": "text", "content": content,
                                         "sticker_sent": True,
@@ -2057,6 +2198,7 @@ class WeChatBot(MediaCaptureMixin):
                 if isinstance(_rc, str) and _rc:
                     assistant_msg["reasoning_content"] = _rc
                 messages.append(assistant_msg)
+                _actions_before = len(actions)
                 for tc in tool_calls:
                     name = _tool_call_name(tc)
                     if name == "web_search":
@@ -2091,24 +2233,32 @@ class WeChatBot(MediaCaptureMixin):
                         logger.info(
                             f"[触发器管理] {chat_id!r} -> {tool_text[:80]}")
                     elif name == "send_message":
-                        # 群聊全接收模式的正式发言通道（tool_only 才会声明）。
-                        # 发送在循环内立即发生；成功即记为一次发送动作——
-                        # 上层据此判定「模型发了没有」，并逐条写历史。
-                        raw_args = ((tc or {}).get("function") or {})\
-                            .get("arguments") or "{}"
-                        ok, tool_text = self._exec_send_message(
-                            chat_id, raw_args)
-                        if ok:
-                            try:
-                                _a = json.loads(raw_args or "{}")
-                            except (ValueError, TypeError):
-                                _a = {}
-                            actions.append({
-                                "type": "text",
-                                "content": str((_a or {}).get("text") or ""),
-                            })
-                        logger.info(
-                            f"[群聊发送] {chat_id!r} -> {tool_text[:60]}")
+                        # 文字唯一发送通道（全链路声明）。发送在循环内立即
+                        # 发生；成功即记为一次发送动作——上层据此判定
+                        # 「模型发了没有」，并逐条写历史。
+                        # 条数上限 2（与回复纪律一致）：模型连环调用时第
+                        # 三条起不再发送，回执告知已达上限。
+                        if sum(1 for a in actions
+                               if a.get("type") == "text") >= 2:
+                            tool_text = "本次回复已达两条上限，未发送"
+                            logger.info(
+                                f"[严格工具] {chat_id!r} 文字条数已达上限，忽略")
+                        else:
+                            raw_args = ((tc or {}).get("function") or {})\
+                                .get("arguments") or "{}"
+                            ok, tool_text = self._exec_send_message(
+                                chat_id, raw_args)
+                            if ok:
+                                try:
+                                    _a = json.loads(raw_args or "{}")
+                                except (ValueError, TypeError):
+                                    _a = {}
+                                actions.append({
+                                    "type": "text",
+                                    "content": str((_a or {}).get("text") or ""),
+                                })
+                            logger.info(
+                                f"[工具发送] {chat_id!r} -> {tool_text[:60]}")
                     elif name == "send_sticker":
                         fname = _tool_arg(tc, "file")
                         ok, tool_text = self._exec_send_sticker(chat_id, fname)
@@ -2176,6 +2326,14 @@ class WeChatBot(MediaCaptureMixin):
                     messages.append({"role": "tool",
                                      "tool_call_id": tc.get("id") or "",
                                      "content": tool_text})
+                if len(tool_calls) == 1 \
+                        and _tool_call_name(tool_calls[0]) == _TEXT_SEND_TOOL \
+                        and len(actions) > _actions_before:
+                    # 本次响应只发了文字（且成功）：动作已落地，直接收尾——
+                    # 不再多请求一轮（每次回复翻倍的成本与延迟）。
+                    return _finish({"kind": "text", "content": "",
+                                    "sticker_sent": sticker_sent,
+                                    "stickers": stickers_sent})
             if actions:
                 # 工具循环耗尽但已经发过东西：不能返回 None——上层会把 None
                 # 当失败降级，导致同一条消息再发一遍。

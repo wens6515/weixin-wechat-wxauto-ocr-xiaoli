@@ -276,7 +276,6 @@ class TestVisionLoopSendMessage(unittest.TestCase):
             {"choices": [{"message": {"tool_calls": [{
                 "id": "t1", "function": {"name": "send_message",
                                           "arguments": '{"text": "在呀"}'}}]}}]},
-            {"choices": [{"message": {"content": "（这句不该再发）"}}]},
         ])
         resp = bot.call_vision_api(
             [{"type": "text", "text": "hi"}], chat_id="闲聊集团",
@@ -285,7 +284,9 @@ class TestVisionLoopSendMessage(unittest.TestCase):
         self.assertTrue(resp["sent_any"])
         self.assertEqual(resp["actions"],
                          [{"type": "text", "content": "在呀"}])
-        self.assertEqual(resp["content"], "（这句不该再发）")
+        # 发送成功后直接收尾：不再多请求一轮（成本与延迟翻倍）
+        self.assertEqual(resp["content"], "")
+        self.assertEqual(bot._post_chat_completions.call_count, 1)
 
 
 class TestGroupBatch(unittest.TestCase):

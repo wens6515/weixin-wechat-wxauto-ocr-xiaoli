@@ -454,15 +454,39 @@
 
       <!-- ================= 状态页（小漓状态层可视化） ================= -->
       <section class="page" data-page="persona">
-        <h1 class="page-title">小漓状态</h1>
+        <div class="page-title-row">
+          <h1 class="page-title">小漓状态</h1>
+          <div class="page-title-actions">
+            <span class="title-hint" id="personaClock"></span>
+          </div>
+        </div>
         <div class="glass sec-card" id="personaDisabled" hidden>
           <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>状态层未开启</div>
           <p class="confirm-text">到「设置 → 对话行为与跨聊天记忆」打开「小漓状态层」，小漓就会随时段、聊天热度与情绪自然起伏；开启后聊几轮，这里会显示她对每个聊天的当前感受。</p>
         </div>
+        <div class="persona-overview" id="personaOverview">
+          <div class="glass persona-kpi">
+            <small>当前时段</small><b id="personaPeriod">—</b>
+            <span class="persona-sub">按本地时间切换</span>
+          </div>
+          <div class="glass persona-kpi">
+            <small>整体精力</small><b id="personaEnergyKpi">—</b>
+            <div class="persona-bar"><span id="personaEnergyBar" style="width:0%"></span></div>
+            <span class="persona-sub">最近活跃聊天均值（随时间衰减）</span>
+          </div>
+          <div class="glass persona-kpi">
+            <small>今日活跃</small><b id="personaChatKpi">—</b>
+            <span class="persona-sub">个聊天有状态记录</span>
+          </div>
+        </div>
         <div class="glass sec-card">
-          <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>当前时段：<span id="personaPeriod">—</span>
-            <span class="title-hint">情绪与精力由每次回复后的定量调用更新（每聊天 5 分钟一次，深夜犯困、聊得投入会兴奋）</span></div>
-          <div id="personaRows"></div>
+          <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>每个聊天的当前感受
+            <span class="title-hint">情绪与精力由回复后的定量调用更新（每聊天 5 分钟一次）；精力随时间本地衰减</span></div>
+          <div class="persona-grid" id="personaRows"></div>
+        </div>
+        <div class="glass sec-card persona-help">
+          <div class="card-title"><svg class="ic"><use href="#i-brain"/></svg>状态怎么影响回复</div>
+          <p>状态注入在上下文最末段（紧贴当前消息），只调语气与主动性：精力低时回复更短、少用颜文字、不主动开新话题；情绪低落时语气更软、不追问。它<b>不改变事实与人设</b>，也不覆盖「只回 1~2 条、跟着对方长度」的回复纪律，状态描述本身不会作为台词说出来。</p>
         </div>
       </section>
 
@@ -489,28 +513,25 @@
             <button class="mini-btn ghost" id="btnOpenDocs"><svg class="ic"><use href="#i-ext"/></svg>使用文档</button>
           </div>
         </div>
-        <div class="anchor-row" id="anchorRow">
-          <button class="anchor active" data-anchor="sec-appearance">外观主题</button>
-          <button class="anchor" data-anchor="sec-identity">小漓身份</button>
-          <button class="anchor" data-anchor="sec-memory">对话记忆</button>
-          <button class="anchor" data-anchor="sec-dirs">文件目录</button>
-          <button class="anchor" data-anchor="sec-bridge">任务桥</button>
-          <button class="anchor" data-anchor="sec-web">联网搜索</button>
-          <button class="anchor" data-anchor="sec-voice">语音发送</button>
-          <button class="anchor" data-anchor="sec-override">按聊天覆盖</button>
-          <button class="anchor" data-anchor="sec-remind">定时与监视</button>
-          <button class="anchor" data-anchor="sec-behavior">对话行为</button>
-          <button class="anchor" data-anchor="sec-followup">主动追尾</button>
-          <button class="anchor" data-anchor="sec-groupmode">群聊接收</button>
-          <button class="anchor" data-anchor="sec-proactive">主动发起</button>
-          <button class="anchor" data-anchor="sec-pace">回复节奏</button>
-          <button class="anchor" data-anchor="sec-sticker">表情包</button>
-          <button class="anchor" data-anchor="sec-mediasend">图片与文件</button>
-          <button class="anchor" data-anchor="sec-remote">远程面板</button>
-        </div>
+        <div class="settings-shell">
+          <aside class="settings-nav" id="settingsNav">
+            <label class="settings-search">
+              <svg class="ic"><use href="#i-search"/></svg>
+              <input id="settingsSearch" type="search" placeholder="搜索设置…" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="settings-groups" id="settingsGroups">
+              <button class="settings-group active" data-group="look">外观与身份</button>
+              <button class="settings-group" data-group="chat">对话与记忆</button>
+              <button class="settings-group" data-group="auto">自动化</button>
+              <button class="settings-group" data-group="ability">能力</button>
+              <button class="settings-group" data-group="system">系统</button>
+            </div>
+            <div class="settings-search-info" id="settingsSearchInfo" hidden></div>
+          </aside>
+          <div class="settings-body" id="settingsBody">
 
         <!-- 外观主题 -->
-        <div class="glass sec-card" id="sec-appearance">
+        <div class="glass sec-card" id="sec-appearance" data-group="look">
           <div class="card-title"><svg class="ic"><use href="#i-spark"/></svg>外观主题与壁纸
             <span class="title-hint">点击缩略图即时生效并保存 · 壁纸库自动收录「壁纸」文件夹</span></div>
           <div class="theme-grid" id="themeGrid">
@@ -560,7 +581,7 @@
         </div>
 
         <!-- 对话记忆 -->
-        <div class="glass sec-card" id="sec-memory">
+        <div class="glass sec-card" id="sec-memory" data-group="chat">
           <div class="card-title"><svg class="ic"><use href="#i-brain"/></svg>对话记忆
             <button class="mini-btn ghost danger" id="btnMemClearAll2" style="margin-left:auto"><svg class="ic"><use href="#i-broom"/></svg>清空全部记忆</button></div>
           <div class="feat-row slim">
@@ -583,7 +604,7 @@
         </div>
 
         <!-- 文件目录 -->
-        <div class="glass sec-card" id="sec-dirs">
+        <div class="glass sec-card" id="sec-dirs" data-group="system">
           <div class="card-title"><svg class="ic"><use href="#i-folder"/></svg>文件目录</div>
           <div class="dir-row"><span class="dir-k">任务工作目录</span><code id="edTasks"></code>
             <button class="mini-btn ghost" id="btnPickTasks">浏览…</button></div>
@@ -595,7 +616,7 @@
         </div>
 
         <!-- 小漓身份 -->
-        <div class="glass sec-card" id="sec-identity">
+        <div class="glass sec-card" id="sec-identity" data-group="look">
           <div class="card-title"><svg class="ic"><use href="#i-user"/></svg>小漓身份</div>
           <div class="form-grid">
             <label class="form-item grow"><span>微信名称（群里 @ 这个称呼认小漓，也是小漓的自称；改完立即生效，不用重启）</span><input id="edNickname" type="text" maxlength="32" placeholder="小漓"></label>
@@ -603,7 +624,7 @@
         </div>
 
         <!-- 任务桥 -->
-        <div class="glass sec-card" id="sec-bridge">
+        <div class="glass sec-card" id="sec-bridge" data-group="system">
           <div class="card-title"><svg class="ic"><use href="#i-bridge"/></svg>任务桥</div>
           <div class="feat-row slim">
             <div class="feat-text"><b>启用任务桥</b><small>识别任务请求 → 投递天枢 CLI → 成果文件自动回传微信（关闭 = 模型看不到任务工具）</small></div>
@@ -613,7 +634,7 @@
         </div>
 
         <!-- 联网搜索 -->
-        <div class="glass sec-card" id="sec-web">
+        <div class="glass sec-card" id="sec-web" data-group="ability">
           <div class="card-title"><svg class="ic"><use href="#i-globe"/></svg>联网搜索</div>
           <div class="feat-row slim">
             <div class="feat-text"><b>启用联网搜索</b><small>搜狗 / 必应 / 百度三源并发 + 网页正文抓取，零配置无需 key</small></div>
@@ -625,7 +646,7 @@
         </div>
 
         <!-- 语音发送 -->
-        <div class="glass sec-card" id="sec-voice">
+        <div class="glass sec-card" id="sec-voice" data-group="ability">
           <div class="card-title"><svg class="ic"><use href="#i-mic"/></svg>语音发送
             <span class="title-hint">接收语音需在电脑版微信 设置 → 通用 开启「语音自动转文字」，小漓才能读到语音内容</span></div>
           <div class="feat-row slim">
@@ -671,7 +692,7 @@
         </div>
 
         <!-- 按聊天覆盖 -->
-        <div class="glass sec-card" id="sec-override">
+        <div class="glass sec-card" id="sec-override" data-group="look">
           <div class="card-title"><svg class="ic"><use href="#i-layers"/></svg>按聊天覆盖
             <span class="title-hint">为单个聊天开/关某功能，未设置的跟随全局</span></div>
           <div class="form-grid voice-profile-row">
@@ -696,7 +717,7 @@
         </div>
 
         <!-- 定时与监视 -->
-        <div class="glass sec-card" id="sec-remind">
+        <div class="glass sec-card" id="sec-remind" data-group="auto">
           <div class="card-title"><svg class="ic"><use href="#i-clock"/></svg>定时消息与状态监视</div>
           <div class="feat-row slim">
             <div class="feat-text"><b>启用状态监视</b><small>轮询固定网页本地关键词判定，达成 / 到期统一回递由 AI 按人设回复（有额外 API 成本）</small></div>
@@ -712,7 +733,7 @@
         </div>
 
         <!-- 对话行为与跨聊天记忆 -->
-        <div class="glass sec-card" id="sec-behavior">
+        <div class="glass sec-card" id="sec-behavior" data-group="chat">
           <div class="card-title"><svg class="ic"><use href="#i-brain"/></svg>对话行为与跨聊天记忆</div>
           <div class="feat-row slim">
             <div class="feat-text"><b>智能静默</b><small>让 AI 自己决定要不要回某条消息——对方自言自语、无需接话时保持沉默（静默也会标记已读、不漏处理）；拿不准时它仍会回复</small></div>
@@ -729,6 +750,19 @@
           <div class="feat-row slim">
             <div class="feat-text"><b>小漓状态层</b><small>让小漓随时段/聊天热度/近期情绪自然起伏（深夜犯困、聊得投入兴奋）。时段与热度本地计算；情绪由每次回复后的一次小调用定量（每聊天 5 分钟一次，有少量额外成本）</small></div>
             <label class="switch"><input type="checkbox" id="cbPersonaState"><span class="track"></span></label>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>工具化回复</b><small>模型要发消息必须调用发送工具（文字用 send_message、语音用 send_voice、表情/图片/文件用对应工具）——直接输出的文字不会发送。关闭则回到旧版「文本即发送」，适合弱工具模型或排障</small>
+              <div class="form-btns" style="margin-top:8px">
+                <div class="seg" id="toolReplySeg">
+                  <button data-v="strict">严格（推荐）</button><button data-v="compat">兼容（文本即发送）</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="feat-row slim">
+            <div class="feat-text"><b>未调工具时纠正一次</b><small>严格模式下模型只输出文字、没调发送工具时，再提示一次「必须调用 send_message」重试；关闭则直接丢弃本轮（省一次调用，但弱模型可能漏回）</small></div>
+            <label class="switch"><input type="checkbox" id="cbToolRetry"><span class="track"></span></label>
           </div>
           <div class="feat-row slim">
             <div class="feat-text"><b>媒体消息等待</b><small>对方发图片/文件后等一等跟发的文字，防拆散。「固定等待」简单可靠；「智能静默」纯像素检测对方是否还在连发（说完了立即继续，通常更快）</small>
@@ -756,7 +790,7 @@
         </div>
 
         <!-- 主动追尾 -->
-        <div class="glass sec-card" id="sec-followup">
+        <div class="glass sec-card" id="sec-followup" data-group="auto">
           <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>主动追尾
             <span class="title-hint">回完话偶尔回想起来补一句——系统到点问模型「要不要补」，不靠模型自觉</span></div>
           <div class="feat-row slim">
@@ -776,7 +810,7 @@
         </div>
 
         <!-- 群聊接收模式（三态，默认仅 @） -->
-        <div class="glass sec-card" id="sec-groupmode">
+        <div class="glass sec-card" id="sec-groupmode" data-group="auto">
           <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>群聊接收模式
             <span class="title-hint">只影响群聊；私聊始终照常回复</span></div>
           <div class="feat-row slim">
@@ -788,7 +822,7 @@
         </div>
 
         <!-- 主动发起对话（默认关） -->
-        <div class="glass sec-card" id="sec-proactive">
+        <div class="glass sec-card" id="sec-proactive" data-group="auto">
           <div class="card-title"><svg class="ic"><use href="#i-send"/></svg>主动发起对话
             <span class="title-hint">冷场一段时间后，由模型决定要不要主动找你说句话</span></div>
           <div class="feat-row slim">
@@ -820,7 +854,7 @@
         </div>
 
         <!-- 回复节奏 -->
-        <div class="glass sec-card" id="sec-pace">
+        <div class="glass sec-card" id="sec-pace" data-group="chat">
           <div class="card-title"><svg class="ic"><use href="#i-clock"/></svg>回复节奏</div>
           <div class="feat-row slim">
             <div class="feat-text"><b>段间等待</b><small>多段回复时，下一段粘贴后停留固定秒数再发送（对方端看到「对方正在输入…」）</small></div>
@@ -840,7 +874,7 @@
         </div>
 
         <!-- 表情包 -->
-        <div class="glass sec-card" id="sec-sticker">
+        <div class="glass sec-card" id="sec-sticker" data-group="ability">
           <div class="card-title"><svg class="ic"><use href="#i-image"/></svg>表情包</div>
           <div class="feat-row slim">
             <div class="feat-text"><b>发送模式</b><small>AI 可以只回一张表情包，也可以表情包+文字一起回；「清单注入」每次请求带上全部表情包目录（库小更省事），「按需查询」AI 想发时自己选：搜关键词拿相关候选，或直接拿完整清单慢慢挑（库大更省 token）</small></div>
@@ -862,7 +896,7 @@
         </div>
 
         <!-- 图片与文件发送（默认关） -->
-        <div class="glass sec-card" id="sec-mediasend">
+        <div class="glass sec-card" id="sec-mediasend" data-group="ability">
           <div class="card-title"><svg class="ic"><use href="#i-image"/></svg>图片与文件发送
             <span class="title-hint">AI 获得发图/发文件两个工具；关闭 = 工具不声明，AI 看不到这个能力</span></div>
           <div class="feat-row slim">
@@ -877,7 +911,7 @@
         </div>
 
         <!-- 远程面板（默认关） -->
-        <div class="glass sec-card" id="sec-remote">
+        <div class="glass sec-card" id="sec-remote" data-group="system">
           <div class="card-title"><svg class="ic"><use href="#i-ext"/></svg>远程面板
             <span class="title-hint">手机/平板浏览器打开访问地址：看状态、日志、用量、触发器，暂停/恢复回复</span></div>
           <div class="feat-row slim">
@@ -898,7 +932,10 @@
           </div>
         </div>
 
-        <!-- 回到顶部（设置页滚动越过导航后出现，见 app.js 滚动监听） -->
+          </div><!-- /settings-body -->
+        </div><!-- /settings-shell -->
+
+        <!-- 回到顶部（设置页滚动过长时出现，见 app.js 滚动监听） -->
         <button class="backtop" id="btnBackTop" hidden title="回到顶部">
           <svg class="ic"><use href="#i-upload"/></svg>
         </button>

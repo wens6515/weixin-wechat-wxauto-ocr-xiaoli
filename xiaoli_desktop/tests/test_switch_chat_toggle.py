@@ -106,6 +106,33 @@ class TestSwitchChatToggleGuard(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(clicks, 1, "内存状态也非目标时应点击切换")
 
+    def test_click_lands_other_chat_returns_false(self):
+        """点击后标题是别的会话（定位误命中）→ 不认这次切换、不污染状态。
+
+        真机缺陷：列表区按群聊预览行误命中，点进「某群聊」；旧实现点完
+        无条件 `_current_chat = chat`，随后标题读不到的兜底分支会据此误判
+        「已在目标会话」，反而跳过应有的切换。
+        """
+        b = make_backend([OTHER_TITLE, OTHER_TITLE], highlight=False,
+                         current="联系人戊")
+        ok, clicks = self._click_count(b)
+        self.assertFalse(ok, "落点不符必须返回 False，交上层 fail-closed")
+        self.assertEqual(clicks, 1)
+        self.assertEqual(b._current_chat, "联系人戊",
+                         "落点不符时不得把目标写进 _current_chat")
+
+    def test_click_title_unreadable_keeps_trust(self):
+        """点击后标题读不到（遮挡/空）→ 保持旧语义：信任本次点击并更新状态。
+
+        置前标题复验在上层（_ensure_chat_active），那一步读不到同样不发；
+        这里若改判失败，窗口被遮挡时正常读取链路会被误伤。
+        """
+        b = make_backend([None, None], highlight=False, current="联系人戊")
+        ok, clicks = self._click_count(b)
+        self.assertTrue(ok)
+        self.assertEqual(clicks, 1)
+        self.assertEqual(b._current_chat, TARGET)
+
 
 if __name__ == "__main__":
     unittest.main()

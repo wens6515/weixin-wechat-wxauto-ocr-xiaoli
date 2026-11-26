@@ -185,7 +185,7 @@ _ALLOWED_KEYS = {
     "chat_feature_overrides", "first_prompt_path", "bot_nickname",
     "start_paused",
     "no_reply_enabled", "global_memory_enabled", "shared_pool_enabled",
-    "persona_state_enabled",
+    "persona_state_enabled", "tool_reply_mode", "tool_reply_retry",
     "media_wait_mode", "media_wait_seconds", "media_wait_quiet_seconds",
     "followup_enabled", "followup_delay_min", "followup_delay_max",
     "followup_cooldown_minutes", "followup_daily_max", "followup_private_only",
@@ -217,7 +217,7 @@ _BOT_HOT_KEYS = {
     "voice_mode", "tts_endpoint", "voice_max_seconds", "voice_profiles",
     "active_voice_profile_id",
     "no_reply_enabled", "global_memory_enabled", "shared_pool_enabled",
-    "persona_state_enabled",
+    "persona_state_enabled", "tool_reply_mode", "tool_reply_retry",
     "media_wait_mode", "media_wait_seconds", "media_wait_quiet_seconds",
     "followup_enabled", "followup_delay_min", "followup_delay_max",
     "followup_cooldown_minutes", "followup_daily_max", "followup_private_only",
@@ -632,11 +632,14 @@ class BridgeApi:
 
     @_safe
     def persona_state_overview(self) -> dict:
-        """状态页数据：状态层开关 + 当前时段 + 各聊天最新状态快照。
+        """状态页数据：状态层开关 + 当前时段 + 各聊天状态卡（含趋势）。
 
         存储键是 memory_key 归一化名——能从记忆总览映射回原始聊天名的
-        （用户在微信里看到的名字）就映射，映射不到的显示归一化键。"""
-        from .persona_state import PersonaStateStore, period_label
+        （用户在微信里看到的名字）就映射，映射不到的显示归一化键。
+        energy 返回**衰减后的有效值**（与注入口径一致），energy_raw 是
+        上次定量的原始值；history 为最近状态变化（页面画趋势）。"""
+        from .persona_state import (PersonaStateStore, effective_energy,
+                                    period_label)
         cfg = self.ctx.cfg
         enabled = bool(cfg.get("persona_state_enabled", False))
         mf = str(cfg.get("memory_file") or "memory.json")
@@ -650,12 +653,27 @@ class BridgeApi:
                 names[memory_key(chat)] = chat
         except Exception:
             pass
+        bot = getattr(self.ctx.engine, "bot", None)
         rows = []
         for k, st in store.snapshot().items():
+            chat = names.get(k, k)
+            today = 0
+            if bot is not None:
+                try:
+                    today = int(bot._today_msg_count(chat) or 0)
+                except Exception:
+                    today = 0
+            hist = st.get("history")
+            hist = [h for h in hist if isinstance(h, dict)][-10:] \
+                if isinstance(hist, list) else []
             rows.append({
-                "chat": names.get(k, k),
+                "chat": chat,
                 "mood": str(st.get("mood") or "").strip() or None,
-                "energy": st.get("energy"),
+                "energy": effective_energy(st),
+                "energy_raw": st.get("energy"),
+                "trigger": str(st.get("trigger") or "").strip() or None,
+                "today": today,
+                "history": hist,
                 "ts": st.get("ts"),
             })
         rows.sort(key=lambda r: -(r.get("ts") or 0))
@@ -712,6 +730,8 @@ class BridgeApi:
             "global_memory_enabled": bool(cfg.get("global_memory_enabled", False)),
             "shared_pool_enabled": bool(cfg.get("shared_pool_enabled", False)),
             "persona_state_enabled": bool(cfg.get("persona_state_enabled", False)),
+            "tool_reply_mode": cfg.get("tool_reply_mode", "compat"),
+            "tool_reply_retry": bool(cfg.get("tool_reply_retry", True)),
             "media_wait_mode": cfg.get("media_wait_mode", "fixed"),
             "media_wait_seconds": cfg.get("media_wait_seconds", 10),
             "media_wait_quiet_seconds": cfg.get("media_wait_quiet_seconds", 5),

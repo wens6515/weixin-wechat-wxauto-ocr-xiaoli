@@ -25,40 +25,57 @@ logger = logging.getLogger("xiaoli")
 FRESH_SECONDS = 6 * 3600
 # 每聊天两次定量评估的最小间隔（秒）——每条回复都评估会让调用量翻倍
 EVAL_THROTTLE_SECONDS = 300
+# 精力本地衰减：距上次定量每 30 分钟 -4，下限 20——不让「昨天的心情/精力」
+# 原样挂满 6 小时（衰减纯本地，零 API 成本）
+ENERGY_DECAY_PER_30MIN = 4
+ENERGY_FLOOR = 20
+
+# mood 固定枚举（用户定案）：页面能按情绪上色、能做趋势统计；自由长句
+# （「有点小失落但保持温柔」）不适合当状态值，也难以映射到具体语气。
+MOOD_LABELS = (
+    "开心", "平静", "聊得起劲", "被逗笑", "有点累",
+    "有点委屈", "有点担心", "想撒娇", "有点敷衍", "心虚",
+)
 
 PERSONA_EVAL_PROMPT = (
     "你在追踪微信 AI 角色「小漓」此刻的情绪状态。下面是她与一位联系人的"
     "最近对话（含她刚发出的回复）。结合对话内容，定量她当前的情绪与精力"
     "（被夸了会开心、聊得投入会兴奋、对方冷淡会有点失落、深夜或长聊会累）。"
+    "mood 只能从这些词里选一个：" + "、".join(MOOD_LABELS) + "。"
+    "trigger 用一句话写这次情绪的触发点（如「对方刚夸了她」"
+    "「聊到一半对方没回了」），没有就留空字符串。"
     "只输出一个 JSON 对象，不要输出任何其他文字：\n"
-    '{"mood": "一个词或短语，如 开心/有点委屈/平静/聊得起劲/有点累", '
-    '"energy": 0到100的整数（精力值）}'
+    '{"mood": "开心", "energy": 0到100的整数, "trigger": "一句话或空字符串"}'
 )
 
 
 def parse_state_json(raw):
-    """解析定量输出。任何异常返回 (None, None)——保留旧状态，不中断主流程。"""
+    """解析定量输出 → (mood, energy, trigger)。任何异常返回 (None, None, "")。
+
+    保留旧状态、不中断主流程；mood 不在枚举里也接受（旧数据/模型偶发
+    用词不该让整次定量作废），页面按未知色显示。"""
     import re
     if not raw:
-        return None, None
+        return None, None, ""
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.S)
     m = re.search(r"\{.*\}", text, flags=re.S)
     if not m:
-        return None, None
+        return None, None, ""
     try:
         data = json.loads(m.group(0))
     except ValueError:
-        return None, None
+        return None, None, ""
     if not isinstance(data, dict):
-        return None, None
+        return None, None, ""
     mood = str(data.get("mood") or "").strip() or None
+    trigger = str(data.get("trigger") or "").strip()
     try:
         energy = int(data["energy"])
         if not 0 <= energy <= 100:
             energy = None
     except (KeyError, TypeError, ValueError):
         energy = None
-    return mood, energy
+    return mood, energy, trigger
 
 
 class PersonaStateStore:
@@ -90,14 +107,20 @@ class PersonaStateStore:
             return None
         return st
 
-    def set(self, chat, mood, energy):
+    def set(self, chat, mood, energy, trigger=""):
         key = memory_key(chat)
         if not key:
             return
         with self.lock:
             data = self._load()
+            old = data.get(key) if isinstance(data.get(key), dict) else {}
+            hist = old.get("history")
+            hist = list(hist) if isinstance(hist, list) else []
+            ts = time.time()
+            hist.append({"ts": ts, "mood": mood, "energy": energy})
             data[key] = {"mood": mood, "energy": energy,
-                         "ts": time.time()}
+                         "trigger": str(trigger or "").strip(),
+                         "ts": ts, "history": hist[-30:]}
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -145,43 +168,109 @@ def period_label(now=None):
     return "深夜"
 
 
-def build_state_block(bot, chat_id):
-    """组装注入正文（时段 + 热度 + 新鲜的模型定量）。返回 str（调用方注入）。
+def effective_energy(st, now=None):
+    """状态里的精力 → 当前有效精力（本地每 30 分钟 -4，下限 20）。
 
-    只读 bot 数据不加锁重活：热度走 _get_history（内部有锁），定量走 store
-    锁。任何异常由调用方兜底（注入失败不影响回复）。"""
+    纯本地衰减：定量调用 5 分钟才一次，用户看到的「精力」必须跟时间一起
+    走，否则昨天 90 的精力会原样挂满 6 小时新鲜度窗口。"""
+    try:
+        base = int(st.get("energy"))
+    except (TypeError, ValueError):
+        return None
+    base = max(0, min(100, base))
+    try:
+        ts = float(st.get("ts") or 0)
+    except (TypeError, ValueError):
+        ts = 0.0
+    mins = max(0.0, ((time.time() if now is None else now) - ts) / 60.0)
+    return max(ENERGY_FLOOR, base - int(mins // 30) * ENERGY_DECAY_PER_30MIN)
+
+
+def _heat_tier(n):
+    if n >= 60:
+        return "聊得很热络"
+    if n >= 20:
+        return "聊得挺多"
+    if n > 0:
+        return "聊了几句"
+    return "还没怎么聊"
+
+
+def _behavior_hint(mood, energy):
+    """状态 → 本轮可执行的行为约束（祈使句比形容词有效）。
+
+    只调语气/主动性，明确不覆盖回复纪律（条数与长度纪律仍在 system 前缀里）。
+    """
+    if energy is not None and energy <= 30:
+        return "这轮回得更短，少用颜文字；不主动开新话题，对方说完就收住。"
+    if energy is not None and energy < 50:
+        return "这轮别铺开：句子短一点，不主动追问。"
+    if mood in ("有点委屈", "有点担心"):
+        return "这轮语气软一点，先说自己这边的感受；不追问。"
+    if mood == "想撒娇":
+        return "这轮可以带一点撒娇的语气，但别叠太多颜文字。"
+    if mood in ("聊得起劲", "被逗笑", "开心"):
+        return "这轮可以活泼一点，但别超过两条。"
+    return "这轮按平时语气，自然就好。"
+
+
+def build_state_block(bot, chat_id):
+    """组装注入正文：时段 + 真实当日热度 + 情绪/精力/诱因 + 行为约束。
+
+    变化注入（A3）：状态签名（时段/热度档/心情/精力十位/诱因）与上次相同
+    时只注入一行短标记——重复的长描述会被模型当模板文字忽略，变化本身才
+    是信息。任何异常由调用方兜底（注入失败不影响回复）。"""
     today = time.strftime("%Y-%m-%d")
     n = 0
     try:
-        for m in bot._get_history(chat_id):
-            if str(m.get("time") or "").startswith(today):
-                n += 1
+        fn = getattr(bot, "_today_msg_count", None)
+        n = int(fn(chat_id) or 0) if fn is not None else 0
     except Exception:
-        pass
-    parts = [_period_label(time.localtime().tm_hour)]
-    if n >= 20:
-        parts.append(f"今天你们已经聊了 {n} 条，聊得很热络")
-    elif n > 0:
-        parts.append(f"今天聊了 {n} 条")
-    else:
-        parts.append("今天还没怎么聊")
+        n = 0
+    if not n:
+        # 桩/旧 bot 没有计数器：回落到近期窗口计数（会封顶，但比重启归零好）
+        try:
+            for m in bot._get_history(chat_id):
+                if str(m.get("time") or "").startswith(today):
+                    n += 1
+        except Exception:
+            pass
+    tier = _heat_tier(n)
+    parts = [f"{period_label()} {time.strftime('%H:%M')}"]
+    parts.append(f"今天聊了 {n} 条（{tier}）" if n else "今天还没怎么聊")
     st = None
+    mood = None
+    energy = None
+    trigger = ""
     try:
         st = _store(bot).get(chat_id)
     except Exception:
         pass
-    if isinstance(st, dict) and time.time() - float(st.get("ts") or 0) < FRESH_SECONDS:
-        mood = str(st.get("mood") or "").strip()
-        try:
-            energy = int(st.get("energy"))
-        except (TypeError, ValueError):
-            energy = None
+    if isinstance(st, dict) \
+            and time.time() - float(st.get("ts") or 0) < FRESH_SECONDS:
+        mood = str(st.get("mood") or "").strip() or None
+        energy = effective_energy(st)
+        trigger = str(st.get("trigger") or "").strip()
         if mood:
-            parts.append(f"你现在的心情：{mood}")
-        if energy is not None and energy < 40:
-            parts.append("精力有点跟不上了")
-    return ("[小漓此刻的状态·背景感受，不要主动说出这些状态，"
-            "只在语气自然的时候让它流露出来]\n" + "；".join(parts) + "。")
+            parts.append(f"心情：{mood}")
+        if energy is not None:
+            parts.append(f"精力 {energy}/100")
+        if trigger:
+            parts.append(f"起因：{trigger}")
+    sig = (period_label(), tier, mood,
+           None if energy is None else energy // 10, trigger)
+    last = getattr(bot, "_persona_last_sig", None)
+    if not isinstance(last, dict):
+        last = bot._persona_last_sig = {}
+    prev = last.get(chat_id)
+    last[chat_id] = sig
+    if prev == sig:
+        # 状态没变：短标记足矣（避免同一段长描述每轮重复被忽略）
+        return (f"[状态 {period_label()}·{mood or '—'}·"
+                f"精力{energy if energy is not None else '—'}]")
+    return ("[小漓此刻的状态｜只调语气，不改变事实与人设，"
+            "也不覆盖回复纪律]\n"
+            + "；".join(parts) + "。\n→ " + _behavior_hint(mood, energy))
 
 
 def schedule_eval(bot, chat_id, reply_text):
@@ -225,12 +314,13 @@ def schedule_eval(bot, chat_id, reply_text):
         except Exception as e:
             logger.debug(f"[状态层] 定量调用失败（保留旧状态）: {e}")
             return
-        mood, energy = parse_state_json(raw)
+        mood, energy, trigger = parse_state_json(raw)
         if mood is None and energy is None:
             return
         try:
-            _store(bot).set(chat_id, mood, energy)
-            logger.info(f"[状态层] {chat_id!r} mood={mood!r} energy={energy}")
+            _store(bot).set(chat_id, mood, energy, trigger)
+            logger.info(f"[状态层] {chat_id!r} mood={mood!r} energy={energy} "
+                        f"trigger={trigger!r}")
         except Exception as e:
             logger.debug(f"[状态层] 状态落盘失败: {e}")
 

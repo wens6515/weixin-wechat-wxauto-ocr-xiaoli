@@ -533,21 +533,79 @@ code { font-family: Consolas, monospace; }
 .model-table tr:last-child td { border-bottom: none; }
 .model-table td:first-child { font-weight: 600; }
 
-/* ================= 设置页 ================= */
-.anchor-row { display: flex; gap: 9px; margin-bottom: 16px; flex-wrap: wrap; }
-.anchor {
-  padding: 7px 16px; border-radius: 999px; font-size: 12.8px;
-  color: var(--muted); border: 1px solid var(--border);
-  background: color-mix(in srgb, var(--card-solid) 40%, transparent);
-  transition: all .18s;
+/* ================= 设置页 =================
+   左侧分组目录 + 右侧单组内容：17 个卡片按 data-group 分 5 组，只显示
+   当前组（搜索时跨组过滤）；宽屏组内两列、窄屏回落单列——不再是一条
+   17 张卡的长页面。 */
+.settings-shell { display: flex; gap: 18px; align-items: flex-start; }
+.settings-nav {
+  position: sticky; top: 0; z-index: 5; flex: 0 0 158px;
+  display: flex; flex-direction: column; gap: 12px;
+  padding: 2px 0 10px;
+  /* 吸顶目录要挡住下方滚过的卡片，用主题底色做渐变收口 */
+  background: linear-gradient(to bottom,
+    color-mix(in srgb, var(--bg) 94%, transparent) 0 84%,
+    transparent 100%);
 }
-.anchor:hover { color: var(--text); }
-.anchor.active {
+.settings-search {
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 10px; border-radius: 11px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-solid) 45%, transparent);
+}
+.settings-search .ic { width: 14px; height: 14px; color: var(--muted); flex: none; }
+.settings-search input {
+  width: 100%; min-width: 0; border: none; outline: none; background: none;
+  color: var(--text); font: inherit; font-size: 12.8px;
+}
+.settings-search input::placeholder { color: var(--muted); }
+.settings-groups { display: flex; flex-direction: column; gap: 5px; }
+.settings-group {
+  text-align: left; padding: 9px 12px; border-radius: 11px;
+  font-size: 13px; color: var(--muted); border: 1px solid transparent;
+  background: transparent; transition: all .18s;
+}
+.settings-group:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--card-solid) 45%, transparent);
+}
+.settings-group.active {
   color: #fff; border-color: transparent;
   background: linear-gradient(135deg, var(--p1), var(--p2));
   box-shadow: 0 4px 14px color-mix(in srgb, var(--p1) 38%, transparent);
 }
+.settings-search-info { font-size: 12px; line-height: 1.7; color: var(--muted); padding: 0 2px; }
+.settings-body {
+  flex: 1; min-width: 0;
+  /* 多列瀑布流：卡片高矮不一，用 columns 让短卡往下补，避免 grid 行
+     对齐在短卡下方留一大片空白（设置页卡片高度差最大到 3 倍）。 */
+  columns: 2; column-gap: 15px;
+}
+.settings-body .sec-card {
+  margin-bottom: 15px;
+  break-inside: avoid;      /* 一张卡不跨列拆开 */
+}
+/* 两列变窄后卡片标题里的说明文字会挤压标题（真机：'外观主题与壁纸'
+   被挤成两行）——允许换行，说明文字不够放时整段落到下一行。 */
+.settings-body .card-title { flex-wrap: wrap; }
+.settings-body .sec-card[hidden] { display: none !important; }
 .sec-card { padding: 20px 22px; margin-bottom: 15px; }
+
+@media (max-width: 1180px) {
+  .settings-body { columns: 1; }
+}
+@media (max-width: 900px) {
+  .settings-shell { flex-direction: column; gap: 12px; }
+  .settings-nav {
+    position: static; flex: none; flex-direction: row; flex-wrap: wrap;
+    align-items: center; width: 100%; gap: 8px;
+    background: none; padding: 0;
+  }
+  .settings-search { flex: 1 1 180px; }
+  .settings-groups { flex-direction: row; flex-wrap: wrap; gap: 6px; }
+  .settings-group { padding: 7px 12px; }
+  .settings-search-info { flex-basis: 100%; }
+}
 
 /* 主题缩略图 */
 .theme-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 11px; margin-top: 15px; }
@@ -1305,6 +1363,61 @@ html[data-fs="large"] .content.home-fit .mascot-card .mascot-img { width: 200px;
   font: inherit; font-size: 13px; line-height: 1.5;
 }
 
-/* 状态页：精力条列（右对齐定宽） */
-.persona-energy { width: 200px; flex: none; text-align: right; }
-.persona-energy .trig-bar { height: 8px; }
+/* ================= 状态页 ================= */
+.persona-overview {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px; margin-bottom: 15px;
+}
+.persona-kpi { padding: 16px 18px; display: flex; flex-direction: column; gap: 7px; }
+.persona-kpi small { font-size: 12px; color: var(--muted); }
+.persona-kpi b { font-size: 26px; letter-spacing: 1px; }
+.persona-sub { font-size: 11.5px; color: var(--muted); }
+.persona-bar {
+  height: 6px; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+}
+.persona-bar span {
+  display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--p1), var(--p2));
+  transition: width .4s;
+}
+.persona-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px; margin-top: 14px;
+}
+.persona-card {
+  padding: 14px 15px; border-radius: calc(var(--r-card) - 6px);
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card-solid) 35%, transparent);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.persona-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.persona-head b { font-size: 14px; }
+.persona-head span { font-size: 11.5px; color: var(--muted); }
+.persona-mood { display: flex; align-items: center; gap: 8px; }
+.mood-pill {
+  padding: 3px 11px; border-radius: 999px; font-size: 12px;
+  border: 1px solid transparent;
+}
+.mood-warm .mood-pill { color: #E8A93A; background: rgba(232, 169, 58, .14); border-color: rgba(232, 169, 58, .35); }
+.mood-calm .mood-pill { color: #4FB3FF; background: rgba(79, 179, 255, .14); border-color: rgba(79, 179, 255, .35); }
+.mood-low .mood-pill { color: #7F9CF5; background: rgba(127, 156, 245, .14); border-color: rgba(127, 156, 245, .35); }
+.mood-tired .mood-pill { color: #B08BD9; background: rgba(176, 139, 217, .14); border-color: rgba(176, 139, 217, .35); }
+.mood-cool .mood-pill { color: #9AA7B8; background: rgba(154, 167, 184, .14); border-color: rgba(154, 167, 184, .35); }
+.persona-today { font-size: 11.5px; color: var(--muted); }
+.persona-trigger { font-size: 12px; line-height: 1.5; color: var(--muted); }
+.persona-energy { display: flex; align-items: center; gap: 10px; }
+.persona-energy .trig-bar { flex: 1; height: 7px; }
+.persona-energy small { flex: none; font-size: 12px; color: var(--muted); }
+.persona-spark { width: 100%; height: 26px; }
+.persona-spark polyline {
+  fill: none; stroke: var(--p1); stroke-width: 1.6;
+  stroke-linejoin: round; stroke-linecap: round; opacity: .85;
+}
+.persona-help p { margin: 10px 0 0; font-size: 12.8px; line-height: 1.8; color: var(--muted); }
+.persona-help b { color: var(--text); }
+
+@media (max-width: 900px) {
+  .persona-overview { grid-template-columns: 1fr; }
+  .persona-grid { grid-template-columns: 1fr; }
+}
