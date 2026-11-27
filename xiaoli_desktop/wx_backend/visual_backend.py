@@ -155,7 +155,7 @@ def _get_ocr_engine():
 
 
 def _norm_cjk(text: str) -> str:
-    """清理 OCR 输出：中文单字间被 OCR 插入的空格去掉（'林 小 满'→'联系人丁'），
+    """清理 OCR 输出：中文单字间被 OCR 插入的空格去掉（'联 系 人 丁'→'联系人丁'），
     保留英文/数字内部空格（'20:14' 不受影响）。"""
     if not text:
         return text

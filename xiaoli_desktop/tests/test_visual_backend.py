@@ -62,7 +62,7 @@ def _solid(size, color):
 
 class TestNormCjk(unittest.TestCase):
     def test_removes_space_between_cjk(self):
-        self.assertEqual(_norm_cjk("林 小 满"), "联系人丁")
+        self.assertEqual(_norm_cjk("联 系 人 丁"), "联系人丁")
 
     def test_keeps_time_separator(self):
         self.assertEqual(_norm_cjk("20:14"), "20:14")
