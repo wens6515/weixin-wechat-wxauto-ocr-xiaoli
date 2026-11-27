@@ -48,7 +48,7 @@ class TestPreviewLineIsNotCandidate(_ResolveBase):
             _row("[图片]", 45, h=16),
             _row("联系人丙", 120),
             _row("阿姨吃饱啦，圆圆的肚子才可…", 152, h=16, w=200),
-            _row("“某群” 集团", 230, h=20, w=100),
+            _row("某群聊", 230, h=20, w=100),
             _row("联系人甲：yes, is me", 264, h=16, w=180),
             _row("联系人甲", 340),
             _row("唔......好像也是，我确实一直…", 374, h=16, w=200),
@@ -61,7 +61,7 @@ class TestPreviewLineIsNotCandidate(_ResolveBase):
     def test_only_preview_line_matching_target_returns_none(self):
         """列表里只有群标题 + 以目标名开头的预览行 → 找不到（不点）。"""
         blocks = [
-            _row("“某群” 集团", 230, h=20, w=100),
+            _row("某群聊", 230, h=20, w=100),
             _row("联系人甲：yes, is me", 264, h=16, w=180),
         ]
         self.assertIsNone(self._coord(blocks, "联系人甲"))
@@ -128,14 +128,14 @@ class TestClusteringSingleSource(unittest.TestCase):
     def test_extract_session_names_and_resolve_share_rows(self):
         """整表提名与按名定位共用聚类口径：预览行都不进候选。"""
         blocks = [
-            _row("“某群” 集团", 230, h=20, w=100),
+            _row("某群聊", 230, h=20, w=100),
             _row("联系人甲：yes, is me", 264, h=16, w=180),
             _row("联系人甲", 340),
         ]
         b = VisualBackend()
         rows = b._list_title_rows(blocks)
         names = [r[0] for r in rows]
-        self.assertIn("“某群” 集团", names)
+        self.assertIn("某群聊", names)
         self.assertIn("联系人甲", names)
         self.assertNotIn("联系人甲：yes, is me", names)
 
